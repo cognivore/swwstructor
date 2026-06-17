@@ -1,0 +1,106 @@
+cabal-version:      3.0
+name:               swwstructor
+version:            0.1.0.0
+synopsis:           A single-tenant website constructor on the stickywebwm layout engine.
+description:
+  swwstructor is a website constructor: owners author content (sections) and a
+  theme as data, enable plugins (Stripe checkout, Shopify catalogue), and the
+  engine places everything algorithmically. It is built ON TOP of stickywebwm
+  (the layout/sticky engine + proofs) and never reimplements layout. Final
+  tagless throughout: a content DSL (BlockSym) and the layout DSL (LayoutSym,
+  from the engine), each with multiple interpreters; effect capabilities
+  (MonadCheckout) with mock + real interpreters; strong newtypes — no bare
+  String/Int/Text. The pure library has base+containers+text only, so its
+  acceptance tests (including the New York Times front-page benchmark) run
+  offline. The server adds scotty + an AES-256-GCM secret store so Stripe keys
+  are entered through the admin WebUI and encrypted at rest — never in logs, the
+  Nix store, git, or the JS bundle.
+license:            MIT
+author:             swwstructor
+maintainer:         jm@memorici.de
+build-type:         Simple
+extra-source-files: README.md
+
+common warnings
+  ghc-options:
+    -Wall -Wcompat -Wincomplete-record-updates
+    -Wincomplete-uni-patterns -Wredundant-constraints
+
+-- The PURE constructor core. Depends only on base + containers + text +
+-- bytestring + mtl (all GHC boot libraries) and the stickywebwm engine, so it
+-- builds and tests offline with the dev-shell GHC (no Hackage round-trip).
+library
+  import:           warnings
+  hs-source-dirs:   src
+  default-language: GHC2021
+  build-depends:
+      base        >=4.17 && <5
+    , bytestring
+    , containers
+    , mtl
+    , stickywebwm
+    , text
+  exposed-modules:
+    Swwstructor.Html
+    Swwstructor.Money
+    Swwstructor.Block
+    Swwstructor.Theme
+    Swwstructor.Content
+    Swwstructor.Edit
+    Swwstructor.Templates
+    Swwstructor.Site
+    Swwstructor.Checkout
+    Swwstructor.Plugins.Shopify
+    Swwstructor.Plugins.Stripe
+    Swwstructor.Adapter.UAL
+
+-- The server: SSR host (scotty), content loading (JSON + YAML), the admin WebUI
+-- for entering Stripe secrets, the AES-256-GCM secret store, and the live Stripe
+-- Checkout interpreter. Built via Nix (it pulls non-boot deps).
+executable swwstructor-server
+  import:           warnings
+  hs-source-dirs:   app
+  main-is:          Main.hs
+  default-language: GHC2021
+  other-modules:
+    Swwstructor.Server.SecretStore
+    Swwstructor.Server.Stripe
+    Swwstructor.Server.Loader
+    Swwstructor.Server.Store
+    Swwstructor.Server.Admin
+    Swwstructor.Server.App
+  build-depends:
+      base
+    , HsYAML
+    , bytestring
+    , containers
+    , crypton
+    , directory
+    , filepath
+    , http-client
+    , http-client-tls
+    , http-types
+    , memory
+    , mtl
+    , scotty
+    , stickywebwm
+    , swwstructor
+    , text
+    , wai-extra
+    , warp
+
+-- The acceptance tests, including the NYT-style front-page benchmark. Pure
+-- (base + containers + text + the engine + this library), hand-rolled harness,
+-- so `runghc`/`ghc` runs it offline exactly like the engine's own test-suite.
+test-suite swwstructor-test
+  import:           warnings
+  type:             exitcode-stdio-1.0
+  hs-source-dirs:   test
+  main-is:          Spec.hs
+  default-language: GHC2021
+  build-depends:
+      base
+    , containers
+    , stickywebwm
+    , swwstructor
+    , text

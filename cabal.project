@@ -1,0 +1,10 @@
+-- swwstructor depends on the stickywebwm engine. While neither is published, we
+-- point cabal at the local engine checkout (base+containers only, so it builds
+-- offline against the dev-shell GHC). The Nix build supplies the same source via
+-- a flake input + a checked-in cabal2nix derivation (see nix/).
+packages: .
+
+source-repository-package
+  type: git
+  location: ../stickywebwm
+  tag: HEAD

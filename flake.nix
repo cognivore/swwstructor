@@ -1,0 +1,86 @@
+{
+  description = "swwstructor — a single-tenant website constructor on the stickywebwm layout engine.";
+
+  inputs = {
+    # The engine. git+file so only tracked files are copied (no dist-newstyle /
+    # result bloat). nixpkgs follows the engine's pin so the GHC and the whole
+    # Haskell package set are shared and cached.
+    stickywebwm.url = "git+file:///Users/sweater/Github/stickywebwm";
+    nixpkgs.follows = "stickywebwm/nixpkgs";
+    flake-utils.url = "github:numtide/flake-utils";
+  };
+
+  outputs =
+    { self, nixpkgs, stickywebwm, flake-utils }:
+    let
+      # Build the engine library (checked-in cabal2nix, no IFD) and the
+      # swwstructor server against a given haskellPackages set.
+      mkSww =
+        { haskellPackages, lib }:
+        let
+          engine = haskellPackages.callPackage ./nix/deps/stickywebwm.nix {
+            src = stickywebwm;
+          };
+          swwstructor-server = haskellPackages.callPackage ./nix/swwstructor.nix {
+            stickywebwm = engine;
+            src = lib.cleanSource ./.;
+          };
+        in
+        { inherit swwstructor-server; };
+
+      # The x86_64-linux deploy artifact, evaluable from any host.
+      linuxPkgs = nixpkgs.legacyPackages.x86_64-linux;
+      swwLinux = mkSww {
+        haskellPackages = linuxPkgs.haskellPackages;
+        lib = nixpkgs.lib;
+      };
+    in
+    flake-utils.lib.eachDefaultSystem (
+      system:
+      let
+        pkgs = import nixpkgs { inherit system; };
+        lib = pkgs.lib;
+        swwNative = mkSww { haskellPackages = pkgs.haskellPackages; inherit lib; };
+
+        # A GHC with the library's offline deps (containers) for the dev/test
+        # loop that runs the pure test-suite against the engine source directly.
+        ghc = pkgs.haskellPackages.ghcWithPackages (p: [ p.containers ]);
+      in
+      {
+        packages = {
+          swwstructor-server = swwNative.swwstructor-server;
+          default = swwNative.swwstructor-server;
+          # Exposed on every system so a Darwin host builds the deploy artifact
+          # via a remote x86_64-linux builder: `.#swwstructor-server-x86_64-linux`.
+          swwstructor-server-x86_64-linux = swwLinux.swwstructor-server;
+        };
+
+        apps.default = {
+          type = "app";
+          program = "${swwNative.swwstructor-server}/bin/swwstructor-server";
+        };
+
+        devShells.default = pkgs.mkShell {
+          packages = [
+            ghc
+            pkgs.haskellPackages.cabal-install
+            pkgs.haskellPackages.fourmolu
+            pkgs.nodejs_22
+            pkgs.typescript
+            pkgs.prettier
+            pkgs.rust-script
+            pkgs.age
+            pkgs.just
+            pkgs.awscli2
+            pkgs.openssh
+            pkgs.jq
+          ];
+        };
+      }
+    )
+    // {
+      # MULTI-INSTANCE NixOS module: several single-tenant sites on one box.
+      nixosModules.swwstructor = import ./nix/module.nix self;
+      nixosModules.default = import ./nix/module.nix self;
+    };
+}

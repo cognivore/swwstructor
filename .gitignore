@@ -1,0 +1,12 @@
+dist-newstyle/
+result
+result-*
+.direnv/
+*.hi
+*.o
+ts/node_modules/
+ts/dist/
+.build/
+automation/target/
+*.age.tmp
+secrets.enc

@@ -1,0 +1,48 @@
+# A minimal site authored in YAML — proves the loader's YAML path (HsYAML →
+# the engine's JSON value → the same siteSpecFromJSON codec as JSON sites).
+title: Hello swwstructor
+description: A minimal YAML-authored site.
+theme:
+  name: Default
+  accent: "#0066cc"
+nav:
+  - { label: Home, href: "/" }
+pages:
+  - path: "/"
+    title: Hello — swwstructor
+    sections:
+      - section: masthead
+        title: Hello, world
+        tagline: a site authored entirely in YAML
+      - section: navStrip
+        sticky: true
+        links:
+          - { label: Home, href: "/" }
+          - { label: About, href: "/about" }
+      - section: hero
+        kicker: YAML → layout
+        headline: One content file becomes a responsive, sticky site
+        dek: No per-page code. Edit the YAML, the engine re-homes the columns on a phone.
+        body: >
+          This whole page is a single site.yaml. The masthead, the sticky nav,
+          and this hero were placed by the stickywebwm engine — the owner makes
+          zero layout decisions.
+        cta: { label: Read more, href: "/about" }
+      - section: prose
+        headline: It works
+        body: Loaded from site.yaml, parsed by HsYAML, decoded by the one content codec, and laid out by the engine.
+  - path: "/about"
+    title: About — swwstructor
+    sections:
+      - section: masthead
+        title: About
+      - section: navStrip
+        sticky: true
+        links:
+          - { label: Home, href: "/" }
+          - { label: About, href: "/about" }
+      - section: richColumns
+        title: Two columns that become one on a phone
+        columns:
+          - The left column. Authored as plain text in YAML, sized by character count, reflowed by the engine.
+          - The right column. On a narrow viewport these re-home into a single stack — the algebra's responsiveness, not a media query.
