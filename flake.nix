@@ -2,10 +2,11 @@
   description = "swwstructor — a single-tenant website constructor on the stickywebwm layout engine.";
 
   inputs = {
-    # The engine. git+file so only tracked files are copied (no dist-newstyle /
-    # result bloat). nixpkgs follows the engine's pin so the GHC and the whole
-    # Haskell package set are shared and cached.
-    stickywebwm.url = "git+file:///Users/sweater/Github/stickywebwm";
+    # The engine, pinned to its public GitHub repo (flake.lock locks the exact
+    # rev, so builds are reproducible and the repo is clone-and-build). nixpkgs
+    # follows the engine's pin so the GHC and the whole Haskell package set are
+    # shared and cached.
+    stickywebwm.url = "github:cognivore/stickywebwm";
     nixpkgs.follows = "stickywebwm/nixpkgs";
     flake-utils.url = "github:numtide/flake-utils";
   };

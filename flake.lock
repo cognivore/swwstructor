@@ -70,15 +70,15 @@
       "locked": {
         "lastModified": 1781625926,
         "narHash": "sha256-JTUzmcSq0cv5H1ZRJSsCONJua+wCUQuqF+K0nRjZOLA=",
-        "ref": "refs/heads/main",
+        "owner": "cognivore",
+        "repo": "stickywebwm",
         "rev": "c460b9a34aee503c3be94a642dba889291f1cf14",
-        "revCount": 1,
-        "type": "git",
-        "url": "file:///Users/sweater/Github/stickywebwm"
+        "type": "github"
       },
       "original": {
-        "type": "git",
-        "url": "file:///Users/sweater/Github/stickywebwm"
+        "owner": "cognivore",
+        "repo": "stickywebwm",
+        "type": "github"
       }
     },
     "systems": {
