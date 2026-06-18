@@ -38,10 +38,15 @@ import Web.Scotty (scotty)
 import Swwstructor.Content (siteTitle)
 import Swwstructor.Server.App (AppEnv (..), Stage (Prod, Test), swwApp)
 import Swwstructor.Server.SecretStore
-  ( genAdminPassword
+  ( MasterKey
+  , SecretBundle (sbStripePk, sbStripeSk, sbStripeWebhook)
+  , SecretValue (SecretValue)
+  , genAdminPassword
   , genMasterKey
   , genSessionSeed
+  , loadBundle
   , parseMasterKeyHex
+  , saveBundle
   )
 import Swwstructor.Server.Store (newSiteStore, readSite)
 
@@ -83,6 +88,12 @@ main = do
         p <- genAdminPassword
         putStrLn ("[swwstructor] dev admin password: " <> T.unpack p <> "  (set SWW_ADMIN_PASSWORD to control this)")
         pure p
+
+  -- If Stripe keys are in the environment (e.g. pulled from rageveil by
+  -- `just run`) and the store has none yet, seed the encrypted store with them —
+  -- so a fresh clone with correct rageveil credentials works without manual
+  -- entry. Never clobbers keys already set via the admin WebUI.
+  seedStripeFromEnv secretFile masterKey
 
   -- Open the runtime content store: a writable site.json in the data dir,
   -- seeded once from the deployed template (SWW_SITE_DIR). Admin edits mutate
@@ -150,3 +161,44 @@ readStage = do
     toLowerAscii c
       | c >= 'A' && c <= 'Z' = toEnum (fromEnum c + 32)
       | otherwise = c
+
+-- ---------------------------------------------------------------------------
+-- Stripe-from-environment seeding (the rageveil path)
+-- ---------------------------------------------------------------------------
+
+-- | Seed the encrypted store from @SWW_STRIPE_{PK,SK,WEBHOOK}@ env vars, but
+-- only when a secret key is provided AND the store has none yet (so the admin
+-- WebUI remains the source of truth once used).
+seedStripeFromEnv :: FilePath -> MasterKey -> IO ()
+seedStripeFromEnv file key = do
+  sk <- envSecret "SWW_STRIPE_SK"
+  case sk of
+    Nothing -> pure ()
+    Just _ -> do
+      cur <- loadBundle file key
+      case sbStripeSk cur of
+        Just _ -> pure () -- already configured; never clobber
+        Nothing -> do
+          pk <- envSecret "SWW_STRIPE_PK"
+          wh <- envSecret "SWW_STRIPE_WEBHOOK"
+          r <-
+            saveBundle
+              file
+              key
+              cur
+                { sbStripePk = pk `orKeep` sbStripePk cur
+                , sbStripeSk = sk
+                , sbStripeWebhook = wh `orKeep` sbStripeWebhook cur
+                }
+          case r of
+            Right () -> putStrLn "[swwstructor] seeded Stripe keys from the environment (rageveil)."
+            Left e -> putStrLn ("[swwstructor] WARNING: could not seed Stripe keys: " <> T.unpack e)
+  where
+    orKeep new old = case new of Just _ -> new; Nothing -> old
+
+envSecret :: String -> IO (Maybe SecretValue)
+envSecret name = do
+  mv <- lookupEnv name
+  pure $ case mv of
+    Just s | not (null s) -> Just (SecretValue (T.pack s))
+    _ -> Nothing

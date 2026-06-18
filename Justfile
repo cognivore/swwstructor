@@ -12,6 +12,13 @@
 default:
     @just --list
 
+# ── Run (clone-and-run) ──────────────────────────────────────────────────────
+
+# Run the server locally, sourcing secrets from rageveil. The download-and-run
+# entry point. Optional flags pass through: `just run --port 8080 --site sites/okashi`
+run *ARGS:
+    rust-script automation/run.rs {{ARGS}}
+
 # ── Infra: provision / ship ─────────────────────────────────────────────────
 
 # Extra flags pass through, e.g. `just provision --region eu-west-1 --type t3.medium`.

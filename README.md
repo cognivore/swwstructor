@@ -67,26 +67,45 @@ sites/{nyt,okashi,hello}/   example content (JSON + a YAML site)
 
 ---
 
-## Quick start (dev)
+## Download and run
+
+Two tools needed: **`nix`** (flakes enabled) and **`rageveil`** (the secret store)
+on your `PATH`. Then:
+
+```sh
+git clone git@github.com:cognivore/swwstructor.git && cd swwstructor
+nix run .#run            #  → http://localhost:3000  (admin at /admin)
+```
+
+`nix run .#run` (a thin launcher; engine + everything else is pinned in the flake)
+sources its secrets from **rageveil** and boots the server. Put these in rageveil
+(all optional — anything absent falls back, see below):
+
+| rageveil path | becomes | used for |
+|---|---|---|
+| `swwstructor/master` | `SWW_MASTER_KEY` (64 hex) | the at-rest secret-store key |
+| `swwstructor/admin` | `SWW_ADMIN_PASSWORD` | admin login |
+| `swwstructor/stripe/sk` | `SWW_STRIPE_SK` | Stripe secret key |
+| `swwstructor/stripe/pk` | `SWW_STRIPE_PK` | Stripe publishable key |
+| `swwstructor/stripe/webhook` | `SWW_STRIPE_WEBHOOK` | webhook signing secret |
+
+With those set, it just works — including checkout (the Stripe keys are seeded
+into the encrypted store at boot, never echoed, never written in plaintext). With
+**none** set it still runs: an ephemeral master key + a generated admin password
+(logged once), and you enter Stripe keys via `/admin`. rageveil values are never
+printed — only which variables were found.
+
+Pick a different site or port with env: `SWW_SITE_DIR=sites/okashi PORT=8080 nix
+run .#run` (bundled sites: `nyt`, `okashi`, `hello`). `just run` is the same thing.
+
+## Dev
 
 ```sh
 nix develop                       # ghc, cabal, node/tsc, rust-script, age, just, aws
-
-# the acceptance tests, incl. the NYT benchmark (offline, pure):
-just test                         # → 55/55 PASS
-
-# build + run a site locally:
-nix build .#swwstructor-server
-SWW_SITE_DIR=sites/nyt PORT=3000 ./result/bin/swwstructor-server
-#   open http://localhost:3000          the NYT front
-#   open http://localhost:3000/admin    enter Stripe keys (dev password is logged at boot)
-
-# TypeScript admin/preview client:
+just test                         # acceptance tests incl. the NYT benchmark (offline)
 just ts-check                     # tsc --noEmit + node --test
+nix build .#swwstructor-server    # the server package (runs the test-suite inside)
 ```
-
-Run the okashi storefront instead with `SWW_SITE_DIR=sites/okashi`, or the
-YAML-authored demo with `SWW_SITE_DIR=sites/hello`.
 
 ---
 

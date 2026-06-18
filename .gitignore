@@ -10,6 +10,7 @@ ts/dist/
 automation/target/
 *.age.tmp
 secrets.enc
+.swwstructor-data/
 # deploy/ is a machine-specific flake (local app path, box IP); its lock is
 # regenerated per ship (re-locked to the latest committed swwstructor).
 deploy/flake.lock
