@@ -10,10 +10,9 @@
 module Main (main) where
 
 import qualified Data.Text as T
-import Swwstructor.Block (BuyTarget (BuyTarget), NavLink (NavLink))
+import Swwstructor.Block (NavLink (NavLink))
 import Swwstructor.Content
-import qualified Swwstructor.Money as Money
-import Swwstructor.Theme (nytTheme, okashiTheme)
+import Swwstructor.Theme (nytTheme)
 import StickyWM (encode)
 
 img :: T.Text -> Double -> Double -> ImageRef
@@ -103,69 +102,9 @@ nytSite =
           }
       ]
 
--- ---------------------------------------------------------------------------
--- The okashi storefront (commerce: products + Stripe buy buttons)
--- ---------------------------------------------------------------------------
-
-okashiSite :: SiteSpec
-okashiSite =
-  SiteSpec
-    { siteTitle = "Okashi School"
-    , siteDescription = "Japanese pastry & wagashi classes, taught the slow way."
-    , siteBaseUrl = Just "https://okashi.example"
-    , siteTheme = okashiTheme
-    , siteNav =
-        [ NavLink "Classes" "/#s4-h"
-        , NavLink "About" "/#s5-h"
-        , NavLink "Visit" "/#s6-h"
-        ]
-    , siteFooter = Just "Okashi School \xB7 made with swwstructor"
-    , sitePages = [PageSpec "/" "Okashi School \x2014 Japanese sweets classes" page]
-    , sitePartials = []
-    }
-  where
-    page =
-      [ Masthead "Okashi School" Nothing
-      , NavStrip
-          [ NavLink "Classes" "/#s4-h"
-          , NavLink "About" "/#s5-h"
-          , NavLink "Visit" "/#s6-h"
-          ]
-          True
-      , Ribbon [NavLink "Now booking: summer wagashi season" "/#s4-h"]
-      , Hero
-          HeroContent
-            { heroKicker = Just "Workshops in Kyoto"
-            , heroHeadline = "The quiet craft of Japanese sweets"
-            , heroDek = Just "Small hands-on classes in wagashi and everyday okashi."
-            , heroBody = Just "Okashi School is a working confectionery studio. You make real sweets with your own hands \x2014 seasonal nerikiri, daifuku, dorayaki \x2014 and take them home in a paper box tied with string."
-            , heroImage = Just (img "Seasonal nerikiri on a lacquer tray" 1.5 380)
-            , heroCta = Just (Cta "See the classes" "/#s4-h")
-            }
-      , ProductGrid
-          (Just "Classes")
-          (Just "Book a seat. Every class is three hours and includes tools, ingredients, and tea.")
-          [ Product "Nerikiri Wagashi" "Shape seasonal nerikiri by hand." (Money.price Money.EUR 85) (Just (img "Finished nerikiri" 1.4 220)) (BuyTarget "nerikiri")
-          , Product "Strawberry Daifuku" "Pound mochi and wrap sweet beans." (Money.price Money.EUR 65) (Just (img "Strawberry daifuku" 1.2 220)) (BuyTarget "daifuku")
-          , Product "Dorayaki & Anko" "Griddle pancakes and simmer anko." (Money.price Money.EUR 70) (Just (img "Dorayaki" 1.5 220)) (BuyTarget "dorayaki")
-          , Product "Warabimochi & Kinako" "A cooling summer sweet." (Money.price Money.EUR 60) (Just (img "Warabimochi" 1.3 220)) (BuyTarget "warabimochi")
-          ]
-      , RichColumns
-          (Just "About the studio")
-          [ "We are a two-room studio near the river: one room for pounding mochi and simmering bean paste, one quiet room with a long cedar table where the shaping happens. Classes are capped at eight."
-          , "Our teacher trained for nine years in a Kyoto wagashi house before opening the school. The recipes are traditional; the pace is gentle; English and Japanese are both spoken."
-          ]
-      , Contact
-          "Visit"
-          (Just "Okashi School \xB7 3-12 Kawabata-dori \xB7 open Wednesday to Sunday, 10:00\x2013\&17:00 \xB7 a five-minute walk from the station.")
-          (Just "hello@okashi.example")
-      ]
-
 main :: IO ()
 main = do
   writeFile "sites/nyt/site.json" (encode (siteSpecToJSON nytSite) <> "\n")
-  writeFile "sites/okashi/site.json" (encode (siteSpecToJSON okashiSite) <> "\n")
-  putStrLn "wrote sites/nyt/site.json and sites/okashi/site.json"
-  -- sanity: both must round-trip
-  let rt s = siteSpecFromJSON (siteSpecToJSON s) == Right s
-  putStrLn ("round-trip nyt=" <> show (rt nytSite) <> " okashi=" <> show (rt okashiSite))
+  putStrLn "wrote sites/nyt/site.json"
+  -- sanity: must round-trip
+  putStrLn ("round-trip nyt=" <> show (siteSpecFromJSON (siteSpecToJSON nytSite) == Right nytSite))

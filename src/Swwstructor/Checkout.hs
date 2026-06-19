@@ -3,7 +3,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | The checkout capability — the pure, testable core of Stripe integration,
--- ported from @Okashi.Checkout@. The /effect/ is a typeclass 'MonadCheckout'
+-- ported from the reference checkout. The /effect/ is a typeclass 'MonadCheckout'
 -- with two interpreters: 'MockCheckoutT' (here; no network, for tests) and the
 -- real @StripeCheckoutT@ (in the server executable, where @http-client@ lives).
 --

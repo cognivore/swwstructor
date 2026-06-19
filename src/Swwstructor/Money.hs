@@ -1,7 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | Money — strong types for currency and price, ported and lightly generalised
--- from @Okashi.Money@. No bare 'Int' for money: amounts are 'Cents', a price is
+-- | Money — strong types for currency and price, No bare 'Int' for money: amounts are 'Cents', a price is
 -- a 'Cents' tagged with a 'Currency'. This is the type the Stripe checkout
 -- layer consumes (Stripe wants integer minor units), and the type the
 -- @priceTag@ block renders.

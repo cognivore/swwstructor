@@ -2,9 +2,9 @@
 
 -- | The theme layer: a 'Theme' is a value (palette, typography, density,
 -- geometry) and 'themeCss' is its single interpreter into the stylesheet that
--- the renderer inlines. This is the generalisation of @Okashi.Render.pageCss@:
--- branding lives in a /value/, not in hard-coded CSS, so the same engine renders
--- a pink confectionery shop and a black-on-white newspaper from data alone.
+-- the renderer inlines. Branding lives in a /value/, not in hard-coded CSS, so
+-- the same engine renders, say, a magazine and a black-on-white newspaper from
+-- data alone.
 --
 -- All owner-supplied strings (colours, font stacks) are passed through
 -- 'sanitizeCssValue' before they reach the stylesheet, so a theme can never
@@ -19,7 +19,6 @@ module Swwstructor.Theme
   , Theme (..)
   , defaultTheme
   , nytTheme
-  , okashiTheme
   , sanitizeCssValue
   , themeFontLink
   , themeCss
@@ -120,26 +119,6 @@ nytTheme =
     , themeDensity = Airy
     , themeMaxWidth = 1180
     , themeRadius = 0
-    }
-
--- | The reference confectionery palette (so we can re-render the okashi
--- storefront from data, proving the theme layer is faithful).
-okashiTheme :: Theme
-okashiTheme =
-  Theme
-    { themeName = "Okashi"
-    , themeBg = Color "#ffeded"
-    , themeFg = Color "#2d2926"
-    , themeAccent = Color "#d69dcd"
-    , themeMuted = Color "#8b8178"
-    , themeBorder = Color "rgba(45,41,38,.08)"
-    , themeMastFont = "'Cormorant Garamond', 'Noto Serif JP', serif"
-    , themeDisplayFont = "'Cormorant Garamond', 'Noto Serif JP', serif"
-    , themeBodyFont = "'Inter', 'Noto Sans JP', system-ui, sans-serif"
-    , themeFontUrl = Just "https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;500;600&family=Inter:wght@400;500;600&family=Noto+Sans+JP:wght@400;500&family=Noto+Serif+JP:wght@400;600&display=swap"
-    , themeDensity = Airy
-    , themeMaxWidth = 1180
-    , themeRadius = 14
     }
 
 -- | Strip everything that could end the CSS value / @\<style>@ element. Keeps a

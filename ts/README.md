@@ -34,11 +34,11 @@ The `stickywebwm` dependency is linked from `../stickywebwm/ts` (its prebuilt
 import { emptySite, isSiteSpec, type SiteSpec, type SectionSpec } from "swwstructor";
 
 const site: SiteSpec = emptySite();
-site.title = "Okashi";
+site.title = "My Magazine";
 site.pages[0].sections.push({
   section: "hero",
-  headline: "Seasonal wagashi",
-  cta: { label: "Shop", href: "/shop" },
+  headline: "Today's lead story",
+  cta: { label: "Read", href: "/story" },
 });
 
 // Narrow JSON loaded from disk / the wire before use:

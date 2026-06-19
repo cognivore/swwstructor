@@ -7,7 +7,7 @@
 -- ('Swwstructor.Site') later solves the layout and, per placed window, looks up
 -- and runs its 'Block'.
 --
--- This is the generalisation of @Okashi.Page@: the same @classColumn@ /
+-- This is the generalisation of a reference site assembly: the same @classColumn@ /
 -- @splitN@ patterns, but driven by data. Two invariants every template upholds,
 -- because the engine's well-formedness and conservation theorems depend on them:
 --
@@ -76,7 +76,7 @@ import StickyWM
   )
 
 -- | A page section: its layout fragment and the content for the windows it
--- names. Mirrors @Okashi.Page.Section@.
+-- names. Mirrors the reference app's Section.
 data Section = Section
   { secLayout :: !Document
   , secBlocks :: !(Map String Block)
@@ -107,7 +107,7 @@ mconcatSections secs =
     }
 
 -- Approximate a character count for an analytic measure (real heights are
--- measured in the browser on pass 2). Mirrors @T.length@ usage in okashi.
+-- measured in the browser on pass 2). Mirrors @T.length@ usage heuristic.
 chars :: Text -> Int
 chars = max 1 . T.length
 
@@ -118,8 +118,8 @@ chars = max 1 . T.length
 -- | Render a flat list of sections into one 'Section'. Each section is
 -- namespaced by its index, then all are stacked. Finally, any "always sticky"
 -- nav (a sticky 'Nav' window left with empty refs by 'renderSection') has its
--- container set to the last window, so it pins for the whole page — the @okashi@
--- nav pattern, made automatic. Because ids are keyed by the FLAT index, the same
+-- container set to the last window, so it pins for the whole page — the classic
+-- always-sticky nav pattern, made automatic. Because ids are keyed by the FLAT index, the same
 -- partial included twice yields distinct ids (conservation holds).
 renderSections :: [SectionSpec] -> Section
 renderSections specs =

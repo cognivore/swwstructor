@@ -15,9 +15,9 @@ default:
 # ── Run (clone-and-run) ──────────────────────────────────────────────────────
 
 # Run the server locally, sourcing secrets from rageveil. The download-and-run
-# entry point. Optional flags pass through: `just run --port 8080 --site sites/okashi`
-run *ARGS:
-    rust-script automation/run.rs {{ARGS}}
+# entry point. Override site/port via env: `SWW_SITE_DIR=sites/hello PORT=8080 just run`
+run:
+    nix run .#run
 
 # ── Infra: provision / ship ─────────────────────────────────────────────────
 

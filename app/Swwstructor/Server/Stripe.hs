@@ -4,7 +4,7 @@
 -- | The live Stripe interpreter: the @http-client@-backed implementation of the
 -- checkout effect, plus webhook signature verification. Kept out of the pure
 -- library so the engine + templates stay dependency-light. Mirrors
--- @Okashi.Checkout@'s real interpreter.
+-- the reference live interpreter.
 module Swwstructor.Server.Stripe
   ( stripeCreate
   , verifyStripeSig

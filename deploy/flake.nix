@@ -1,9 +1,9 @@
 {
   # NixOS host configuration for a swwstructor demo box on AWS EC2. A SEPARATE
-  # flake from the app (they evolve independently). It runs THREE single-tenant
-  # sites on one machine — nyt, okashi, hello — each its own systemd unit + Caddy
-  # vhost, proving the multi-instance design. The x86_64-linux closure is built
-  # on a builder and shipped (the box never compiles: max-jobs = 0).
+  # flake from the app (they evolve independently). It runs single-tenant sites
+  # via the module — each instance its own systemd unit + Caddy vhost (add more
+  # for the multi-instance design). The x86_64-linux closure is built on a
+  # builder and shipped (the box never compiles: max-jobs = 0).
   description = "swwstructor demo host — several single-tenant sites on one NixOS box";
 
   inputs = {

@@ -26,7 +26,7 @@ final tagless throughout, strong newtypes, and the engine's proofs stay green.
   queries, no CSS authored by the owner.
 - **Themes are values.** Palette, fonts, density and geometry live in a `Theme`;
   its single CSS interpreter is the only place branding exists. The same engine
-  renders a black-on-white newspaper and a pink confectionery shop from data.
+  renders a black-on-white newspaper and a colourful storefront from data.
 - **Stripe via the admin WebUI.** The owner signs in at `/admin` and pastes their
   Stripe keys (publishable / secret / webhook). Keys are **encrypted at rest**
   with AES-256-GCM under a per-instance master key — never in logs, the Nix
@@ -61,8 +61,8 @@ test/Spec.hs                acceptance tests incl. the NYT benchmark (hand-rolle
 ts/                         the admin live-preview client (consumes the stickywebwm TS SDK)
 automation/                 rust-script automation: provision.rs, ship.rs, site.rs (NOT shell)
 nix/                        flake packaging + the multi-instance NixOS module
-deploy/                     a NixOS EC2 host running three sites on one box
-sites/{nyt,okashi,hello}/   example content (JSON + a YAML site)
+deploy/                     a NixOS EC2 host (multi-instance ready)
+sites/{nyt,hello}/          example content (a JSON site + a YAML site)
 ```
 
 ---
@@ -95,8 +95,8 @@ into the encrypted store at boot, never echoed, never written in plaintext). Wit
 (logged once), and you enter Stripe keys via `/admin`. rageveil values are never
 printed — only which variables were found.
 
-Pick a different site or port with env: `SWW_SITE_DIR=sites/okashi PORT=8080 nix
-run .#run` (bundled sites: `nyt`, `okashi`, `hello`). `just run` is the same thing.
+Pick a different site or port with env: `SWW_SITE_DIR=sites/hello PORT=8080 nix
+run .#run` (bundled sites: `nyt`, `hello`). `just run` is the same thing.
 
 ## Dev
 
@@ -145,8 +145,8 @@ just ship-boot                               # build the closure elsewhere, copy
 just ship                                    # subsequent updates (switch)
 ```
 
-`deploy/flake.nix` is a NixOS EC2 host that runs **three** instances (nyt,
-okashi, hello) via `services.swwstructor.instances` — each its own systemd unit,
+`deploy/flake.nix` is a NixOS EC2 host that runs the **nyt** instance via
+`services.swwstructor.instances` (add as many as you like) — each its own systemd unit,
 port, content dir and age-decrypted secrets, fronted by Caddy + ACME. The box
 never compiles (`nix.settings.max-jobs = 0`); closures are built on a builder and
 `nix copy`'d over. See `automation/README.md` for the full runbook.

@@ -2,7 +2,7 @@
 
 -- | The content DSL — a final-tagless algebra of the /things that render inside
 -- a window/, orthogonal to the layout algebra (which only places and sizes).
--- Generalised from @Okashi.Block@: in addition to the storefront blocks
+-- Generalised from a reference content DSL: in addition to the storefront blocks
 -- (@priceTag@, @buyButton@) it carries the editorial blocks an NYT-style front
 -- needs (@kicker@, @byline@, @timestamp@, @headingLink@, @ruleLine@).
 --

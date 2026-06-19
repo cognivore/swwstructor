@@ -1,6 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 
--- | A minimal, safe HTML fragment type — ported from @Okashi.Html@ (the
+-- | A minimal, safe HTML fragment type — ported from a reference implementation (the
 -- reference app) and kept identical in spirit: the only ways to put /content/
 -- into an 'Html' are 'esc' (HTML-escapes text) and 'rawHtml' (an explicit,
 -- audited escape hatch for trusted markup — our own tags and CSS). All

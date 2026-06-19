@@ -198,7 +198,7 @@ sinkSite =
     }
 
 demoProduct :: Product
-demoProduct = Product "Nerikiri Wagashi" "A seasonal sweet." (price Money.EUR 85) (Just (img "sweets" 1.4 220)) (BuyTarget "nerikiri")
+demoProduct = Product "Demo Widget" "A demo product." (price Money.EUR 85) (Just (img "a product photo" 1.4 220)) (BuyTarget "demo-widget")
 
 -- ---------------------------------------------------------------------------
 -- Predicates over the layout
@@ -336,7 +336,7 @@ checkoutTests = do
   section "stripe form encoding (pure)"
   let req =
         CheckoutRequest
-          (lineItem "Nerikiri Wagashi" (price Money.EUR 85) :| [])
+          (lineItem "Demo Widget" (price Money.EUR 85) :| [])
           (Url "https://x.test/success")
           (Url "https://x.test/cancel")
       params = stripeFormParams req

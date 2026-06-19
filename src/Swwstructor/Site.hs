@@ -1,7 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | The render pipeline — the one place the layout interpreter (geometry) and
--- the content interpreter (HTML) compose, generalised from @Okashi.Render@ so
+-- the content interpreter (HTML) compose, generalised from the reference renderer so
 -- the branding comes from a 'Theme' value rather than hard-coded CSS.
 --
 -- 'renderStageWith' runs @StickyWM.solveWith@ over a section's layout 'Document'
