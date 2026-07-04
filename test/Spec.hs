@@ -19,9 +19,13 @@ import Swwstructor.Block
   ( Block (..)
   , BuyTarget (BuyTarget)
   , NavLink (NavLink)
+  , PlainBlock (runPlainBlock)
   , blockFromJSON
   , blockToJSON
+  , buildBlock
   )
+import Swwstructor.Html (renderHtml)
+import Swwstructor.Site (renderStage)
 import Swwstructor.Checkout
   ( CheckoutItem (ItemAdHoc, ItemPrice)
   , CheckoutRequest (CheckoutRequest)
@@ -332,10 +336,27 @@ blockRoundTrip = do
         , BPriceTag (price Money.EUR 85)
         , BBuyButton (BuyTarget "x") "Buy"
         , BLinkText "l" "/l"
+        , BEmailReveal
         , BRuleLine
         ]
       ok b = blockFromJSON (blockToJSON b) == Right b
   sequence [check ("block " <> take 18 (show b)) (ok b) | b <- blocks]
+
+-- The email-protection property: an address configured on a contact section
+-- must never reach the rendered page — only the reveal widget may.
+emailProtectionTests :: IO [Bool]
+emailProtectionTests = do
+  section "email protection (address never rendered)"
+  let addr = "secret-address@example.test"
+      sec = renderSection 0 (Contact "Get in touch" (Just "Write to me.") (Just addr))
+      html = renderHtml (renderStage nytTheme sec (Viewport 1180 900))
+  sequence
+    [ check "address absent from the rendered page" (not (addr `T.isInfixOf` html))
+    , check "no mailto: carries an address (only the script constant)" (T.count "mailto:" html == T.count "mailto:'" html)
+    , check "the reveal widget is present" ("data-sww-reveal" `T.isInfixOf` html)
+    , check "the reveal client is present" ("/email-challenge" `T.isInfixOf` html)
+    , check "plain interpreter never leaks either" (not (addr `T.isInfixOf` runPlainBlock (buildBlock BEmailReveal)))
+    ]
 
 themeTests :: IO [Bool]
 themeTests = do
@@ -544,6 +565,7 @@ main = do
         , templateEngineTests
         , codecRoundTrip
         , blockRoundTrip
+        , emailProtectionTests
         , themeTests
         , fontUrlTests
         , mediaTests

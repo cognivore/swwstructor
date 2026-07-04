@@ -474,7 +474,10 @@ sectionFields partials s = case s of
   CtaBand h b cta ->
     ipt "text" "headline" "Headline" h <> txtArea "body" "Body (optional)" (orEmpty b) <> ctaFields "cta" cta
   Contact t b email ->
-    ipt "text" "title" "Title" t <> txtArea "body" "Body (optional)" (orEmpty b) <> ipt "text" "email" "Email (optional)" (orEmpty email)
+    ipt "text" "title" "Title" t
+      <> txtArea "body" "Body (optional)" (orEmpty b)
+      <> ipt "text" "email" "Email (optional)" (orEmpty email)
+      <> elAttr "p" [("class", "hint")] (esc "The address is never printed on the page \x2014 visitors see a \x201CShow email address\x201D button and get it only after an automatic spam-protection check (proof-of-work).")
   ProseSection k h b ->
     ipt "text" "kicker" "Kicker (optional)" (orEmpty k) <> ipt "text" "headline" "Heading (optional)" (orEmpty h) <> txtArea "body" "Body" b
   FooterBand t -> txtArea "text" "Footer text" t

@@ -46,6 +46,7 @@ import Swwstructor.Html
   , elAttr
   , esc
   , htmlConcat
+  , rawHtml
   )
 import Swwstructor.Money
   ( Cents (Cents)
@@ -131,6 +132,12 @@ class BlockSym repr where
   -- | A standalone inline link (label, href).
   linkText :: Text -> Text -> repr
 
+  -- | The owner's email address, protected: renders a reveal widget whose
+  -- client must solve a server-issued proof-of-work before the address is
+  -- fetched. The address itself NEVER enters a block or the served HTML —
+  -- harvesters reading the page (or the content JSON routes) get nothing.
+  emailReveal :: repr
+
   -- | A hairline rule — a section divider.
   ruleLine :: repr
 
@@ -154,6 +161,7 @@ data Block
   | BPriceTag !Price
   | BBuyButton !BuyTarget !Text
   | BLinkText !Text !Text
+  | BEmailReveal
   | BRuleLine
   deriving (Eq, Show)
 
@@ -171,6 +179,7 @@ instance BlockSym Block where
   priceTag = BPriceTag
   buyButton = BBuyButton
   linkText = BLinkText
+  emailReveal = BEmailReveal
   ruleLine = BRuleLine
 
 -- | The initial→final transform: interpret a stored 'Block' into any
@@ -189,6 +198,7 @@ buildBlock (BFigureBox c s) = figureBox c s
 buildBlock (BPriceTag p) = priceTag p
 buildBlock (BBuyButton tgt l) = buyButton tgt l
 buildBlock (BLinkText l h) = linkText l h
+buildBlock BEmailReveal = emailReveal
 buildBlock BRuleLine = ruleLine
 
 -- ---------------------------------------------------------------------------
@@ -245,7 +255,55 @@ instance BlockSym HtmlBlock where
         (elAttr "button" [("class", "sww-buy"), ("type", "submit")] (esc lbl))
   linkText lbl h =
     HtmlBlock $ elAttr "a" [("class", "sww-link"), ("href", safeHref h)] (esc lbl)
+  emailReveal =
+    HtmlBlock $
+      elAttr "div" [("class", "sww-reveal"), ("data-sww-reveal", "1")] (
+        elAttr "button" [("class", "sww-buy sww-reveal-btn"), ("type", "button")] (esc "Show email address")
+          <> elAttr "noscript" [] (esc "Please enable JavaScript to see the address (spam protection).")
+      )
+        <> rawHtml powClientJs
   ruleLine = HtmlBlock $ elAttr "hr" [("class", "sww-rule")] mempty
+
+-- | The proof-of-work reveal client — a fixed literal (never owner content),
+-- bound once per page however many widgets render. Solves the server's
+-- sha256 leading-zero-bits challenge in concurrent WebCrypto batches
+-- (roughly a second of work), then swaps the widget for the mailto link.
+powClientJs :: Text
+powClientJs =
+  T.concat
+    [ "<script>(function(){"
+    , "if(window.__swwPowBound)return;window.__swwPowBound=1;"
+    , "async function sha(s){var b=new TextEncoder().encode(s);"
+    , "var d=await crypto.subtle.digest('SHA-256',b);return new Uint8Array(d);}"
+    , "function zbits(a){var n=0;for(var i=0;i<a.length;i++){var x=a[i];"
+    , "if(x===0){n+=8;continue;}while(!(x&128)){n++;x=(x<<1)&255;}break;}return n;}"
+    , "async function solve(ch,bits,onp){var nonce=0;for(;;){"
+    , "var batch=[];for(var j=0;j<128;j++)batch.push(sha(ch+':'+(nonce+j)));"
+    , "var rs=await Promise.all(batch);"
+    , "for(var k=0;k<rs.length;k++){if(zbits(rs[k])>=bits)return nonce+k;}"
+    , "nonce+=128;if(onp&&nonce%2048===0)onp(nonce);}}"
+    , "document.addEventListener('click',async function(e){"
+    , "var b=e.target&&e.target.closest?e.target.closest('.sww-reveal-btn'):null;if(!b)return;"
+    , "var box=b.closest('[data-sww-reveal]');if(!box)return;"
+    , "b.disabled=true;var t0=b.textContent;b.textContent='One moment\\u2026';"
+    , "try{"
+    , "var c=await fetch('/email-challenge').then(function(r){return r.json();});"
+    , "var nonce=await solve(c.challenge,c.bits,function(n){b.textContent='One moment\\u2026';});"
+    , "var r=await fetch('/email-reveal',{method:'POST',headers:{'Content-Type':'application/json'},"
+    , "body:JSON.stringify({challenge:c.challenge,nonce:''+nonce})});"
+    , "var j=await r.json();"
+    -- The relayout can swap the stage while we hash: fill every LIVE widget
+    -- in the document (falling back to the held node), so a click landing
+    -- during the initial settle still reveals visibly.
+    , "if(j&&j.email){var fill=function(bx){var a=document.createElement('a');a.className='sww-link';"
+    , "a.href='mailto:'+j.email;a.textContent=j.email;"
+    , "while(bx.firstChild)bx.removeChild(bx.firstChild);bx.appendChild(a);};"
+    , "var all=document.querySelectorAll('[data-sww-reveal]');"
+    , "if(all.length){for(var q=0;q<all.length;q++)fill(all[q]);}else{fill(box);}}"
+    , "else{b.textContent='Could not verify \\u2014 tap to retry';b.disabled=false;}"
+    , "}catch(err){b.textContent=t0;b.disabled=false;}"
+    , "});})();</script>"
+    ]
 
 -- | Neutralise dangerous URL schemes in owner/adapter-supplied hrefs and image
 -- sources. Whitespace/control characters are stripped for the check (browsers
@@ -280,6 +338,7 @@ instance BlockSym PlainBlock where
   priceTag p = PlainBlock (formatPrice p)
   buyButton _ lbl = PlainBlock ("[" <> lbl <> "]")
   linkText lbl _ = PlainBlock lbl
+  emailReveal = PlainBlock "(email address \x2014 revealed on the website)"
   ruleLine = PlainBlock "\x2014"
 
 -- ---------------------------------------------------------------------------
@@ -302,6 +361,7 @@ blockToJSON b = case b of
   BPriceTag p -> tagged "priceTag" [("price", priceToJSON p)]
   BBuyButton (BuyTarget tgt) l -> tagged "buyButton" [("target", JStr (T.unpack tgt)), ("label", JStr (T.unpack l))]
   BLinkText l h -> tagged "linkText" [("label", JStr (T.unpack l)), ("href", JStr (T.unpack h))]
+  BEmailReveal -> tagged "emailReveal" []
   BRuleLine -> tagged "ruleLine" []
   where
     tagged k extra = JObj (("b", JStr k) : extra)
@@ -331,6 +391,7 @@ blockFromJSON v = do
     "priceTag" -> BPriceTag <$> (priceFromJSON =<< v .: "price")
     "buyButton" -> BBuyButton . BuyTarget <$> txt "target" <*> txt "label"
     "linkText" -> BLinkText <$> txt "label" <*> txt "href"
+    "emailReveal" -> Right BEmailReveal
     "ruleLine" -> Right BRuleLine
     other -> Left ("unknown block kind: " ++ other)
   where

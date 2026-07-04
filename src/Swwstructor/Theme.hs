@@ -248,6 +248,10 @@ themeCss th =
         , "  border-radius:calc(var(--sww-radius) + 4px);padding:11px 18px;width:100%;"
         , "  transition:transform .12s ease,opacity .12s ease;}"
         , ".sww-buy:hover{transform:translateY(-1px);opacity:.92;}"
+        -- the email-reveal widget: an inline-sized button, not a full-width one
+        , ".sww-reveal{margin:2px 0;}"
+        , ".sww-reveal .sww-buy{width:auto;padding:11px 22px;}"
+        , ".sww-reveal .sww-buy[disabled]{opacity:.7;cursor:progress;transform:none;}"
         -- footer
         , ".sww-footer{font-size:12px;color:var(--sww-muted);text-align:center;padding:36px 0 24px;border-top:1px solid var(--sww-border);margin-top:24px;}"
         , ".sww-page-msg{max-width:560px;margin:14vh auto;padding:0 24px;text-align:center;}"

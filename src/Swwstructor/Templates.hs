@@ -39,6 +39,7 @@ import Swwstructor.Block
   , brandMark
   , buyButton
   , byline
+  , emailReveal
   , figureBox
   , heading
   , headingLink
@@ -368,13 +369,17 @@ ctaSection pfx h body cta =
         , (\(Cta l u) -> leafWith (chrome (Custom "cta") (pfx <> "-cta") 48) (linkText l u)) <$> cta
         ]
 
+-- | The owner's address is NEVER placed in a block or the page: when an email
+-- is configured, the section renders the proof-of-work reveal widget instead,
+-- and the server hands out the address only to clients that solved the
+-- challenge (see @\/email-challenge@ + @\/email-reveal@).
 contactSection :: String -> Text -> Maybe Text -> Maybe Text -> Section
 contactSection pfx title body email =
   sectionOf $
     leafWith (headline (pfx <> "-h") (chars title)) (heading title)
       : catMaybes
         [ (\t -> leafWith (prose (pfx <> "-body") (chars t)) (paragraph t)) <$> body
-        , (\e -> leafWith (chrome (Custom "cta") (pfx <> "-mail") 30) (linkText e ("mailto:" <> e))) <$> email
+        , (\_ -> leafWith (chrome (Custom "cta") (pfx <> "-mail") 60) emailReveal) <$> email
         ]
 
 proseSectionT :: String -> Maybe Text -> Maybe Text -> Text -> Section

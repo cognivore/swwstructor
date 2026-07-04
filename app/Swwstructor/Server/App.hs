@@ -13,9 +13,11 @@ module Swwstructor.Server.App
   ) where
 
 import Control.Monad.IO.Class (liftIO)
+import Crypto.Hash (Digest, SHA256, hash)
 import qualified Data.ByteArray as BA
+import Data.Bits (testBit)
 import qualified Data.ByteString.Lazy as BL
-import Data.IORef (IORef, modifyIORef', readIORef)
+import Data.IORef (IORef, atomicModifyIORef', modifyIORef', readIORef)
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
@@ -26,6 +28,9 @@ import qualified Data.Text.Encoding as TE
 import Data.Text.Encoding.Error (lenientDecode)
 import qualified Data.Text.Lazy as TL
 import qualified Data.Text.Lazy.Encoding as TLE
+import Data.Time.Clock (UTCTime, getCurrentTime)
+import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
+import Data.Word (Word8)
 import Network.HTTP.Client (Manager)
 import Network.HTTP.Types.Status (status303, status400, status404, status500, status503)
 import Network.Wai (rawPathInfo)
@@ -69,8 +74,9 @@ import Swwstructor.Checkout
 import Swwstructor.Content
   ( PageSpec (PageSpec, pagePath, pageSections, pageTitle)
   , Partial (partialSections)
-  , SectionSpec (StripeCatalog)
+  , SectionSpec (Contact, StripeCatalog)
   , SiteSpec (siteFooter, sitePages, sitePartials, siteTheme)
+  , allSectionsOf
   )
 import Swwstructor.Edit
   ( addListItem
@@ -115,6 +121,7 @@ import Swwstructor.Server.SecretStore
   ( MasterKey
   , SecretBundle (..)
   , SecretValue (SecretValue)
+  , genSessionSeed
   , hmacTokenHex
   , loadBundle
   , saveBundle
@@ -125,12 +132,13 @@ import Swwstructor.Server.Stripe (peekEventType, stripeCreate, verifyStripeSig)
 import Swwstructor.Site (renderFullPage, renderStageWith, renderStaticPage, simplePage)
 import Swwstructor.Templates (Section (secLayout), expandSection, renderSections, resolvedSection)
 import StickyWM
-  ( JSON (JArr, JObj, JStr)
+  ( JSON (JArr, JNum, JObj, JStr)
   , Viewport (Viewport)
   , decode
   , documentToJSON
   , encode
   , jnum
+  , jstr
   , (.:)
   , (.:?)
   )
@@ -155,6 +163,9 @@ data AppEnv = AppEnv
   -- ^ the writable state dir (secrets.enc, site.json, @uploads/@)
   , aeCatalog :: !CatalogCache
   -- ^ the cached live Stripe catalogue (for @stripeCatalog@ sections)
+  , aeSpentPow :: !(IORef (Map Text UTCTime))
+  -- ^ proof-of-work challenges already redeemed (challenge -> issue time),
+  -- pruned as they expire — each challenge reveals the email at most once
   }
 
 currentSite :: AppEnv -> ActionM SiteSpec
@@ -246,6 +257,11 @@ swwApp env = do
     raw_ <- body
     let (w, p, overrides) = parseRelayout (TL.unpack (TLE.decodeUtf8 raw_))
     serveStage env p (saneW w) overrides
+
+  -- The email-protection pair: a signed challenge, and the reveal that
+  -- requires its proof-of-work. The address appears in no served page.
+  get "/email-challenge" (handleEmailChallenge env)
+  post "/email-reveal" (handleEmailReveal env)
 
   post "/buy/:id" (handleBuy env)
   get "/success" $ do
@@ -396,6 +412,97 @@ handleWebhook env = do
             liftIO (putStrLn "[stripe webhook] REJECTED: bad signature")
             status status400
             text "bad signature"
+
+-- ---------------------------------------------------------------------------
+-- Email protection: proof-of-work gated reveal
+-- ---------------------------------------------------------------------------
+
+-- | Leading zero bits a solution digest must carry. 16 bits = ~65k hashes on
+-- average — around a second of WebCrypto work for a visitor, an expensive
+-- proposition for a bulk address harvester (and each success is single-use).
+powDifficulty :: Int
+powDifficulty = 16
+
+-- | How long an issued challenge stays valid, in seconds.
+powTtl :: Integer
+powTtl = 900
+
+-- | Issue a challenge: @epoch.rand.hmac@ — self-authenticating (HMAC under
+-- the master key), so the server keeps no state until one is redeemed.
+handleEmailChallenge :: AppEnv -> ActionM ()
+handleEmailChallenge env = do
+  now <- liftIO getCurrentTime
+  rand <- liftIO genSessionSeed
+  let epoch = floor (utcTimeToPOSIXSeconds now) :: Integer
+      base = T.pack (show epoch) <> "." <> T.pack (show (abs rand))
+      mac = hmacTokenHex (aeMasterKey env) (TE.encodeUtf8 ("pow:" <> base))
+      challenge = base <> "." <> mac
+  jsonOut
+    (JObj [("challenge", JStr (T.unpack challenge)), ("bits", JNum (fromIntegral powDifficulty))])
+
+-- | Redeem a challenge: verify its signature and freshness, that it has not
+-- been used before, and that sha256(challenge:nonce) clears the difficulty —
+-- then (and only then) hand out the owner's address from the content.
+handleEmailReveal :: AppEnv -> ActionM ()
+handleEmailReveal env = do
+  raw_ <- body
+  now <- liftIO getCurrentTime
+  let parsed = do
+        v <- either (const (Left "bad json")) Right (decode (TL.unpack (TLE.decodeUtf8 raw_)))
+        ch <- either (const (Left "missing challenge")) (fmap T.pack . jstr) (v .: "challenge")
+        nonce <- either (const (Left "missing nonce")) (fmap T.pack . jstr) (v .: "nonce")
+        pure (ch, nonce)
+  case parsed of
+    Left e -> badRequest (T.pack e)
+    Right (challenge, nonce) ->
+      case T.splitOn "." challenge of
+        [epochS, randS, mac] -> do
+          let base = epochS <> "." <> randS
+              expect = hmacTokenHex (aeMasterKey env) (TE.encodeUtf8 ("pow:" <> base))
+              epochOk = case reads (T.unpack epochS) of
+                [(e :: Integer, "")] ->
+                  let nowE = floor (utcTimeToPOSIXSeconds now) :: Integer
+                   in e <= nowE + 60 && nowE - e <= powTtl
+                _ -> False
+          if not (ctEq expect mac) || not epochOk
+            then badRequest "stale or invalid challenge"
+            else do
+              fresh <- liftIO $ atomicModifyIORef' (aeSpentPow env) $ \spent ->
+                let pruned = M.filter (\t -> now `lessThanTtl` t) spent
+                 in if M.member challenge pruned
+                      then (pruned, False)
+                      else (M.insert challenge now pruned, True)
+              if not fresh
+                then badRequest "challenge already used"
+                else
+                  if powZeroBits (challenge <> ":" <> nonce) < powDifficulty
+                    then badRequest "proof of work does not satisfy the difficulty"
+                    else do
+                      site <- currentSite env
+                      case [e | Contact _ _ (Just e) <- allSectionsOf site] of
+                        (email : _) -> jsonOut (JObj [("email", JStr (T.unpack email))])
+                        [] -> status status404 >> jsonOut (JObj [("error", JStr "no address configured")])
+        _ -> badRequest "malformed challenge"
+  where
+    lessThanTtl now issued = floor (utcTimeToPOSIXSeconds now) - (floor (utcTimeToPOSIXSeconds issued) :: Integer) <= powTtl
+    badRequest msg = status status400 >> jsonOut (JObj [("error", JStr (T.unpack msg))])
+
+-- | Leading zero bits of @sha256(input)@.
+powZeroBits :: Text -> Int
+powZeroBits input =
+  let digest = hash (TE.encodeUtf8 input) :: Digest SHA256
+      bytes = BA.unpack digest :: [Word8]
+   in go 0 bytes
+  where
+    go acc [] = acc
+    go acc (w : ws)
+      | w == 0 = go (acc + 8) ws
+      | otherwise = acc + length (takeWhile (\i -> not (testBit w i)) [7, 6 .. 0])
+
+jsonOut :: JSON -> ActionM ()
+jsonOut j = do
+  setHeader "Content-Type" "application/json; charset=utf-8"
+  raw (TLE.encodeUtf8 (TL.pack (encode j)))
 
 -- ---------------------------------------------------------------------------
 -- Media: public serving + the admin library

@@ -24,6 +24,7 @@ module Main (main) where
 
 import Control.Monad (when)
 import Data.IORef (newIORef)
+import qualified Data.Map.Strict as M
 import Data.Maybe (fromMaybe)
 import qualified Data.Text as T
 import Network.HTTP.Client (newManager)
@@ -111,6 +112,7 @@ main = do
   mgr <- newManager tlsManagerSettings
   sessionRef <- newIORef =<< genSessionSeed
   catalogCache <- newCatalogCache
+  spentPow <- newIORef M.empty
   let env =
         AppEnv
           { aeStore = store
@@ -124,6 +126,7 @@ main = do
           , aeSiteDir = siteDir
           , aeDataDir = dataDir
           , aeCatalog = catalogCache
+          , aeSpentPow = spentPow
           }
 
   when (T.null adminPw) (putStrLn "[swwstructor] note: admin is unconfigured (no password).")
