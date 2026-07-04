@@ -41,6 +41,21 @@ let
           default = null;
           description = "age file holding the admin password. If null, a random one is generated at boot and logged.";
         };
+        stripePkFile = lib.mkOption {
+          type = lib.types.nullOr lib.types.path;
+          default = null;
+          description = "age file holding the Stripe publishable key. Seeds the encrypted store at boot ONLY while the store has no keys yet; once the owner saves keys via /admin, the store wins.";
+        };
+        stripeSkFile = lib.mkOption {
+          type = lib.types.nullOr lib.types.path;
+          default = null;
+          description = "age file holding the Stripe secret key (seed-only, see stripePkFile).";
+        };
+        stripeWebhookFile = lib.mkOption {
+          type = lib.types.nullOr lib.types.path;
+          default = null;
+          description = "age file holding the Stripe webhook signing secret (seed-only, see stripePkFile).";
+        };
         stage = lib.mkOption {
           type = lib.types.enum [ "test" "prod" ];
           default = "test";
@@ -112,6 +127,18 @@ in
         + lib.optionalString (inst.adminPasswordFile != null) ''
           SWW_ADMIN_PASSWORD="$(${pkgs.age}/bin/age -d -i "$hostkey" ${inst.adminPasswordFile})"
           export SWW_ADMIN_PASSWORD
+        ''
+        + lib.optionalString (inst.stripePkFile != null) ''
+          SWW_STRIPE_PK="$(${pkgs.age}/bin/age -d -i "$hostkey" ${inst.stripePkFile})"
+          export SWW_STRIPE_PK
+        ''
+        + lib.optionalString (inst.stripeSkFile != null) ''
+          SWW_STRIPE_SK="$(${pkgs.age}/bin/age -d -i "$hostkey" ${inst.stripeSkFile})"
+          export SWW_STRIPE_SK
+        ''
+        + lib.optionalString (inst.stripeWebhookFile != null) ''
+          SWW_STRIPE_WEBHOOK="$(${pkgs.age}/bin/age -d -i "$hostkey" ${inst.stripeWebhookFile})"
+          export SWW_STRIPE_WEBHOOK
         ''
         + ''
           exec ${cfg.package}/bin/swwstructor-server

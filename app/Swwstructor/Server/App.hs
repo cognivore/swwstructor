@@ -14,6 +14,7 @@ module Swwstructor.Server.App
 
 import Control.Monad.IO.Class (liftIO)
 import qualified Data.ByteArray as BA
+import qualified Data.ByteString.Lazy as BL
 import Data.IORef (IORef, modifyIORef', readIORef)
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.Map.Strict (Map)
@@ -22,20 +23,28 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import Data.Text.Encoding.Error (lenientDecode)
 import qualified Data.Text.Lazy as TL
 import qualified Data.Text.Lazy.Encoding as TLE
 import Network.HTTP.Client (Manager)
 import Network.HTTP.Types.Status (status303, status400, status404, status500, status503)
+import Network.Wai (rawPathInfo)
+import Network.Wai.Middleware.Autohead (autohead)
 import Network.Wai.Middleware.RequestSizeLimit
   ( defaultRequestSizeLimitSettings
   , requestSizeLimitMiddleware
   , setMaxLengthForRequest
   )
+import Network.Wai.Parse (FileInfo (fileContent, fileName))
+import System.Directory (doesFileExist)
+import System.FilePath ((</>))
 import Web.Scotty
   ( ActionM
   , ScottyM
   , body
   , captureParam
+  , file
+  , files
   , formParamMaybe
   , formParams
   , get
@@ -81,10 +90,12 @@ import Swwstructor.Edit
   , setTheme
   )
 import Swwstructor.Html (Html, renderHtml)
+import Swwstructor.Media (contentTypeFor, isSafeMediaName)
 import Swwstructor.Plugins.Stripe (siteBuyRegistry)
 import Swwstructor.Server.Admin
   ( adminLoginPage
   , dashboardPage
+  , mediaLibraryPage
   , pageEditorPage
   , parseSection
   , parseTheme
@@ -93,6 +104,7 @@ import Swwstructor.Server.Admin
   , templatePage
   , themeEditorPage
   )
+import Swwstructor.Server.Media (deleteMedia, listMedia, resolveMedia, saveMedia)
 import Swwstructor.Server.SecretStore
   ( MasterKey
   , SecretBundle (..)
@@ -107,7 +119,7 @@ import Swwstructor.Server.Stripe (peekEventType, stripeCreate, verifyStripeSig)
 import Swwstructor.Site (renderFullPage, renderStageWith, renderStaticPage, simplePage)
 import Swwstructor.Templates (Section (secLayout), expandSection, renderSections, resolvedSection)
 import StickyWM
-  ( JSON (JObj, JStr)
+  ( JSON (JArr, JObj, JStr)
   , Viewport (Viewport)
   , decode
   , documentToJSON
@@ -131,6 +143,10 @@ data AppEnv = AppEnv
   , aeSession :: !(IORef Integer)
   , aeAdminPassword :: !Text
   , aeManager :: !Manager
+  , aeSiteDir :: !FilePath
+  -- ^ the deployed content template dir (its @assets/@ are served read-only)
+  , aeDataDir :: !FilePath
+  -- ^ the writable state dir (secrets.enc, site.json, @uploads/@)
   }
 
 currentSite :: AppEnv -> ActionM SiteSpec
@@ -147,16 +163,32 @@ pageByPath site p = lookup (norm p) [(norm (pagePath pg), pg) | pg <- sitePages 
 
 swwApp :: AppEnv -> ScottyM ()
 swwApp env = do
-  -- Bound request bodies before the JSON parser sees them (DoS guard for the
-  -- unauthenticated /layout and /stripe/webhook endpoints).
+  -- Bound request bodies before any parser sees them (DoS guard for the
+  -- unauthenticated /layout and /stripe/webhook endpoints). The admin uploader
+  -- gets a larger budget; everything else stays tight.
   middleware
     ( requestSizeLimitMiddleware
-        (setMaxLengthForRequest (\_ -> pure (Just (1024 * 1024))) defaultRequestSizeLimitSettings)
+        ( setMaxLengthForRequest
+            ( \req ->
+                pure . Just $
+                  if rawPathInfo req == "/admin/upload"
+                    then 64 * 1024 * 1024
+                    else 1024 * 1024
+            )
+            defaultRequestSizeLimitSettings
+        )
     )
+  -- Answer HEAD as GET-minus-body (uptime checks, link unfurlers).
+  middleware autohead
 
   get "/health" (text "ok")
 
   get "/" (servePage env "/")
+
+  -- Owner-uploaded media (the admin's photo library) and, as a fallback when
+  -- no reverse proxy serves them, the deployed template's static assets.
+  get "/media/:file" (serveMediaFile env)
+  get "/assets/:file" (serveAssetFile env)
 
   get "/layout" $ do
     mw <- queryParamMaybe "w"
@@ -204,6 +236,9 @@ swwApp env = do
   post "/admin/theme" (adminGate env (handleThemeSave env))
   get "/admin/stripe" (adminGate env (handleStripe env Nothing))
   post "/admin/secrets" (adminGate env (handleSaveSecrets env))
+  get "/admin/media" (adminGate env (handleMediaPage env Nothing))
+  post "/admin/upload" (adminGate env (handleUpload env))
+  post "/admin/media/delete" (adminGate env (handleMediaDelete env))
   get "/admin/preview.json" (adminGate env (handlePreviewJson env))
   -- the template engine: partials (header/footer + reusable includes)
   get "/admin/template" (adminGate env (handleTemplate env Nothing))
@@ -301,6 +336,77 @@ handleWebhook env = do
             liftIO (putStrLn "[stripe webhook] REJECTED: bad signature")
             status status400
             text "bad signature"
+
+-- ---------------------------------------------------------------------------
+-- Media: public serving + the admin library
+-- ---------------------------------------------------------------------------
+
+-- | Serve an uploaded file. Upload names embed a content-hash, so the response
+-- is immutable-cacheable.
+serveMediaFile :: AppEnv -> ActionM ()
+serveMediaFile env = do
+  name <- captureParam "file"
+  mpath <- liftIO (resolveMedia (aeDataDir env) name)
+  case mpath of
+    Nothing -> status status404 >> text "no such media"
+    Just path -> do
+      maybe (pure ()) (setHeader "Content-Type" . TL.fromStrict) (contentTypeFor name)
+      setHeader "Cache-Control" "public, max-age=31536000, immutable"
+      file path
+
+-- | Serve a template asset (dev fallback; in production a reverse proxy
+-- usually short-circuits @\/assets\/*@ before it reaches the app).
+serveAssetFile :: AppEnv -> ActionM ()
+serveAssetFile env = do
+  name <- captureParam "file"
+  let path = aeSiteDir env </> "assets" </> T.unpack name
+  ok <- if isSafeMediaName name then liftIO (doesFileExist path) else pure False
+  if not ok
+    then status status404 >> text "no such asset"
+    else do
+      maybe (pure ()) (setHeader "Content-Type" . TL.fromStrict) (contentTypeFor name)
+      setHeader "Cache-Control" "public, max-age=604800"
+      file path
+
+handleMediaPage :: AppEnv -> Maybe Text -> ActionM ()
+handleMediaPage env mfl = do
+  entries <- liftIO (listMedia (aeDataDir env))
+  htmlOf (mediaLibraryPage entries mfl)
+
+-- | Accept one or many multipart files (the uploader sends one per request;
+-- a no-JS form may send several). Responds with JSON when asked
+-- (@?json=1@), else redirects back to the library.
+handleUpload :: AppEnv -> ActionM ()
+handleUpload env = do
+  fs <- files
+  results <-
+    liftIO $
+      mapM
+        ( \(_, fi) ->
+            saveMedia
+              (aeDataDir env)
+              (TE.decodeUtf8With lenientDecode (fileName fi))
+              (BL.toStrict (fileContent fi))
+        )
+        fs
+  let saved = [n | Right n <- results]
+      errs = [e | Left e <- results] <> ["no file received" | null results]
+  wantJson <- queryParamMaybe "json"
+  case (wantJson :: Maybe Text) of
+    Just _ -> do
+      setHeader "Content-Type" "application/json; charset=utf-8"
+      raw . TLE.encodeUtf8 . TL.pack . encode $
+        JObj
+          [ ("saved", JArr (map (JStr . T.unpack) saved))
+          , ("errors", JArr (map (JStr . T.unpack) errs))
+          ]
+    Nothing -> redirect "/admin/media"
+
+handleMediaDelete :: AppEnv -> ActionM ()
+handleMediaDelete env = do
+  name <- fromMaybe "" <$> formParamMaybe "name"
+  _ <- liftIO (deleteMedia (aeDataDir env) name)
+  redirect "/admin/media"
 
 -- ---------------------------------------------------------------------------
 -- Admin: content editor handlers
@@ -491,8 +597,9 @@ handleLogin env = do
 
 handleStripe :: AppEnv -> Maybe Text -> ActionM ()
 handleStripe env mfl = do
+  site <- currentSite env
   bundle <- liftIO (loadBundle (aeSecretFile env) (aeMasterKey env))
-  htmlOf (stripePage bundle mfl)
+  htmlOf (stripePage (aeBaseUrl env) site bundle mfl)
 
 handleSaveSecrets :: AppEnv -> ActionM ()
 handleSaveSecrets env = do
@@ -512,11 +619,12 @@ handleSaveSecrets env = do
           }
   res <- liftIO (saveBundle (aeSecretFile env) (aeMasterKey env) updated)
   bundle' <- liftIO (loadBundle (aeSecretFile env) (aeMasterKey env))
+  site <- currentSite env
   case res of
-    Right () -> htmlOf (stripePage bundle' (Just "Saved."))
+    Right () -> htmlOf (stripePage (aeBaseUrl env) site bundle' (Just "Saved."))
     Left e -> do
       liftIO (putStrLn ("[admin] save failed: " <> T.unpack e))
-      htmlOf (stripePage bundle' (Just "Could not save keys (see server log)."))
+      htmlOf (stripePage (aeBaseUrl env) site bundle' (Just "Could not save keys (see server log)."))
 
 -- ---------------------------------------------------------------------------
 -- Cookies

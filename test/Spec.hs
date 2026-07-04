@@ -45,6 +45,14 @@ import Swwstructor.Edit
   , sectionsOf
   , setSectionAt
   )
+import Swwstructor.Media
+  ( MediaKind (Gif, Jpeg, Png, Svg, Webp)
+  , contentTypeFor
+  , isSafeMediaName
+  , mediaFileName
+  , sanitizeBaseName
+  , sniffKind
+  )
 import Swwstructor.Money (currencySymbol, formatPrice, price)
 import qualified Swwstructor.Money as Money
 import Swwstructor.Templates
@@ -54,7 +62,9 @@ import Swwstructor.Templates
   , resolvePage
   , resolvedSection
   )
-import Swwstructor.Theme (nytTheme, themeCss, themeFromJSON, themeToJSON)
+import Swwstructor.Theme (nytTheme, sanitizeFontUrl, themeCss, themeFromJSON, themeToJSON)
+
+import qualified Data.ByteString as BS
 import StickyWM
   ( Document
   , Rect (rx)
@@ -428,6 +438,45 @@ templateEngineTests = do
     , check "products defined in a partial reach the buy registry" ("widget" `elem` buys)
     ]
 
+fontUrlTests :: IO [Bool]
+fontUrlTests = do
+  section "webfont url sanitisation (a URL is not a CSS value)"
+  let google = "https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=Inter:wght@400;500&display=swap"
+  sequence
+    [ check "a Google Fonts href survives untouched (:?=&+;@ intact)" (sanitizeFontUrl google == Just google)
+    , check "http is allowed" (sanitizeFontUrl "http://x.test/a?b=c" == Just "http://x.test/a?b=c")
+    , check "javascript: is refused" (sanitizeFontUrl "javascript:alert(1)" == Nothing)
+    , check "protocol-relative is refused" (sanitizeFontUrl "//evil.test/x.css" == Nothing)
+    , check "quotes and angle brackets are dropped" (sanitizeFontUrl "https://x.test/\"><script>" == Just "https://x.test/script")
+    , check "surrounding whitespace is tolerated" (sanitizeFontUrl "  https://x.test/f.css  " == Just "https://x.test/f.css")
+    ]
+
+mediaTests :: IO [Bool]
+mediaTests = do
+  section "media library (pure core: sniffing + names)"
+  let jpeg = BS.pack [0xFF, 0xD8, 0xFF, 0xE0] <> "....JFIF"
+      png = BS.pack [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A] <> "IHDR"
+      gif = "GIF89a......"
+      webp = "RIFF" <> BS.pack [0, 0, 0, 0] <> "WEBPVP8 "
+      svg = "<?xml version=\"1.0\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>"
+      exe = "MZ\x90\x00stub"
+  sequence
+    [ check "sniffs jpeg" (sniffKind jpeg == Just Jpeg)
+    , check "sniffs png" (sniffKind png == Just Png)
+    , check "sniffs gif" (sniffKind gif == Just Gif)
+    , check "sniffs webp" (sniffKind webp == Just Webp)
+    , check "sniffs svg" (sniffKind svg == Just Svg)
+    , check "refuses an executable" (sniffKind exe == Nothing)
+    , check "base name is slugged" (sanitizeBaseName "Emilie's Photo (1).JPG" == "emilie-s-photo-1")
+    , check "empty base name falls back" (sanitizeBaseName "....jpg" == "img")
+    , check "stored name is slug-hash.ext" (mediaFileName "My Pic.PNG" "a1b2c3d4e5f6" Png == "my-pic-a1b2c3d4e5f6.png")
+    , check "safe names accept generated ones" (isSafeMediaName "my-pic-a1b2c3d4e5f6.png")
+    , check "safe names refuse traversal" (not (isSafeMediaName "../secrets.enc"))
+    , check "safe names refuse separators" (not (isSafeMediaName "a/b.png"))
+    , check "safe names refuse dotfiles" (not (isSafeMediaName ".hidden.png"))
+    , check "content type follows the extension" (contentTypeFor "x.webp" == Just "image/webp" && contentTypeFor "x.bin" == Nothing)
+    ]
+
 main :: IO ()
 main = do
   results <-
@@ -440,6 +489,8 @@ main = do
         , codecRoundTrip
         , blockRoundTrip
         , themeTests
+        , fontUrlTests
+        , mediaTests
         , checkoutTests
         , moneyTests
         ]

@@ -20,6 +20,7 @@ module Swwstructor.Theme
   , defaultTheme
   , nytTheme
   , sanitizeCssValue
+  , sanitizeFontUrl
   , themeFontLink
   , themeCss
   , themeToJSON
@@ -135,10 +136,25 @@ cssColor (Color c) = sanitizeCssValue c
 cssFont :: Text -> Text
 cssFont = sanitizeCssValue
 
--- | The webfont @\<link>@ href, if the theme declares one (already sanitised to
--- a url-safe set by 'sanitizeCssValue').
+-- | Sanitise an owner-supplied webfont URL for a @\<link href>@. A URL is NOT a
+-- CSS value: a Google Fonts href legitimately carries @:?=&+;\@@ — running it
+-- through 'sanitizeCssValue' strips the scheme colon and the whole query
+-- apart ("https//…css2familyInter…"), so the stylesheet never loads. Here we
+-- keep the RFC-3986 character set and require an http(s) scheme (refusing
+-- @javascript:@ and friends); the HTML attribute context is protected by
+-- 'Swwstructor.Html.escAttr' at render time.
+sanitizeFontUrl :: Text -> Maybe Text
+sanitizeFontUrl raw =
+  let u = T.filter urlOk (T.strip raw)
+   in if "https://" `T.isPrefixOf` u || "http://" `T.isPrefixOf` u
+        then Just u
+        else Nothing
+  where
+    urlOk c = isAlphaNum c || c `elem` (":/?#[]@!$&'()*+,;=-._~%" :: String)
+
+-- | The webfont @\<link>@ href, if the theme declares one (sanitised as a URL).
 themeFontLink :: Theme -> Maybe Text
-themeFontLink = fmap sanitizeCssValue . themeFontUrl
+themeFontLink th = themeFontUrl th >>= sanitizeFontUrl
 
 -- | Density-derived spacing knobs (block padding, body line-height,
 -- inter-section gap).
@@ -211,7 +227,11 @@ themeCss th =
         , ".sww-figure{width:100%;height:100%;min-height:120px;border-radius:var(--sww-radius);"
         , "  background:linear-gradient(135deg,var(--sww-border),var(--sww-bg) 70%);"
         , "  display:flex;align-items:flex-end;padding:10px;overflow:hidden;position:relative;}"
-        , ".sww-figure-img{padding:0;}"
+        -- The -img variant stacks photo over caption inside the FIXED-height
+        -- window box: the photo flexes to fill whatever the caption leaves and
+        -- cover-crops to it, so the rendered box always equals the solved box.
+        , ".sww-figure-img{padding:0;flex-direction:column;align-items:stretch;}"
+        , ".sww-figure-img .sww-img{flex:1 1 auto;min-height:0;height:auto;}"
         , ".sww-img{width:100%;height:100%;object-fit:cover;border-radius:var(--sww-radius);display:block;}"
         , ".sww-figcap{font-family:var(--sww-body);font-size:11px;color:var(--sww-muted);"
         , "  background:var(--sww-bg);padding:2px 6px;border-radius:4px;position:absolute;left:8px;bottom:8px;opacity:.9;}"

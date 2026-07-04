@@ -4,7 +4,8 @@
 # 55/55 green.
 { mkDerivation, base, bytestring, containers, crypton, directory
 , filepath, HsYAML, http-client, http-client-tls, http-types, lib
-, memory, mtl, scotty, stickywebwm, text, wai-extra, warp, src
+, memory, mtl, scotty, stickywebwm, text, time, wai, wai-extra
+, warp, src
 }:
 mkDerivation {
   pname = "swwstructor";
@@ -16,9 +17,9 @@ mkDerivation {
   executableHaskellDepends = [
     base bytestring containers crypton directory filepath HsYAML
     http-client http-client-tls http-types memory mtl scotty stickywebwm
-    text wai-extra warp
+    text time wai wai-extra warp
   ];
-  testHaskellDepends = [ base containers stickywebwm text ];
+  testHaskellDepends = [ base bytestring containers stickywebwm text ];
   description = "A single-tenant website constructor on the stickywebwm layout engine";
   license = lib.meta.getLicenseFromSpdxId "MIT";
   mainProgram = "swwstructor-server";

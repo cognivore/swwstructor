@@ -109,7 +109,30 @@ nix build .#swwstructor-server    # the server package (runs the test-suite insi
 
 ---
 
+## Media library (uploads: multi-file + auto-compression)
+
+`/admin/media` is the owner's photo library. Drop any number of photos onto the
+page (or pick several at once): each is **compressed in the browser** before it
+travels (canvas re-encode capped at 2000px, JPEG q0.82; PNGs only ever shrink,
+so transparency survives; GIF/SVG pass through), then stored under
+`<data dir>/uploads/` as `<slug>-<sha256-prefix>.<ext>` — content-addressed, so
+re-uploading the same photo is idempotent and `/media/*` is served with
+immutable caching. The server sniffs magic bytes (images only, 15 MB cap) and
+never trusts the client's file name or MIME. "Copy URL" on any photo gives the
+`/media/…` URL to paste into a section's "Image URL" field. Uploads are state,
+not content template: they live next to `site.json` and survive redeploys.
+
 ## Stripe (admin WebUI + secrets)
+
+**How products flow (the part owners never guess right):** products live in the
+*site content* — a `productGrid` section edited at `/admin` — not in the Stripe
+dashboard. You never create Products or Prices in Stripe. At purchase time the
+site mirrors the product to Stripe: the buy button `POST`s its stable buy id,
+the server resolves name + price from the owner's content and creates a hosted
+Checkout Session with inline `price_data`. Content is the single source of
+truth; Stripe is the payment rail. The `/admin/stripe` tab shows every product
+currently wired to checkout (with the page/partial it is defined in) and
+whether checkout is ready.
 
 The owner never edits a config file for keys. They sign in at `/admin` and paste:
 

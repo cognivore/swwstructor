@@ -17,6 +17,7 @@ module Swwstructor.Server.Admin
   , themeEditorPage
   , stripePage
   , templatePage
+  , mediaLibraryPage
     -- * Pure form parsers
   , parseSection
   , parseTheme
@@ -37,6 +38,7 @@ import Swwstructor.Content
   , SiteSpec (siteDescription, sitePages, sitePartials, siteTitle)
   , Story (..)
   )
+import Swwstructor.Server.Media (MediaEntry (..))
 import Swwstructor.Edit (isPartialPath, sectionKinds, sectionLabelOf)
 import Swwstructor.Html (Html, el, elAttr, esc, htmlConcat, rawHtml, voidElAttr)
 import Swwstructor.Money
@@ -111,6 +113,20 @@ adminCss =
     , ".muted{color:var(--mut);font-size:13px}.flash{background:#ecfdf5;border:1px solid #a7f3d0;color:#065f46;padding:9px 12px;border-radius:8px;margin:0 0 12px;font-size:14px}"
     , ".pill{font-size:12px;font-weight:700;padding:2px 8px;border-radius:999px}.pill.on{background:#ecfdf5;color:var(--ok)}.pill.off{background:#f3f4f6;color:var(--mut)}"
     , ".actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:16px;align-items:center}"
+    , ".hint{font-size:12px;color:var(--mut);margin:4px 0 0}"
+    , ".drop{border:2px dashed var(--line);border-radius:12px;padding:30px 16px;text-align:center;color:var(--mut);cursor:pointer;font-size:14px}"
+    , ".drop.on{border-color:var(--acc);color:var(--acc);background:#eef2ff}"
+    , "#uplog{list-style:none;margin:10px 0 0;padding:0;font-size:13px}#uplog li{padding:3px 0;color:var(--mut)}#uplog li.ok{color:var(--ok)}#uplog li.err{color:var(--danger)}"
+    , ".mediagrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:14px}"
+    , ".mediacard{border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#fff;display:flex;flex-direction:column}"
+    , ".mediacard img{width:100%;height:128px;object-fit:cover;display:block;background:#f3f4f6}"
+    , ".mediacard .meta{padding:8px 10px;font-size:12px;color:var(--mut);word-break:break-all}"
+    , ".mediacard .meta code{color:var(--ink);font-size:11px}"
+    , ".mediacard .bar{display:flex;gap:6px;padding:0 10px 10px;margin-top:auto}"
+    , ".mediacard .bar button{padding:5px 10px;font-size:12px;border-radius:8px}"
+    , "table.plist{width:100%;border-collapse:collapse;font-size:14px}table.plist th{font-size:12px;color:var(--mut);text-transform:uppercase;letter-spacing:.04em;text-align:left}"
+    , "table.plist th,table.plist td{padding:8px 10px;border-bottom:1px solid var(--line)}table.plist code{font-size:12px;background:#f3f4f6;padding:1px 6px;border-radius:6px}"
+    , "ol.steps{margin:0;padding-left:20px}ol.steps li{margin:0 0 10px}ol.steps b{display:block}"
     ]
 
 topbar :: Html
@@ -120,8 +136,9 @@ topbar =
       [ elAttr "span" [("class", "brand")] (esc "swwstructor")
       , elAttr "a" [("href", "/admin")] (esc "Pages")
       , elAttr "a" [("href", "/admin/template")] (esc "Template")
+      , elAttr "a" [("href", "/admin/media")] (esc "Media")
       , elAttr "a" [("href", "/admin/theme")] (esc "Theme")
-      , elAttr "a" [("href", "/admin/stripe")] (esc "Stripe")
+      , elAttr "a" [("href", "/admin/stripe")] (esc "Shop & Stripe")
       , elAttr "span" [("class", "sp")] mempty
       , elAttr "a" [("href", "/"), ("target", "_blank")] (esc "View site \x2197")
       , elAttr "a" [("href", "/admin/logout")] (esc "Sign out")
@@ -263,7 +280,7 @@ pageEditorPage path pg fl =
                 el "h1" (esc heading)
                   <> elAttr "a" [("href", backHref), ("class", "muted")] (esc backLabel)
             , if container
-                then elAttr "p" [("class", "muted")] (esc "These sections are reusable — included via \x201CInclude a partial\x201D, and (for \x201Cheader\x201D/\x201Cfooter\x201D) auto-applied to every page.")
+                then elAttr "p" [("class", "muted")] (esc "These sections are reusable — included via \x201CInclude a partial\x201D, and (for \x201Cheader\x201D/\x201C\&footer\x201D) auto-applied to every page.")
                 else mempty
             , elAttr "div" [("class", "split")] $
                 htmlConcat
@@ -328,7 +345,7 @@ templatePage site fl =
           htmlConcat
             [ flash fl
             , el "h1" (esc "Template")
-            , elAttr "p" [("class", "muted")] (esc "Reusable blocks defined once. A partial named \x201Cheader\x201D appears at the top of every page and \x201Cfooter\x201D at the bottom — automatically. Include any other partial on a page with the \x201CInclude a partial\x201D section: define your products (or anything) once and show them on as many pages as you like.")
+            , elAttr "p" [("class", "muted")] (esc "Reusable blocks defined once. A partial named \x201Cheader\x201D appears at the top of every page and \x201C\&footer\x201D at the bottom — automatically. Include any other partial on a page with the \x201CInclude a partial\x201D section: define your products (or anything) once and show them on as many pages as you like.")
             , elAttr "div" [("class", "card")] $
                 el "h2" (esc "Partials")
                   <> ( case sitePartials site of
@@ -525,6 +542,7 @@ imgFields pfx mimg = fieldset' "Figure" (imgInner (\f -> pfx <> "-" <> f) (fromM
 imgInner :: (Text -> Text) -> ImageRef -> Html
 imgInner k img =
   ipt "text" (k "src") "Image URL (blank = a placeholder)" (orEmpty (imgSrc img))
+    <> elAttr "p" [("class", "hint")] (esc "Upload photos in " <> elAttr "a" [("href", "/admin/media"), ("target", "_blank")] (esc "Media") <> esc ", then \x201C\&Copy URL\x201D and paste it here.")
     <> ipt "text" (k "caption") "Caption" (imgCaption img)
     <> elAttr "div" [("class", "row")] (ipt "number" (k "aspect") "Aspect (w/h)" (numT (imgAspect img)) <> ipt "number" (k "cap") "Max height (px)" (numT (imgCap img)))
 
@@ -579,40 +597,234 @@ themeEditorPage th fl =
           <> elAttr "div" [("style", "flex:1")] (ipt "text" name lbl c)
 
 -- ---------------------------------------------------------------------------
--- Stripe tab
+-- Shop & Stripe tab
 -- ---------------------------------------------------------------------------
 
-stripePage :: SecretBundle -> Maybe Text -> Html
-stripePage bundle fl =
-  adminDoc "Stripe keys" $
+-- | The shop tab: how products flow from content to Stripe (the part owners
+-- never guess right), the live product registry, and the keys form.
+stripePage :: Text -> SiteSpec -> SecretBundle -> Maybe Text -> Html
+stripePage baseUrl site bundle fl =
+  adminDoc "Shop & Stripe" $
     htmlConcat
       [ topbar
-      , elAttr "div" [("class", "wrap"), ("style", "max-width:620px")] $
+      , elAttr "div" [("class", "wrap"), ("style", "max-width:760px")] $
           htmlConcat
             [ flash fl
-            , el "h1" (esc "Stripe keys")
-            , elAttr "p" [("class", "muted")] (esc "Use TEST keys for demos. Stored encrypted at rest; blank fields keep the existing value.")
-            , elAttr "div" [("class", "card")] $
-                htmlConcat
-                  [ statusRow "Publishable key (pk)" (isSet (sbStripePk bundle))
-                  , statusRow "Secret key (sk)" (isSet (sbStripeSk bundle))
-                  , statusRow "Webhook signing secret" (isSet (sbStripeWebhook bundle))
-                  , elAttr "form" [("method", "post"), ("action", "/admin/secrets")] $
-                      ipt "text" "stripePk" "Publishable key (pk_...)" ""
-                        <> ipt "password" "stripeSk" "Secret key (sk_...)" ""
-                        <> ipt "password" "stripeWebhook" "Webhook signing secret (whsec_...)" ""
-                        <> elAttr "div" [("class", "actions")] (elAttr "button" [("class", "primary"), ("type", "submit")] (esc "Save keys"))
-                  , elAttr "p" [("class", "muted"), ("style", "margin-top:14px")] (rawHtml "Webhook endpoint: " <> elAttr "code" [] (esc "/stripe/webhook"))
-                  ]
+            , el "h1" (esc "Shop & Stripe")
+            , readiness
+            , howCard
+            , productsCard
+            , keysCard
+            , webhookCard
             ]
       ]
   where
+    products = siteProducts site
+    skSet = isSet (sbStripeSk bundle)
+    readiness
+      | null products && not skSet =
+          elAttr "p" [("class", "muted")] (esc "Two things make your shop live: products (added below your pages as \x201CProduct grid\x201D sections) and your Stripe keys (pasted once, here). Neither exists yet — the guide below walks you through both.")
+      | otherwise = mempty
+    howCard =
+      elAttr "div" [("class", "card")] $
+        el "h2" (esc "How your shop works")
+          <> elAttr "ol" [("class", "steps")] (htmlConcat
+               [ elAttr "li" [] $
+                   elAttr "b" [] (esc "Products live in your site content \x2014 not in the Stripe dashboard.")
+                     <> esc "To sell something, edit a page (Pages \x2192 Edit), add a \x201CProduct grid\x201D section, and fill in the name, price, photo and a short unique \x201C\&buy id\x201D (e.g. "
+                     <> elAttr "code" [] (esc "class-daifuku")
+                     <> esc "). You never create Products or Prices inside Stripe itself."
+               , elAttr "li" [] $
+                   elAttr "b" [] (esc "The website mirrors them to Stripe at the moment of purchase.")
+                     <> esc "Every product automatically gets a Buy button. When a customer clicks it, this site sends the product's name and price from your content to Stripe and forwards the customer to Stripe's secure checkout page. The price always comes from your content here \x2014 a buyer can never alter it."
+               , elAttr "li" [] $
+                   elAttr "b" [] (esc "Stripe handles the money.")
+                     <> esc "Cards, Apple Pay, receipts and payouts to your bank are all Stripe's job. Every sale appears in your Stripe dashboard (dashboard.stripe.com); turn on customer receipt emails there under Settings \x2192 Emails."
+               ])
+    productsCard =
+      elAttr "div" [("class", "card")] $
+        el "h2" (esc "Products on your site right now")
+          <> ( case products of
+                 [] ->
+                   elAttr "p" [("class", "muted")] (esc "No products yet. Add your first: Pages \x2192 pick a page \x2192 Add a section \x2192 \x201CProduct grid (shop)\x201D. Everything you list there appears here, wired to checkout.")
+                 ps ->
+                   elAttr "table" [("class", "plist")] $
+                     elAttr "tr" [] (el "th" (esc "Product") <> el "th" (esc "Price") <> el "th" (esc "Buy id") <> el "th" (esc "Defined in"))
+                       <> htmlConcat
+                         [ elAttr "tr" [] $
+                             el "td" (esc nm)
+                               <> el "td" (esc (fmtPrice pr))
+                               <> el "td" (elAttr "code" [] (esc tgt))
+                               <> el "td" (esc loc)
+                         | (tgt, nm, pr, loc) <- ps
+                         ]
+             )
+          <> checkoutPill
+    checkoutPill =
+      elAttr "p" [("style", "margin:14px 0 0")] $
+        esc "Checkout is "
+          <> ( if skSet
+                 then elAttr "span" [("class", "pill on")] (esc "ready") <> esc " \x2014 buy buttons lead to a real Stripe checkout."
+                 else elAttr "span" [("class", "pill off")] (esc "not connected") <> esc " \x2014 buy buttons will apologise until you paste your Secret key below."
+             )
+    keysCard =
+      elAttr "div" [("class", "card")] $
+        htmlConcat
+          [ el "h2" (esc "Connect Stripe (your keys)")
+          , elAttr "p" [("class", "muted")] (esc "Sign in at dashboard.stripe.com \x2192 Developers \x2192 API keys, and copy the two keys. Use the test keys (pk_test_/sk_test_) to try things out with card number 4242 4242 4242 4242, and switch to live keys when you're ready to take real payments. Keys are stored encrypted; a blank field keeps its current value, so you can rotate one at a time.")
+          , statusRow "Publishable key (pk)" (isSet (sbStripePk bundle))
+          , statusRow "Secret key (sk)" skSet
+          , statusRow "Webhook signing secret" (isSet (sbStripeWebhook bundle))
+          , elAttr "form" [("method", "post"), ("action", "/admin/secrets")] $
+              ipt "text" "stripePk" "Publishable key (pk_...)" ""
+                <> ipt "password" "stripeSk" "Secret key (sk_...)" ""
+                <> ipt "password" "stripeWebhook" "Webhook signing secret (whsec_...)" ""
+                <> elAttr "div" [("class", "actions")] (elAttr "button" [("class", "primary"), ("type", "submit")] (esc "Save keys"))
+          ]
+    webhookCard =
+      elAttr "div" [("class", "card")] $
+        htmlConcat
+          [ el "h2" (esc "Webhook (optional, for payment confirmations)")
+          , elAttr "p" [("class", "muted")] $
+              esc "If you want this site to receive confirmation events from Stripe: in the Stripe dashboard go to Developers \x2192 Webhooks \x2192 Add endpoint, use the URL "
+                <> elAttr "code" [] (esc (baseUrl <> "/stripe/webhook"))
+                <> esc ", subscribe to checkout.session.completed, then paste the endpoint's signing secret (whsec_\x2026) above. Without it the shop still works \x2014 you simply rely on the Stripe dashboard and its emails to see payments."
+          ]
     statusRow lbl on =
       elAttr "div" [("class", "sec")] $
         elAttr "span" [("class", "sum")] (esc lbl)
           <> elAttr "span" [("class", "pill " <> if on then "on" else "off")] (esc (if on then "configured" else "not set"))
     isSet (Just _) = True
     isSet Nothing = False
+
+-- | Every product across pages AND partials, with where it is defined — the
+-- admin-facing view of the server's buy registry.
+siteProducts :: SiteSpec -> [(Text, Text, Price, Text)]
+siteProducts site =
+  [ (tgt, prodName p, prodPrice p, loc)
+  | (loc, secs) <- containers
+  , ProductGrid _ _ ps <- secs
+  , p <- ps
+  , let BuyTarget tgt = prodBuy p
+  ]
+  where
+    containers =
+      [("page " <> pagePath pg, pageSections pg) | pg <- sitePages site]
+        <> [("partial \x201C" <> partialName pt <> "\x201D", partialSections pt) | pt <- sitePartials site]
+
+fmtPrice :: Price -> Text
+fmtPrice p = let (amt, cur) = priceToInput p in amt <> " " <> T.toUpper cur
+
+-- ---------------------------------------------------------------------------
+-- Media library (uploads)
+-- ---------------------------------------------------------------------------
+
+-- | The photo library: a multi-file drag-and-drop uploader that compresses
+-- photos in the browser before they travel (canvas re-encode, capped at
+-- 2000px), plus the grid of stored photos with copy-the-URL and delete.
+mediaLibraryPage :: [MediaEntry] -> Maybe Text -> Html
+mediaLibraryPage entries fl =
+  adminDoc "Media" $
+    htmlConcat
+      [ topbar
+      , elAttr "div" [("class", "wrap")] $
+          htmlConcat
+            [ flash fl
+            , el "h1" (esc "Media")
+            , elAttr "p" [("class", "muted")] (esc "Your photo library. Drop photos below (or click to choose several at once) \x2014 they are automatically resized and compressed for the web on your computer before uploading. Then press \x201C\&Copy URL\x201D on a photo and paste it into any section's \x201CImage URL\x201D field.")
+            , uploaderCard
+            , libraryCard
+            , rawHtml uploaderJs
+            ]
+      ]
+  where
+    uploaderCard =
+      elAttr "div" [("class", "card")] $
+        htmlConcat
+          [ elAttr "div" [("class", "drop"), ("id", "drop")] (esc "Drop photos here \x2014 or click to choose files")
+          , voidElAttr "input" [("type", "file"), ("id", "pick"), ("multiple", "multiple"), ("accept", "image/*"), ("style", "display:none")]
+          , elAttr "div" [("class", "inline"), ("style", "margin-top:10px")] $
+              voidElAttr "input" [("type", "checkbox"), ("id", "docompress"), ("checked", "checked")]
+                <> elAttr "label" [("for", "docompress")] (esc "Compress photos before upload (recommended)")
+          , elAttr "ul" [("id", "uplog")] mempty
+          ]
+    libraryCard =
+      elAttr "div" [("class", "card")] $
+        el "h2" (esc ("Library (" <> T.pack (show (length entries)) <> ")"))
+          <> ( case entries of
+                 [] -> elAttr "p" [("class", "muted")] (esc "Nothing here yet \x2014 your uploaded photos will appear in this grid.")
+                 es -> elAttr "div" [("class", "mediagrid")] (htmlConcat (map mediaCard es))
+             )
+    mediaCard e =
+      let url = "/media/" <> meName e
+       in elAttr "div" [("class", "mediacard")] $
+            htmlConcat
+              [ elAttr "a" [("href", url), ("target", "_blank")] (voidElAttr "img" [("src", url), ("loading", "lazy"), ("alt", meName e)])
+              , elAttr "div" [("class", "meta")] (elAttr "code" [] (esc (meName e)) <> esc (" \xB7 " <> fmtBytes (meBytes e)))
+              , elAttr "div" [("class", "bar")] $
+                  elAttr "button" [("type", "button"), ("data-copy", url)] (esc "Copy URL")
+                    <> elAttr "form" [("method", "post"), ("action", "/admin/media/delete")] (hidden "name" (meName e) <> btn "danger" "delete" "Delete")
+              ]
+
+fmtBytes :: Integer -> Text
+fmtBytes n
+  | n >= 1048576 = T.pack (show (n `div` 1048576)) <> "." <> T.pack (show ((n `mod` 1048576) * 10 `div` 1048576)) <> " MB"
+  | n >= 1024 = T.pack (show (n `div` 1024)) <> " KB"
+  | otherwise = T.pack (show n) <> " B"
+
+-- | The uploader client. A fixed literal (never owner content): shrink on a
+-- canvas (photos only; PNGs stay PNG so transparency survives, and only ever
+-- shrink), then POST one file per request to @\/admin\/upload?json=1@.
+uploaderJs :: Text
+uploaderJs =
+  T.concat
+    [ "<script>(function(){"
+    , "var drop=document.getElementById('drop'),pick=document.getElementById('pick'),log=document.getElementById('uplog');"
+    , "if(!drop||!pick||!log)return;"
+    , "function fmt(n){return n>1048576?(n/1048576).toFixed(1)+' MB':Math.round(n/1024)+' KB';}"
+    , "function line(t){var li=document.createElement('li');li.textContent=t;log.appendChild(li);return li;}"
+    , "async function shrink(f){"
+    , "var doC=document.getElementById('docompress').checked;if(!doC)return f;"
+    , "var jpegish=(f.type==='image/jpeg'||f.type==='image/webp'),png=(f.type==='image/png');"
+    , "if(!jpegish&&!png)return f;"
+    , "var img;try{img=await createImageBitmap(f);}catch(e){return f;}"
+    , "var MAX=2000,sc=Math.min(1,MAX/Math.max(img.width,img.height));"
+    , "if(sc===1&&(png||f.size<300*1024))return f;"
+    , "var w=Math.max(1,Math.round(img.width*sc)),h=Math.max(1,Math.round(img.height*sc));"
+    , "var cv=document.createElement('canvas');cv.width=w;cv.height=h;var cx=cv.getContext('2d');"
+    , "if(!png){cx.fillStyle='#fff';cx.fillRect(0,0,w,h);}"
+    , "cx.drawImage(img,0,0,w,h);"
+    , "var type=png?'image/png':'image/jpeg';"
+    , "var blob=await new Promise(function(r){cv.toBlob(r,type,0.82);});"
+    , "if(blob&&blob.size<f.size){var stem=f.name.replace(/[.][A-Za-z0-9]+$/,'');"
+    , "return new File([blob],stem+(png?'.png':'.jpg'),{type:type});}"
+    , "return f;}"
+    , "async function sendAll(files){"
+    , "var list=Array.prototype.slice.call(files||[]);if(!list.length)return;var okc=0;"
+    , "for(var i=0;i<list.length;i++){var f=list[i];var li=line(f.name+' \\u2014 preparing\\u2026');"
+    , "try{var g=await shrink(f);"
+    , "var note=(g!==f)?' (compressed '+fmt(f.size)+' \\u2192 '+fmt(g.size)+')':'';"
+    , "li.textContent=f.name+' \\u2014 uploading'+note+'\\u2026';"
+    , "var fd=new FormData();fd.append('file',g,g.name);"
+    , "var res=await fetch('/admin/upload?json=1',{method:'POST',body:fd});"
+    , "var j=await res.json();"
+    , "if(j.saved&&j.saved.length){li.textContent=f.name+' \\u2014 uploaded'+note;li.className='ok';okc++;}"
+    , "else{li.textContent=f.name+' \\u2014 failed: '+((j.errors&&j.errors[0])||('HTTP '+res.status));li.className='err';}"
+    , "}catch(e){li.textContent=f.name+' \\u2014 failed: '+e;li.className='err';}}"
+    , "if(okc){line('Refreshing the library\\u2026');setTimeout(function(){location.reload();},1200);}}"
+    , "drop.addEventListener('click',function(){pick.click();});"
+    , "pick.addEventListener('change',function(){sendAll(pick.files);pick.value='';});"
+    , "['dragenter','dragover'].forEach(function(ev){drop.addEventListener(ev,function(e){e.preventDefault();drop.classList.add('on');});});"
+    , "['dragleave','drop'].forEach(function(ev){drop.addEventListener(ev,function(e){e.preventDefault();drop.classList.remove('on');});});"
+    , "drop.addEventListener('drop',function(e){if(e.dataTransfer)sendAll(e.dataTransfer.files);});"
+    , "document.addEventListener('click',function(e){"
+    , "var b=e.target&&e.target.closest?e.target.closest('[data-copy]'):null;if(!b)return;"
+    , "var url=location.origin+b.getAttribute('data-copy');"
+    , "var done=function(){b.textContent='Copied!';setTimeout(function(){b.textContent='Copy URL';},1200);};"
+    , "if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(url).then(done,function(){window.prompt('Copy this URL:',url);});}"
+    , "else{window.prompt('Copy this URL:',url);}});"
+    , "})();</script>"
+    ]
 
 -- ---------------------------------------------------------------------------
 -- Pure parsers: form params -> SectionSpec / Theme

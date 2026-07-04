@@ -119,6 +119,8 @@ main = do
           , aeSession = sessionRef
           , aeAdminPassword = adminPw
           , aeManager = mgr
+          , aeSiteDir = siteDir
+          , aeDataDir = dataDir
           }
 
   when (T.null adminPw) (putStrLn "[swwstructor] note: admin is unconfigured (no password).")

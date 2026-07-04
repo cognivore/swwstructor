@@ -44,6 +44,7 @@ import StickyWM
   , Rect (..)
   , Viewport (..)
   , Win
+  , WinType (Figure)
   , build
   , solveWith
   , totalHeight
@@ -111,7 +112,7 @@ renderBox blocks (w, r) =
         ( [ ("class", "sww-win sww-win-" <> winClass w)
           , ("id", T.pack (wId w))
           , ("data-win", T.pack (wId w))
-          , ("style", boxStyle r)
+          , ("style", boxStyleFor w r)
           ]
             <> stickyAttrs w
         )
@@ -132,14 +133,22 @@ stickyAttrs w = case wSticky w of
 winClass :: Win -> Text
 winClass = T.pack . winTypeTag . wType
 
-boxStyle :: Rect -> Text
-boxStyle r =
+-- | Figures get a FIXED height (the solved aspect box) + overflow:hidden, so
+-- the photo is cover-cropped to exactly the space the solver reserved — a
+-- portrait can never stretch its box over the section below. Text windows
+-- keep min-height: pass 2 measures their true height and re-packs.
+boxStyleFor :: Win -> Rect -> Text
+boxStyleFor w r
+  | wType w == Figure = boxBase r <> "height:" <> px (rh r) <> ";overflow:hidden;"
+  | otherwise = boxBase r <> "min-height:" <> px (rh r) <> ";"
+
+boxBase :: Rect -> Text
+boxBase r =
   T.concat
     [ "position:absolute;"
     , "left:" <> px (rx r) <> ";"
     , "top:" <> px (ry r) <> ";"
     , "width:" <> px (rw r) <> ";"
-    , "min-height:" <> px (rh r) <> ";"
     ]
 
 px :: Double -> Text
@@ -225,10 +234,15 @@ relayoutScript th =
       , "var mh=b.style.minHeight;b.style.minHeight='0px';"
       , "o[id]=Math.ceil(b.getBoundingClientRect().height);b.style.minHeight=mh;}return o;}"
       , "var GAP=24;"
-      , "function sstep(p,pin,rel,s){"
+      , "function sstep1(p,pin,rel,s){"
       , "if(p==='before')return s>=pin?'pinned':'before';"
       , "if(p==='pinned'){if(s<=pin-GAP)return 'before';if(s>=rel)return 'after';return 'pinned';}"
       , "return s<=rel-GAP?'pinned':'after';}"
+      -- A scroll event can jump many pixels (or the stage can be swapped in at
+      -- depth, e.g. the font-ready relayout), so run the automaton to a fixed
+      -- point per event — stepping once per event can strand a figure pinned
+      -- over the content below it.
+      , "function sstep(p,pin,rel,s){for(var k=0;k<3;k++){var q=sstep1(p,pin,rel,s);if(q===p)break;p=q;}return p;}"
       , "function setupSticky(stage){var its=[];var bs=stage.querySelectorAll('[data-sticky=\"1\"]');"
       , "for(var i=0;i<bs.length;i++){var b=bs[i];"
       , "var off=parseFloat(b.getAttribute('data-sticky-offset'))||12;"
@@ -237,7 +251,9 @@ relayoutScript th =
       , "var h=b.getBoundingClientRect().height;var cb=top0+h;"
       , "for(var j=0;j<refs.length;j++){var rf=refs[j]&&document.getElementById(refs[j]);"
       , "if(rf)cb=Math.max(cb,rf.offsetTop+rf.offsetHeight);}"
-      , "its.push({el:b,off:off,top0:top0,left0:left0,w0:w0,h:h,cb:cb,ph:'before'});}"
+      -- No travel = nothing to ride (the figure is as tall as its container):
+      -- pinning could only overlap neighbours, so leave it in normal flow.
+      , "if(cb-h-top0>6)its.push({el:b,off:off,top0:top0,left0:left0,w0:w0,h:h,cb:cb,ph:'before'});}"
       , "if(!its.length){window.__swwFrame=null;return;}"
       , "var sdoc=stage.getBoundingClientRect().top+window.pageYOffset;"
       , "function frame(){var s=window.pageYOffset;var sl=stage.getBoundingClientRect().left;"
@@ -254,20 +270,32 @@ relayoutScript th =
       , "if(!window.__swwBound){window.__swwBound=1;var tk=0;window.addEventListener('scroll',function(){"
       , "if(tk)return;tk=requestAnimationFrame(function(){tk=0;if(window.__swwFrame)window.__swwFrame();});},{passive:true});}"
       , "frame();}"
+      -- Measure -> solve -> re-measure until heights converge (<=2px drift,
+      -- max 3 solves). One pass is not enough when metrics move under us —
+      -- most commonly a webfont arriving after the first measure — and any
+      -- under-measured box would leave the next window overlapping it.
+      , "function same(a,b){if(!b)return false;for(var k in a){if(Math.abs(a[k]-(b[k]||0))>2)return false;}return true;}"
+      , "function finish(stage){stage.style.visibility='visible';setupSticky(stage);}"
+      , "function settle(stage,w,prev,n){"
+      , "var ov=measure(stage);"
+      , "if(n>=3||same(ov,prev)){finish(stage);return;}"
+      , "fetch('/layout',{method:'POST',headers:{'Content-Type':'application/json'},"
+      , "body:JSON.stringify({w:w,path:location.pathname,overrides:ov})}).then(function(r){return r.text();})"
+      , ".then(function(h2){var s2=apply(h2);if(s2){s2.style.visibility='hidden';settle(s2,w,ov,n+1);}else{finish(stage);}})"
+      , ".catch(function(){finish(stage);});}"
       , "function relayout(force){"
       , "var w=Math.min(document.documentElement.clientWidth||window.innerWidth||1180,MAX);"
       , "if(!force&&w===lastW)return;lastW=w;"
       , "fetch('/layout?w='+w).then(function(r){return r.text();}).then(function(h){"
       , "var stage=apply(h);if(!stage)return;stage.style.visibility='hidden';"
-      , "var ov=measure(stage);"
-      , "return fetch('/layout',{method:'POST',headers:{'Content-Type':'application/json'},"
-      , "body:JSON.stringify({w:w,path:location.pathname,overrides:ov})}).then(function(r){return r.text();})"
-      , ".then(function(h2){var s2=apply(h2);if(s2){s2.style.visibility='visible';setupSticky(s2);}})"
-      , ".catch(function(){stage.style.visibility='visible';setupSticky(stage);});"
+      , "settle(stage,w,null,0);"
       , "}).catch(function(){});}"
       , "var t;window.addEventListener('resize',function(){clearTimeout(t);t=setTimeout(function(){relayout(false);},200);});"
       , "var init=document.querySelector('.sww-stage');if(init)init.style.visibility='hidden';"
       , "relayout(true);"
-      , "if(document.fonts&&document.fonts.ready){document.fonts.ready.then(function(){relayout(true);});}"
+      -- fonts.ready can resolve before any webfont was even requested, so also
+      -- re-solve whenever a batch of fonts actually finishes loading.
+      , "if(document.fonts){document.fonts.ready.then(function(){relayout(true);});"
+      , "if(document.fonts.addEventListener){document.fonts.addEventListener('loadingdone',function(){relayout(true);});}}"
       , "})();</script>"
       ]

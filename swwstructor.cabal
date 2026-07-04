@@ -47,6 +47,7 @@ library
     Swwstructor.Theme
     Swwstructor.Content
     Swwstructor.Edit
+    Swwstructor.Media
     Swwstructor.Templates
     Swwstructor.Site
     Swwstructor.Checkout
@@ -67,6 +68,7 @@ executable swwstructor-server
     Swwstructor.Server.Stripe
     Swwstructor.Server.Loader
     Swwstructor.Server.Store
+    Swwstructor.Server.Media
     Swwstructor.Server.Admin
     Swwstructor.Server.App
   build-depends:
@@ -86,6 +88,8 @@ executable swwstructor-server
     , stickywebwm
     , swwstructor
     , text
+    , time
+    , wai
     , wai-extra
     , warp
 
@@ -100,6 +104,7 @@ test-suite swwstructor-test
   default-language: GHC2021
   build-depends:
       base
+    , bytestring
     , containers
     , stickywebwm
     , swwstructor
