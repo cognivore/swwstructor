@@ -84,6 +84,7 @@ sectionKinds =
   , ("featureSplit", "Feature split (main + rail of stories)")
   , ("storyRow", "Story row (equal columns)")
   , ("productGrid", "Product grid (shop)")
+  , ("stripeCatalog", "Stripe catalogue (live from Stripe)")
   , ("richColumns", "Rich columns (prose)")
   , ("gallery", "Gallery (images)")
   , ("ctaBand", "Call to action")
@@ -103,6 +104,7 @@ sectionTagOf s = case s of
   FeatureSplit{} -> "featureSplit"
   StoryRow{} -> "storyRow"
   ProductGrid{} -> "productGrid"
+  StripeCatalog{} -> "stripeCatalog"
   RichColumns{} -> "richColumns"
   Gallery{} -> "gallery"
   CtaBand{} -> "ctaBand"
@@ -126,6 +128,7 @@ blankSection tag = case tag of
   "featureSplit" -> Just (FeatureSplit 0.62 28 [blankStory] [])
   "storyRow" -> Just (StoryRow [blankStory])
   "productGrid" -> Just (ProductGrid (Just "Shop") Nothing [blankProduct 0])
+  "stripeCatalog" -> Just (StripeCatalog (Just "Book a class") Nothing)
   "richColumns" -> Just (RichColumns (Just "Section title") ["First column.", "Second column."])
   "gallery" -> Just (Gallery (Just "Gallery") [imageRef "A picture"])
   "ctaBand" -> Just (CtaBand "Call to action" (Just "Supporting line.") (Just (Cta "Go" "/")))

@@ -23,11 +23,18 @@ import Swwstructor.Block
   , blockToJSON
   )
 import Swwstructor.Checkout
-  ( CheckoutRequest (CheckoutRequest)
+  ( CheckoutItem (ItemAdHoc, ItemPrice)
+  , CheckoutRequest (CheckoutRequest)
   , Url (Url)
   , encodeForm
   , lineItem
   , stripeFormParams
+  )
+import Swwstructor.Plugins.StripeCatalog
+  ( CatalogItem (..)
+  , catalogSection
+  , isPriceId
+  , parseCatalogJSON
   )
 import Swwstructor.Content
 import Swwstructor.Edit
@@ -346,19 +353,68 @@ checkoutTests = do
   section "stripe form encoding (pure)"
   let req =
         CheckoutRequest
-          (lineItem "Demo Widget" (price Money.EUR 85) :| [])
+          (ItemAdHoc (lineItem "Demo Widget" (price Money.EUR 85)) :| [])
           (Url "https://x.test/success")
           (Url "https://x.test/cancel")
       params = stripeFormParams req
       look k = lookup k params
+      reqP =
+        CheckoutRequest
+          (ItemPrice "price_1ABCdef" (Money.Quantity 1) :| [])
+          (Url "https://x.test/success")
+          (Url "https://x.test/cancel")
+      paramsP = stripeFormParams reqP
+      lookP k = lookup k paramsP
       body = encodeForm [("a b", "c&d")]
   sequence
     [ check "mode is payment" (look "mode" == Just "payment")
     , check "unit_amount is minor units (8500)" (look "line_items[0][price_data][unit_amount]" == Just "8500")
     , check "currency is eur" (look "line_items[0][price_data][currency]" == Just "eur")
     , check "quantity is 1" (look "line_items[0][quantity]" == Just "1")
+    , check "a price-id item encodes line_items[0][price]" (lookP "line_items[0][price]" == Just "price_1ABCdef")
+    , check "a price-id item sends no price_data" (lookP "line_items[0][price_data][unit_amount]" == Nothing)
     , check "form encoding escapes & and space" (body == "a+b=c%26d")
     ]
+
+catalogTests :: IO [Bool]
+catalogTests = do
+  section "stripe catalogue (single source of truth: parse + section)"
+  let body =
+        "{\"object\":\"list\",\"data\":[\
+        \{\"id\":\"prod_A\",\"name\":\"Individual Lesson\",\"description\":\"One-to-one class.\",\
+        \\"images\":[\"https://files.stripe.com/links/abc\"],\
+        \\"default_price\":{\"id\":\"price_indiv\",\"type\":\"one_time\",\"unit_amount\":24000,\"currency\":\"gbp\"}},\
+        \{\"id\":\"prod_B\",\"name\":\"Group Class: Single Ticket\",\"images\":[],\
+        \\"default_price\":{\"id\":\"price_single\",\"type\":\"one_time\",\"unit_amount\":8000,\"currency\":\"gbp\"}},\
+        \{\"id\":\"prod_S\",\"name\":\"Subscription Thing\",\"images\":[],\
+        \\"default_price\":{\"id\":\"price_sub\",\"type\":\"recurring\",\"unit_amount\":1000,\"currency\":\"gbp\"}},\
+        \{\"id\":\"prod_C\",\"name\":\"No Price\",\"images\":[]}\
+        \]}"
+      parsed = parseCatalogJSON body
+  case parsed of
+    Left e -> do
+      _ <- check ("catalog parses: " <> e) False
+      pure [False]
+    Right items -> do
+      let sec = catalogSection (Just "Book a class") Nothing items
+          d = secLayout (renderSection 0 sec)
+          uniqueIds doc = let i = leafIds doc in length i == length (nub i)
+      sequence
+        [ check "unpriced + recurring products are skipped (2 of 4)" (length items == 2)
+        , check "sorted cheapest first" (map ciPriceId items == ["price_single", "price_indiv"])
+        , check "amount + currency parsed" (fmap (\(CatalogItem _ _ _ _ p) -> p) (listToMaybe' items) == Just (Money.cents Money.GBP 8000))
+        , check "image url survives" (ciImage (last items) == Just "https://files.stripe.com/links/abc")
+        , check "buy targets are price ids" (all (isPriceId . ciPriceId) items)
+        , check "catalogue section is a wf grid @1180/390 + unique ids" (wf d wide 1116 && wf d phone 326 && uniqueIds d)
+        , check "stripeCatalog codec round-trips" (siteSpecFromJSON (siteSpecToJSON withCat) == Right withCat)
+        ]
+  where
+    listToMaybe' (x : _) = Just x
+    listToMaybe' [] = Nothing
+    withCat =
+      nytSite
+        { sitePages = [PageSpec "/" "Home" [StripeCatalog (Just "Book") (Just "Pick a format.")]]
+        }
 
 moneyTests :: IO [Bool]
 moneyTests = do
@@ -492,6 +548,7 @@ main = do
         , fontUrlTests
         , mediaTests
         , checkoutTests
+        , catalogTests
         , moneyTests
         ]
   let passed = length (filter id results)

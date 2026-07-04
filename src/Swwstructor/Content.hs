@@ -142,6 +142,10 @@ data SectionSpec
     StoryRow ![Story]
   | -- | a product grid: optional title, optional intro, the catalogue
     ProductGrid !(Maybe Text) !(Maybe Text) ![Product]
+  | -- | the live Stripe catalogue (optional title, optional intro): the server
+    -- downloads the owner's Stripe products and renders them as a grid —
+    -- Stripe is the single source of truth, zero site-side maintenance
+    StripeCatalog !(Maybe Text) !(Maybe Text)
   | -- | N prose columns under an optional title
     RichColumns !(Maybe Text) ![Text]
   | -- | an image gallery under an optional title
@@ -404,6 +408,8 @@ sectionSpecToJSON spec = case spec of
       , optF "intro" intro jS
       , req "products" (arrOf productToJSON products)
       ]
+  StripeCatalog title intro ->
+    obj [tag' "stripeCatalog", optF "title" title jS, optF "intro" intro jS]
   RichColumns title cols ->
     obj [tag' "richColumns", optF "title" title jS, req "columns" (arrOf jS cols)]
   Gallery title imgs ->
@@ -455,6 +461,7 @@ sectionSpecFromJSON v = do
     "productGrid" -> do
       products <- decArrAt productFromJSON v "products"
       pure (ProductGrid (optText v "title") (optText v "intro") products)
+    "stripeCatalog" -> pure (StripeCatalog (optText v "title") (optText v "intro"))
     "richColumns" -> do
       cols <- decArrAt jText v "columns"
       pure (RichColumns (optText v "title") cols)

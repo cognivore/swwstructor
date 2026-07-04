@@ -48,6 +48,7 @@ import Swwstructor.Server.SecretStore
   , parseMasterKeyHex
   , saveBundle
   )
+import Swwstructor.Server.Catalog (newCatalogCache)
 import Swwstructor.Server.Store (newSiteStore, readSite)
 
 main :: IO ()
@@ -109,6 +110,7 @@ main = do
 
   mgr <- newManager tlsManagerSettings
   sessionRef <- newIORef =<< genSessionSeed
+  catalogCache <- newCatalogCache
   let env =
         AppEnv
           { aeStore = store
@@ -121,6 +123,7 @@ main = do
           , aeManager = mgr
           , aeSiteDir = siteDir
           , aeDataDir = dataDir
+          , aeCatalog = catalogCache
           }
 
   when (T.null adminPw) (putStrLn "[swwstructor] note: admin is unconfigured (no password).")

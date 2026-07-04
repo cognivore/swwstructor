@@ -17,6 +17,7 @@ module Swwstructor.Checkout
   ( Url (..)
   , LineItem (..)
   , lineItem
+  , CheckoutItem (..)
   , CheckoutRequest (..)
   , CheckoutSession (..)
   , CheckoutError (..)
@@ -57,9 +58,17 @@ data LineItem = LineItem
 lineItem :: Text -> Price -> LineItem
 lineItem name p = LineItem name p (Quantity 1)
 
+-- | What a checkout line can be: an ad-hoc priced line (inline @price_data@,
+-- for content-defined products) or an existing Stripe price id (the
+-- catalogue case — Stripe itself resolves name, photo and amount).
+data CheckoutItem
+  = ItemAdHoc !LineItem
+  | ItemPrice !Text !Quantity
+  deriving (Eq, Show)
+
 -- | A request to create a Checkout session.
 data CheckoutRequest = CheckoutRequest
-  { crItems :: !(NonEmpty LineItem)
+  { crItems :: !(NonEmpty CheckoutItem)
   , crSuccessUrl :: !Url
   , crCancelUrl :: !Url
   }
@@ -93,16 +102,21 @@ stripeFormParams req =
   , ("success_url", urlText (crSuccessUrl req))
   , ("cancel_url", urlText (crCancelUrl req))
   ]
-    <> concat (zipWith lineItemParams [0 :: Int ..] (toList (crItems req)))
+    <> concat (zipWith itemParams [0 :: Int ..] (toList (crItems req)))
   where
     urlText (Url u) = u
-    lineItemParams i li =
+    itemParams i (ItemAdHoc li) =
       let ix t = "line_items[" <> T.pack (show i) <> "]" <> t
           Price (Cents amount) cur = liUnitPrice li
           Quantity q = liQty li
        in [ (ix "[price_data][currency]", currencyCode cur)
           , (ix "[price_data][product_data][name]", liName li)
           , (ix "[price_data][unit_amount]", T.pack (show amount))
+          , (ix "[quantity]", T.pack (show q))
+          ]
+    itemParams i (ItemPrice pid (Quantity q)) =
+      let ix t = "line_items[" <> T.pack (show i) <> "]" <> t
+       in [ (ix "[price]", pid)
           , (ix "[quantity]", T.pack (show q))
           ]
 

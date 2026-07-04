@@ -38,6 +38,7 @@ import Swwstructor.Content
   , SiteSpec (siteDescription, sitePages, sitePartials, siteTitle)
   , Story (..)
   )
+import Swwstructor.Plugins.StripeCatalog (CatalogItem (..))
 import Swwstructor.Server.Media (MediaEntry (..))
 import Swwstructor.Edit (isPartialPath, sectionKinds, sectionLabelOf)
 import Swwstructor.Html (Html, el, elAttr, esc, htmlConcat, rawHtml, voidElAttr)
@@ -383,6 +384,7 @@ sectionSummary s = case s of
   FeatureSplit _ _ m r -> headlines m <> " / rail " <> T.pack (show (length r))
   StoryRow ss -> headlines ss
   ProductGrid t _ ps -> fromMaybe "Shop" t <> " (" <> T.pack (show (length ps)) <> " products)"
+  StripeCatalog t _ -> fromMaybe "Book a class" t <> " (live from your Stripe catalogue)"
   RichColumns t cs -> fromMaybe "Columns" t <> " (" <> T.pack (show (length cs)) <> ")"
   Gallery t imgs -> fromMaybe "Gallery" t <> " (" <> T.pack (show (length imgs)) <> ")"
   CtaBand h _ _ -> h
@@ -461,6 +463,10 @@ sectionFields partials s = case s of
       <> txtArea "intro" "Intro (optional)" (orEmpty intro)
       <> el "h3" (esc "Products")
       <> productList "products" ps
+  StripeCatalog t intro ->
+    elAttr "p" [("class", "muted")] (esc "This section shows your LIVE Stripe catalogue \x2014 names, prices and photos come straight from Stripe and refresh automatically. To change the products, edit them at dashboard.stripe.com \x2192 Product catalogue; there is nothing to maintain here.")
+      <> ipt "text" "title" "Title above the grid (optional)" (orEmpty t)
+      <> txtArea "intro" "Intro line (optional)" (orEmpty intro)
   RichColumns t cs ->
     ipt "text" "title" "Title (optional)" (orEmpty t) <> el "h3" (esc "Columns") <> textList "columns" cs
   Gallery t imgs ->
@@ -600,10 +606,11 @@ themeEditorPage th fl =
 -- Shop & Stripe tab
 -- ---------------------------------------------------------------------------
 
--- | The shop tab: how products flow from content to Stripe (the part owners
--- never guess right), the live product registry, and the keys form.
-stripePage :: Text -> SiteSpec -> SecretBundle -> Maybe Text -> Html
-stripePage baseUrl site bundle fl =
+-- | The shop tab: Stripe is the single source of truth — the live catalogue
+-- (what the site downloads and shows), any content-defined products, and the
+-- keys form.
+stripePage :: Text -> SiteSpec -> [CatalogItem] -> SecretBundle -> Maybe Text -> Html
+stripePage baseUrl site catalog bundle fl =
   adminDoc "Shop & Stripe" $
     htmlConcat
       [ topbar
@@ -611,9 +618,9 @@ stripePage baseUrl site bundle fl =
           htmlConcat
             [ flash fl
             , el "h1" (esc "Shop & Stripe")
-            , readiness
             , howCard
-            , productsCard
+            , catalogCard
+            , contentProductsCard
             , keysCard
             , webhookCard
             ]
@@ -621,34 +628,49 @@ stripePage baseUrl site bundle fl =
   where
     products = siteProducts site
     skSet = isSet (sbStripeSk bundle)
-    readiness
-      | null products && not skSet =
-          elAttr "p" [("class", "muted")] (esc "Two things make your shop live: products (added below your pages as \x201CProduct grid\x201D sections) and your Stripe keys (pasted once, here). Neither exists yet — the guide below walks you through both.")
-      | otherwise = mempty
     howCard =
       elAttr "div" [("class", "card")] $
-        el "h2" (esc "How your shop works")
+        el "h2" (esc "How your shop works \x2014 Stripe is the single source of truth")
           <> elAttr "ol" [("class", "steps")] (htmlConcat
                [ elAttr "li" [] $
-                   elAttr "b" [] (esc "Products live in your site content \x2014 not in the Stripe dashboard.")
-                     <> esc "To sell something, edit a page (Pages \x2192 Edit), add a \x201CProduct grid\x201D section, and fill in the name, price, photo and a short unique \x201C\&buy id\x201D (e.g. "
-                     <> elAttr "code" [] (esc "class-daifuku")
-                     <> esc "). You never create Products or Prices inside Stripe itself."
+                   elAttr "b" [] (esc "Your products live in your Stripe catalogue.")
+                     <> esc "Manage them at dashboard.stripe.com \x2192 Product catalogue: the name, the price and the photo you set there are exactly what the website shows. Add, retire or reprice a class in Stripe and the site follows automatically \x2014 nothing to edit here."
                , elAttr "li" [] $
-                   elAttr "b" [] (esc "The website mirrors them to Stripe at the moment of purchase.")
-                     <> esc "Every product automatically gets a Buy button. When a customer clicks it, this site sends the product's name and price from your content to Stripe and forwards the customer to Stripe's secure checkout page. The price always comes from your content here \x2014 a buyer can never alter it."
+                   elAttr "b" [] (esc "The website downloads and displays them.")
+                     <> esc "Any page with a \x201CStripe catalogue\x201D section shows the live catalogue as a grid (three products = three columns), photos included, refreshed every few minutes."
                , elAttr "li" [] $
-                   elAttr "b" [] (esc "Stripe handles the money.")
-                     <> esc "Cards, Apple Pay, receipts and payouts to your bank are all Stripe's job. Every sale appears in your Stripe dashboard (dashboard.stripe.com); turn on customer receipt emails there under Settings \x2192 Emails."
+                   elAttr "b" [] (esc "Buy buttons charge the catalogue price.")
+                     <> esc "Each button opens Stripe's secure checkout for that exact catalogue item \x2014 the amount is Stripe's own price, so it can never be altered. Sales, receipts and payouts all live in your Stripe dashboard."
                ])
-    productsCard =
+    catalogCard =
       elAttr "div" [("class", "card")] $
-        el "h2" (esc "Products on your site right now")
-          <> ( case products of
+        el "h2" (esc "Your Stripe catalogue (live)")
+          <> ( case catalog of
                  [] ->
-                   elAttr "p" [("class", "muted")] (esc "No products yet. Add your first: Pages \x2192 pick a page \x2192 Add a section \x2192 \x201CProduct grid (shop)\x201D. Everything you list there appears here, wired to checkout.")
-                 ps ->
+                   elAttr "p" [("class", "muted")] $
+                     if skSet
+                       then esc "Nothing came back from Stripe \x2014 either the catalogue is empty (create products at dashboard.stripe.com \x2192 Product catalogue, each with a default price) or the key below is for the wrong mode (test vs live)."
+                       else esc "Connect your Secret key below and your Stripe products will appear here automatically."
+                 items ->
                    elAttr "table" [("class", "plist")] $
+                     elAttr "tr" [] (el "th" (esc "Product") <> el "th" (esc "Price") <> el "th" (esc "Photo") <> el "th" (esc "Price id"))
+                       <> htmlConcat
+                         [ elAttr "tr" [] $
+                             el "td" (esc (ciName i))
+                               <> el "td" (esc (fmtPrice (ciPrice i)))
+                               <> el "td" (esc (maybe "\x2014" (const "from Stripe") (ciImage i)))
+                               <> el "td" (elAttr "code" [] (esc (T.take 22 (ciPriceId i) <> "\x2026")))
+                         | i <- items
+                         ]
+             )
+          <> checkoutPill
+    contentProductsCard
+      | null products = mempty
+      | otherwise =
+          elAttr "div" [("class", "card")] $
+            el "h2" (esc "Products defined in site content (legacy)")
+              <> elAttr "p" [("class", "muted")] (esc "These are written into page sections rather than Stripe. They still work (the site sends their price to Stripe at purchase), but the catalogue above is the recommended, zero-maintenance way.")
+              <> ( elAttr "table" [("class", "plist")] $
                      elAttr "tr" [] (el "th" (esc "Product") <> el "th" (esc "Price") <> el "th" (esc "Buy id") <> el "th" (esc "Defined in"))
                        <> htmlConcat
                          [ elAttr "tr" [] $
@@ -656,10 +678,9 @@ stripePage baseUrl site bundle fl =
                                <> el "td" (esc (fmtPrice pr))
                                <> el "td" (elAttr "code" [] (esc tgt))
                                <> el "td" (esc loc)
-                         | (tgt, nm, pr, loc) <- ps
+                         | (tgt, nm, pr, loc) <- products
                          ]
-             )
-          <> checkoutPill
+                 )
     checkoutPill =
       elAttr "p" [("style", "margin:14px 0 0")] $
         esc "Checkout is "
@@ -841,6 +862,7 @@ parseSection old ps = case old of
   FeatureSplit{} -> FeatureSplit (dbl "rho" 0.62) (dbl "gutter" 28) (stories "main") (stories "rail")
   StoryRow{} -> StoryRow (stories "stories")
   ProductGrid{} -> ProductGrid (opt "title") (opt "intro") (products "products")
+  StripeCatalog{} -> StripeCatalog (opt "title") (opt "intro")
   RichColumns{} -> RichColumns (opt "title") (texts "columns")
   Gallery{} -> Gallery (opt "title") (images "images")
   CtaBand{} -> CtaBand (req "headline") (opt "body") (cta "cta")

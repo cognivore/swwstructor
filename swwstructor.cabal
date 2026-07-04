@@ -53,6 +53,7 @@ library
     Swwstructor.Checkout
     Swwstructor.Plugins.Shopify
     Swwstructor.Plugins.Stripe
+    Swwstructor.Plugins.StripeCatalog
     Swwstructor.Adapter.UAL
 
 -- The server: SSR host (scotty), content loading (JSON + YAML), the admin WebUI
@@ -69,6 +70,7 @@ executable swwstructor-server
     Swwstructor.Server.Loader
     Swwstructor.Server.Store
     Swwstructor.Server.Media
+    Swwstructor.Server.Catalog
     Swwstructor.Server.Admin
     Swwstructor.Server.App
   build-depends:

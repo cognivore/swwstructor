@@ -61,13 +61,16 @@ import Web.Scotty
   )
 
 import Swwstructor.Checkout
-  ( CheckoutRequest (CheckoutRequest)
+  ( CheckoutItem (ItemAdHoc, ItemPrice)
+  , CheckoutRequest (CheckoutRequest)
   , CheckoutSession (csUrl)
   , Url (Url)
   )
 import Swwstructor.Content
-  ( PageSpec (PageSpec, pagePath, pageTitle)
-  , SiteSpec (siteFooter, siteTheme, sitePages)
+  ( PageSpec (PageSpec, pagePath, pageSections, pageTitle)
+  , Partial (partialSections)
+  , SectionSpec (StripeCatalog)
+  , SiteSpec (siteFooter, sitePages, sitePartials, siteTheme)
   )
 import Swwstructor.Edit
   ( addListItem
@@ -91,7 +94,10 @@ import Swwstructor.Edit
   )
 import Swwstructor.Html (Html, renderHtml)
 import Swwstructor.Media (contentTypeFor, isSafeMediaName)
+import Swwstructor.Money (Quantity (Quantity))
 import Swwstructor.Plugins.Stripe (siteBuyRegistry)
+import Swwstructor.Plugins.StripeCatalog (CatalogItem (ciPriceId), catalogSection, isPriceId)
+import Swwstructor.Server.Catalog (CatalogCache, getCatalog)
 import Swwstructor.Server.Admin
   ( adminLoginPage
   , dashboardPage
@@ -147,10 +153,51 @@ data AppEnv = AppEnv
   -- ^ the deployed content template dir (its @assets/@ are served read-only)
   , aeDataDir :: !FilePath
   -- ^ the writable state dir (secrets.enc, site.json, @uploads/@)
+  , aeCatalog :: !CatalogCache
+  -- ^ the cached live Stripe catalogue (for @stripeCatalog@ sections)
   }
 
 currentSite :: AppEnv -> ActionM SiteSpec
 currentSite env = liftIO (readSite (aeStore env))
+
+-- | The site with dynamic sections resolved: every 'StripeCatalog' marker is
+-- replaced with a live 'ProductGrid' built from the owner's Stripe catalogue.
+-- Public rendering uses THIS; the admin editor sees the raw marker (it edits
+-- the marker's title/intro, never the fetched products).
+currentSiteResolved :: AppEnv -> ActionM SiteSpec
+currentSiteResolved env = do
+  site <- currentSite env
+  if not (anySection isCatalogMarker site)
+    then pure site
+    else do
+      items <- liftIO (fetchCatalogFor env)
+      if null items
+        then pure site -- template renders the book-by-email fallback
+        else pure (mapAllSections (swapMarker items) site)
+  where
+    isCatalogMarker StripeCatalog{} = True
+    isCatalogMarker _ = False
+    swapMarker items (StripeCatalog t i) = catalogSection t i items
+    swapMarker _ s = s
+
+fetchCatalogFor :: AppEnv -> IO [CatalogItem]
+fetchCatalogFor env =
+  getCatalog
+    (aeCatalog env)
+    (aeManager env)
+    (sbStripeSk <$> loadBundle (aeSecretFile env) (aeMasterKey env))
+
+anySection :: (SectionSpec -> Bool) -> SiteSpec -> Bool
+anySection p site =
+  any (any p . pageSections) (sitePages site)
+    || any (any p . partialSections) (sitePartials site)
+
+mapAllSections :: (SectionSpec -> SectionSpec) -> SiteSpec -> SiteSpec
+mapAllSections f site =
+  site
+    { sitePages = [pg {pageSections = map f (pageSections pg)} | pg <- sitePages site]
+    , sitePartials = [pt {partialSections = map f (partialSections pt)} | pt <- sitePartials site]
+    }
 
 pageByPath :: SiteSpec -> Text -> Maybe PageSpec
 pageByPath site p = lookup (norm p) [(norm (pagePath pg), pg) | pg <- sitePages site]
@@ -257,7 +304,7 @@ swwApp env = do
 
 servePage :: AppEnv -> Text -> ActionM ()
 servePage env path = do
-  site <- currentSite env
+  site <- currentSiteResolved env
   case pageByPath site path of
     -- resolvedSection applies the template engine: header + body (includes
     -- expanded) + footer.
@@ -268,7 +315,7 @@ servePage env path = do
 
 serveStage :: AppEnv -> Text -> Double -> Map String Double -> ActionM ()
 serveStage env path width overrides = do
-  site <- currentSite env
+  site <- currentSiteResolved env
   case pageByPath site path of
     Just pg -> htmlOf (renderStageWith (siteTheme site) overrides (resolvedSection site pg) (Viewport width 900))
     Nothing -> status status404 >> text "no such page"
@@ -284,11 +331,24 @@ handleBuy :: AppEnv -> ActionM ()
 handleBuy env = do
   pid <- captureParam "id"
   site <- currentSite env
-  case M.lookup pid (siteBuyRegistry site) of
+  -- Resolve the target server-side: a content-defined product (inline
+  -- price_data) or a Stripe catalogue price id — but only one that actually
+  -- appears in the owner's own catalogue.
+  mItem <- case M.lookup pid (siteBuyRegistry site) of
+    Just li -> pure (Just (ItemAdHoc li))
+    Nothing
+      | isPriceId pid -> do
+          items <- liftIO (fetchCatalogFor env)
+          pure $
+            if pid `elem` map ciPriceId items
+              then Just (ItemPrice pid (Quantity 1))
+              else Nothing
+      | otherwise -> pure Nothing
+  case mItem of
     Nothing -> do
       status status404
       htmlOf (simplePage (siteTheme site) "Unknown item" "That item is not for sale.")
-    Just li -> do
+    Just item -> do
       bundle <- liftIO (loadBundle (aeSecretFile env) (aeMasterKey env))
       case sbStripeSk bundle of
         Nothing ->
@@ -296,7 +356,7 @@ handleBuy env = do
         Just sk -> do
           let req =
                 CheckoutRequest
-                  (li :| [])
+                  (item :| [])
                   (Url (aeBaseUrl env <> "/success"))
                   (Url (aeBaseUrl env <> "/cancel"))
           res <- liftIO (stripeCreate (aeManager env) sk req)
@@ -535,7 +595,7 @@ handleThemeSave env = do
 handlePreviewJson :: AppEnv -> ActionM ()
 handlePreviewJson env = do
   path <- fromMaybe "/" <$> queryParamMaybe "path"
-  site <- currentSite env
+  site <- currentSiteResolved env
   case pageByPath site path of
     Just pg -> do
       setHeader "Content-Type" "application/json; charset=utf-8"
@@ -549,7 +609,7 @@ handlePreviewJson env = do
 handleRender :: AppEnv -> ActionM ()
 handleRender env = do
   path <- fromMaybe "/" <$> queryParamMaybe "path"
-  site <- currentSite env
+  site <- currentSiteResolved env
   let expanded = concatMap (expandSection site []) (sectionsOf path site)
   htmlOf (renderStaticPage (siteTheme site) (containerTitle path site) (renderSections expanded) defaultVp)
 
@@ -599,7 +659,8 @@ handleStripe :: AppEnv -> Maybe Text -> ActionM ()
 handleStripe env mfl = do
   site <- currentSite env
   bundle <- liftIO (loadBundle (aeSecretFile env) (aeMasterKey env))
-  htmlOf (stripePage (aeBaseUrl env) site bundle mfl)
+  catalog <- liftIO (fetchCatalogFor env)
+  htmlOf (stripePage (aeBaseUrl env) site catalog bundle mfl)
 
 handleSaveSecrets :: AppEnv -> ActionM ()
 handleSaveSecrets env = do
@@ -620,11 +681,12 @@ handleSaveSecrets env = do
   res <- liftIO (saveBundle (aeSecretFile env) (aeMasterKey env) updated)
   bundle' <- liftIO (loadBundle (aeSecretFile env) (aeMasterKey env))
   site <- currentSite env
+  catalog <- liftIO (fetchCatalogFor env)
   case res of
-    Right () -> htmlOf (stripePage (aeBaseUrl env) site bundle' (Just "Saved."))
+    Right () -> htmlOf (stripePage (aeBaseUrl env) site catalog bundle' (Just "Saved."))
     Left e -> do
       liftIO (putStrLn ("[admin] save failed: " <> T.unpack e))
-      htmlOf (stripePage (aeBaseUrl env) site bundle' (Just "Could not save keys (see server log)."))
+      htmlOf (stripePage (aeBaseUrl env) site catalog bundle' (Just "Could not save keys (see server log)."))
 
 -- ---------------------------------------------------------------------------
 -- Cookies

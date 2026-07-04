@@ -222,6 +222,16 @@ renderSection i spec = case spec of
         blocks = M.fromList (concatMap (\(j, s) -> map snd (storyParts (pfx <> "-c" <> show j) s)) (idx stories))
      in Section {secLayout = splitN 24 cols, secBlocks = blocks}
   ProductGrid title intro products -> productGridSection pfx title intro products
+  -- Normally replaced with a live ProductGrid by the server (the catalogue is
+  -- fetched from Stripe before rendering); reaching here means Stripe was
+  -- unavailable or unconfigured — degrade to a calm, bookable-by-email note.
+  StripeCatalog title intro ->
+    sectionOf $
+      catMaybes
+        [ (\t -> leafWith (headline (pfx <> "-h") (chars t)) (heading t)) <$> title
+        , (\t -> leafWith (prose (pfx <> "-intro") (chars t)) (subhead t)) <$> intro
+        , Just (leafWith (prose (pfx <> "-body") 120) (paragraph "Online booking is being set up — please get in touch to book a class."))
+        ]
   RichColumns title cols -> richColumnsSection pfx title cols
   Gallery title imgs -> gallerySection pfx title imgs
   CtaBand h body cta -> ctaSection pfx h body cta
