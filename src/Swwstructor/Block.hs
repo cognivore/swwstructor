@@ -273,6 +273,11 @@ powClientJs =
   T.concat
     [ "<script>(function(){"
     , "if(window.__swwPowBound)return;window.__swwPowBound=1;"
+    , "window.__swwFillReveal=function(){var em=window.__swwRevealedEmail;if(!em)return;"
+    , "var all=document.querySelectorAll('[data-sww-reveal]');"
+    , "for(var q=0;q<all.length;q++){var bx=all[q];var a=document.createElement('a');"
+    , "a.className='sww-link';a.href='mailto:'+em;a.textContent=em;"
+    , "while(bx.firstChild)bx.removeChild(bx.firstChild);bx.appendChild(a);}};"
     , "async function sha(s){var b=new TextEncoder().encode(s);"
     , "var d=await crypto.subtle.digest('SHA-256',b);return new Uint8Array(d);}"
     , "function zbits(a){var n=0;for(var i=0;i<a.length;i++){var x=a[i];"
@@ -292,14 +297,11 @@ powClientJs =
     , "var r=await fetch('/email-reveal',{method:'POST',headers:{'Content-Type':'application/json'},"
     , "body:JSON.stringify({challenge:c.challenge,nonce:''+nonce})});"
     , "var j=await r.json();"
-    -- The relayout can swap the stage while we hash: fill every LIVE widget
-    -- in the document (falling back to the held node), so a click landing
-    -- during the initial settle still reveals visibly.
-    , "if(j&&j.email){var fill=function(bx){var a=document.createElement('a');a.className='sww-link';"
-    , "a.href='mailto:'+j.email;a.textContent=j.email;"
-    , "while(bx.firstChild)bx.removeChild(bx.firstChild);bx.appendChild(a);};"
-    , "var all=document.querySelectorAll('[data-sww-reveal]');"
-    , "if(all.length){for(var q=0;q<all.length;q++)fill(all[q]);}else{fill(box);}}"
+    -- Remember the revealed address and (re-)fill every live widget: the
+    -- relayout client swaps the whole stage on resize / font arrival, which
+    -- would otherwise put the button back after a successful reveal. The
+    -- relayout calls window.__swwFillReveal after every swap.
+    , "if(j&&j.email){window.__swwRevealedEmail=j.email;window.__swwFillReveal();}"
     , "else{b.textContent='Could not verify \\u2014 tap to retry';b.disabled=false;}"
     , "}catch(err){b.textContent=t0;b.disabled=false;}"
     , "});})();</script>"

@@ -275,7 +275,10 @@ relayoutScript th =
       -- most commonly a webfont arriving after the first measure — and any
       -- under-measured box would leave the next window overlapping it.
       , "function same(a,b){if(!b)return false;for(var k in a){if(Math.abs(a[k]-(b[k]||0))>2)return false;}return true;}"
-      , "function finish(stage){stage.style.visibility='visible';setupSticky(stage);}"
+      -- Re-fill any revealed email after a stage swap (the widget in the fresh
+      -- server HTML is always the unrevealed button).
+      , "function finish(stage){stage.style.visibility='visible';setupSticky(stage);"
+      , "if(window.__swwFillReveal)window.__swwFillReveal();}"
       , "function settle(stage,w,prev,n){"
       , "var ov=measure(stage);"
       , "if(n>=3||same(ov,prev)){finish(stage);return;}"
