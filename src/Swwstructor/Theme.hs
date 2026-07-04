@@ -235,7 +235,10 @@ themeCss th =
         , ".sww-img{width:100%;height:100%;object-fit:cover;border-radius:var(--sww-radius);display:block;}"
         , ".sww-figcap{font-family:var(--sww-body);font-size:11px;color:var(--sww-muted);"
         , "  background:var(--sww-bg);padding:2px 6px;border-radius:4px;position:absolute;left:8px;bottom:8px;opacity:.9;}"
-        , ".sww-figure-img .sww-figcap{position:static;background:none;padding:4px 0 0;}"
+        -- The under-photo caption needs real margins: the window's own padding
+        -- is only 2px horizontal, so without an inset the first glyph hugs (or
+        -- clips at) the box edge and the line reads cramped.
+        , ".sww-figure-img .sww-figcap{position:static;background:none;padding:7px 10px 9px;font-size:12px;line-height:1.45;}"
         -- commerce
         , ".sww-price{display:inline-block;font-family:var(--sww-display);font-size:22px;font-weight:600;"
         , "  color:var(--sww-fg);border-bottom:2px solid var(--sww-accent);padding-bottom:2px;}"
