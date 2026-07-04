@@ -116,7 +116,7 @@ import Swwstructor.Server.Admin
   , templatePage
   , themeEditorPage
   )
-import Swwstructor.Server.Media (deleteMedia, listMedia, resolveMedia, saveMedia)
+import Swwstructor.Server.Media (deleteMedia, listAssets, listMedia, resolveMedia, saveMedia)
 import Swwstructor.Server.SecretStore
   ( MasterKey
   , SecretBundle (..)
@@ -538,7 +538,8 @@ serveAssetFile env = do
 handleMediaPage :: AppEnv -> Maybe Text -> ActionM ()
 handleMediaPage env mfl = do
   entries <- liftIO (listMedia (aeDataDir env))
-  htmlOf (mediaLibraryPage entries mfl)
+  builtins <- liftIO (listAssets (aeSiteDir env))
+  htmlOf (mediaLibraryPage entries builtins mfl)
 
 -- | Accept one or many multipart files (the uploader sends one per request;
 -- a no-JS form may send several). Responds with JSON when asked

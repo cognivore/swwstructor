@@ -96,7 +96,9 @@ in
         wantedBy = [ "multi-user.target" ];
         after = [ "network-online.target" ];
         wants = [ "network-online.target" ];
-        path = [ pkgs.age ];
+        # age: secret decryption at start. imagemagick: HEIC -> JPEG for the
+        # media library (iPhone uploads from browsers that cannot decode HEIC).
+        path = [ pkgs.age pkgs.imagemagick ];
         serviceConfig = {
           Restart = "always";
           RestartSec = 3;

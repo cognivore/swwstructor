@@ -57,8 +57,9 @@ import Swwstructor.Edit
   , setSectionAt
   )
 import Swwstructor.Media
-  ( MediaKind (Gif, Jpeg, Png, Svg, Webp)
+  ( MediaKind (Avif, Gif, Jpeg, Png, Svg, Webp)
   , contentTypeFor
+  , isHeicBytes
   , isSafeMediaName
   , mediaFileName
   , sanitizeBaseName
@@ -537,13 +538,20 @@ mediaTests = do
       webp = "RIFF" <> BS.pack [0, 0, 0, 0] <> "WEBPVP8 "
       svg = "<?xml version=\"1.0\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>"
       exe = "MZ\x90\x00stub"
+      avif = BS.pack [0, 0, 0, 32] <> "ftypavif" <> BS.pack [0, 0, 0, 0] <> "avifmif1" <> BS.replicate 8 0
+      avifMajorMif1 = BS.pack [0, 0, 0, 32] <> "ftypmif1" <> BS.pack [0, 0, 0, 0] <> "miafavif" <> BS.replicate 8 0
+      heic = BS.pack [0, 0, 0, 24] <> "ftypheic" <> BS.pack [0, 0, 0, 0] <> "mif1heic"
   sequence
     [ check "sniffs jpeg" (sniffKind jpeg == Just Jpeg)
     , check "sniffs png" (sniffKind png == Just Png)
     , check "sniffs gif" (sniffKind gif == Just Gif)
     , check "sniffs webp" (sniffKind webp == Just Webp)
     , check "sniffs svg" (sniffKind svg == Just Svg)
-    , check "refuses an executable" (sniffKind exe == Nothing)
+    , check "sniffs avif (major brand)" (sniffKind avif == Just Avif)
+    , check "sniffs avif (compat brand)" (sniffKind avifMajorMif1 == Just Avif)
+    , check "heic is not storable but is transcodable" (sniffKind heic == Nothing && isHeicBytes heic)
+    , check "avif stored name gets .avif" (mediaFileName "Tofu Bou.avif" "a1b2c3d4e5f6" Avif == "tofu-bou-a1b2c3d4e5f6.avif")
+    , check "refuses an executable" (sniffKind exe == Nothing && not (isHeicBytes exe))
     , check "base name is slugged" (sanitizeBaseName "Emilie's Photo (1).JPG" == "emilie-s-photo-1")
     , check "empty base name falls back" (sanitizeBaseName "....jpg" == "img")
     , check "stored name is slug-hash.ext" (mediaFileName "My Pic.PNG" "a1b2c3d4e5f6" Png == "my-pic-a1b2c3d4e5f6.png")

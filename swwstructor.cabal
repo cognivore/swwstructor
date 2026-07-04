@@ -86,6 +86,7 @@ executable swwstructor-server
     , http-types
     , memory
     , mtl
+    , process
     , scotty
     , stickywebwm
     , swwstructor

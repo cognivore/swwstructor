@@ -745,9 +745,11 @@ fmtPrice p = let (amt, cur) = priceToInput p in amt <> " " <> T.toUpper cur
 
 -- | The photo library: a multi-file drag-and-drop uploader that compresses
 -- photos in the browser before they travel (canvas re-encode, capped at
--- 2000px), plus the grid of stored photos with copy-the-URL and delete.
-mediaLibraryPage :: [MediaEntry] -> Maybe Text -> Html
-mediaLibraryPage entries fl =
+-- 2000px; iPhone HEIC is converted — in the browser when it can decode it,
+-- else by the server), the grid of uploaded photos with copy-the-URL and
+-- delete, and the read-only photos that shipped with the site.
+mediaLibraryPage :: [MediaEntry] -> [MediaEntry] -> Maybe Text -> Html
+mediaLibraryPage entries builtins fl =
   adminDoc "Media" $
     htmlConcat
       [ topbar
@@ -755,9 +757,10 @@ mediaLibraryPage entries fl =
           htmlConcat
             [ flash fl
             , el "h1" (esc "Media")
-            , elAttr "p" [("class", "muted")] (esc "Your photo library. Drop photos below (or click to choose several at once) \x2014 they are automatically resized and compressed for the web on your computer before uploading. Then press \x201C\&Copy URL\x201D on a photo and paste it into any section's \x201CImage URL\x201D field.")
+            , elAttr "p" [("class", "muted")] (esc "Your photo library. Drop photos below (or click to choose several at once) \x2014 iPhone photos (HEIC) are converted and everything is resized and compressed for the web automatically. Then press \x201C\&Copy URL\x201D on a photo and paste it into any section's \x201CImage URL\x201D field.")
             , uploaderCard
             , libraryCard
+            , builtinCard
             , rawHtml uploaderJs
             ]
       ]
@@ -766,7 +769,7 @@ mediaLibraryPage entries fl =
       elAttr "div" [("class", "card")] $
         htmlConcat
           [ elAttr "div" [("class", "drop"), ("id", "drop")] (esc "Drop photos here \x2014 or click to choose files")
-          , voidElAttr "input" [("type", "file"), ("id", "pick"), ("multiple", "multiple"), ("accept", "image/*"), ("style", "display:none")]
+          , voidElAttr "input" [("type", "file"), ("id", "pick"), ("multiple", "multiple"), ("accept", "image/*,.heic,.heif,.avif"), ("style", "display:none")]
           , elAttr "div" [("class", "inline"), ("style", "margin-top:10px")] $
               voidElAttr "input" [("type", "checkbox"), ("id", "docompress"), ("checked", "checked")]
                 <> elAttr "label" [("for", "docompress")] (esc "Compress photos before upload (recommended)")
@@ -774,20 +777,31 @@ mediaLibraryPage entries fl =
           ]
     libraryCard =
       elAttr "div" [("class", "card")] $
-        el "h2" (esc ("Library (" <> T.pack (show (length entries)) <> ")"))
+        el "h2" (esc ("Your uploads (" <> T.pack (show (length entries)) <> ")"))
           <> ( case entries of
-                 [] -> elAttr "p" [("class", "muted")] (esc "Nothing here yet \x2014 your uploaded photos will appear in this grid.")
-                 es -> elAttr "div" [("class", "mediagrid")] (htmlConcat (map mediaCard es))
+                 [] -> elAttr "p" [("class", "muted")] (esc "Nothing here yet \x2014 photos you upload will appear in this grid.")
+                 es -> elAttr "div" [("class", "mediagrid")] (htmlConcat (map (mediaCard True "/media/") es))
              )
-    mediaCard e =
-      let url = "/media/" <> meName e
+    builtinCard =
+      elAttr "div" [("class", "card")] $
+        el "h2" (esc ("Built-in photos (" <> T.pack (show (length builtins)) <> ")"))
+          <> elAttr "p" [("class", "muted")] (esc "These shipped with the site's design and live at /assets/\x2026 \x2014 they are part of the deployed site, so they cannot be deleted here, but you can reuse them anywhere: press \x201C\&Copy URL\x201D and paste into an \x201CImage URL\x201D field.")
+          <> ( case builtins of
+                 [] -> mempty
+                 es -> elAttr "div" [("class", "mediagrid")] (htmlConcat (map (mediaCard False "/assets/") es))
+             )
+    mediaCard deletable prefix e =
+      let url = prefix <> meName e
        in elAttr "div" [("class", "mediacard")] $
             htmlConcat
               [ elAttr "a" [("href", url), ("target", "_blank")] (voidElAttr "img" [("src", url), ("loading", "lazy"), ("alt", meName e)])
               , elAttr "div" [("class", "meta")] (elAttr "code" [] (esc (meName e)) <> esc (" \xB7 " <> fmtBytes (meBytes e)))
               , elAttr "div" [("class", "bar")] $
                   elAttr "button" [("type", "button"), ("data-copy", url)] (esc "Copy URL")
-                    <> elAttr "form" [("method", "post"), ("action", "/admin/media/delete")] (hidden "name" (meName e) <> btn "danger" "delete" "Delete")
+                    <> ( if deletable
+                           then elAttr "form" [("method", "post"), ("action", "/admin/media/delete")] (hidden "name" (meName e) <> btn "danger" "delete" "Delete")
+                           else mempty
+                       )
               ]
 
 fmtBytes :: Integer -> Text
@@ -808,8 +822,23 @@ uploaderJs =
     , "function fmt(n){return n>1048576?(n/1048576).toFixed(1)+' MB':Math.round(n/1024)+' KB';}"
     , "function line(t){var li=document.createElement('li');li.textContent=t;log.appendChild(li);return li;}"
     , "async function shrink(f){"
-    , "var doC=document.getElementById('docompress').checked;if(!doC)return f;"
+    , "var doC=document.getElementById('docompress').checked;"
+    , "var nm=(f.name||'').toLowerCase();"
+    , "var heic=/image\\/hei[cf]/.test(f.type)||/[.]hei[cf]$/.test(nm);"
+    -- HEIC always converts when this browser can decode it (no browser can
+    -- DISPLAY stored heic); when it can't (Chrome), the server converts.
+    , "if(heic){var hb;try{hb=await createImageBitmap(f);}catch(e){return f;}"
+    , "var HM=2000,hs=Math.min(1,HM/Math.max(hb.width,hb.height));"
+    , "var hw=Math.max(1,Math.round(hb.width*hs)),hh=Math.max(1,Math.round(hb.height*hs));"
+    , "var hc=document.createElement('canvas');hc.width=hw;hc.height=hh;var hx=hc.getContext('2d');"
+    , "hx.fillStyle='#fff';hx.fillRect(0,0,hw,hh);hx.drawImage(hb,0,0,hw,hh);"
+    , "var hbl=await new Promise(function(r){hc.toBlob(r,'image/jpeg',0.85);});"
+    , "if(hbl)return new File([hbl],nm.replace(/[.][a-z0-9]+$/,'')+'.jpg',{type:'image/jpeg'});"
+    , "return f;}"
+    , "if(!doC)return f;"
     , "var jpegish=(f.type==='image/jpeg'||f.type==='image/webp'),png=(f.type==='image/png');"
+    -- avif/gif/svg pass through: browsers display avif natively and it is
+    -- almost always smaller than a jpeg re-encode.
     , "if(!jpegish&&!png)return f;"
     , "var img;try{img=await createImageBitmap(f);}catch(e){return f;}"
     , "var MAX=2000,sc=Math.min(1,MAX/Math.max(img.width,img.height));"
