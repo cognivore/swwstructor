@@ -43,8 +43,10 @@ import Swwstructor.Server.Google
   , GoogleCreds
   , Mail (Mail)
   , createCalendarEvent
+  , patchEventLocation
   , sendMail
   )
+import Swwstructor.Server.Venues (Venue (vnAddress, vnMapUrl, vnName), venueForArea)
 
 -- | Everything the notification side needs — deliberately NOT 'AppEnv' (this
 -- module is shared with the reminder loop and must not import the app).
@@ -67,6 +69,11 @@ data BookingCtx = BookingCtx
   -- no tz database; one static offset is exact for a same-DST booking window)
   , bcSlots :: !(IO [SlotSpec])
   -- ^ the live slot definitions (site content may be edited at runtime)
+  , bcVenues :: !(IO [Venue])
+  -- ^ the venue address book (admin-managed, server-side only)
+  , bcVenueNoun :: !Text
+  -- ^ what this site calls a venue in student-facing copy — @\"kitchen\"@
+  -- for a pastry school, @\"studio\"@, @\"hall\"@… (default @\"venue\"@)
   }
 
 -- | Every slot defined by any @scheduleClass@ section of the site.
@@ -104,7 +111,7 @@ notifyTicketIssued ctx t
               , "choose a time that suits you, and enter this code together with the"
               , "email address you used at checkout (this one)."
               , ""
-              , "Classes run in small groups. The exact kitchen address is emailed"
+              , "Classes run in small groups. The exact " <> bcVenueNoun ctx <> " address is emailed"
               , "about a week before each class - the booking page shows the area."
               , ""
               , "See you soon,"
@@ -144,7 +151,7 @@ ensureEvent ctx t r s = case redEventId r of
                       [ "Student: " <> redName r <> " <" <> tkEmail t <> ">"
                       , "Ticket:  " <> tkCode t
                       , ""
-                      , "The exact kitchen address is emailed about a week before class."
+                      , "The exact " <> bcVenueNoun ctx <> " address is emailed about a week before class."
                       ]
                 , ceLocation = slotArea s <> " (exact address announced a week ahead)"
                 , ceStart = slotDate s <> "T" <> slotStart s <> ":00" <> bcTzOffset ctx
@@ -173,7 +180,7 @@ ensureConfirmMail ctx t r s
               , "    What:   " <> tkProduct t
               , "    When:   " <> fmtSlotDay (slotDate s) <> ", " <> slotStart s <> "-" <> slotEnd s
               , "    Where:  " <> slotArea s
-              , "            (the exact kitchen address is emailed about a week before class)"
+              , "            (the exact " <> bcVenueNoun ctx <> " address is emailed about a week before class)"
               , "    Ticket: " <> tkCode t
               , ""
               , "A Google Calendar invitation is on its way to this address too."
@@ -193,16 +200,29 @@ sendDueReminders :: BookingCtx -> Text -> Int -> IO ()
 sendDueReminders ctx today hourOfDay = do
   tickets <- listTickets (bcStore ctx)
   slots <- bcSlots ctx
-  mapM_ (remindOne ctx slots today hourOfDay) tickets
+  venues <- bcVenues ctx
+  mapM_ (remindOne ctx slots venues today hourOfDay) tickets
 
-remindOne :: BookingCtx -> [SlotSpec] -> Text -> Int -> Ticket -> IO ()
-remindOne ctx slots today hourOfDay t = case tkRedemption t of
+remindOne :: BookingCtx -> [SlotSpec] -> [Venue] -> Text -> Int -> Ticket -> IO ()
+remindOne ctx slots venues today hourOfDay t = case tkRedemption t of
   Nothing -> pure ()
   Just r -> case [s | s <- slots, slotIdOf s == redSlotId r] of
     [] -> pure ()
     (s : _) -> do
       let due note = note `notElem` tkNotesSent t
-      -- A week out (sent from 09:00 local): also the cue to announce the venue.
+          noun = bcVenueNoun ctx
+          mvenue = venueForArea venues (slotArea s)
+          whereLines lead = case mvenue of
+            Just v ->
+              [ lead <> slotArea s
+              , pad lead <> vnName v <> ", " <> vnAddress v
+              ]
+                <> [pad lead <> vnMapUrl v | not (T.null (vnMapUrl v))]
+            Nothing -> [lead <> slotArea s]
+          pad = (`T.replicate` " ") . T.length
+      -- A week out (sent from 09:00 local). With a venue on file for the
+      -- area this IS the announcement — the mail carries the address and the
+      -- calendar event is updated; without one it stays the manual cue.
       case () of
         _
           | slotDate s == addDaysIso 7 today && hourOfDay >= 9 && due "t7" -> do
@@ -211,42 +231,78 @@ remindOne ctx slots today hourOfDay t = case tkRedemption t of
                   ( "One week to go: " <> tkProduct t <> " on " <> fmtSlotDay (slotDate s)
                   , T.intercalate
                       "\n"
-                      [ "Hello " <> redName r <> ","
-                      , ""
-                      , "A quick reminder that your class is one week away:"
-                      , ""
-                      , "    What:  " <> tkProduct t
-                      , "    When:  " <> fmtSlotDay (slotDate s) <> ", " <> slotStart s <> "-" <> slotEnd s
-                      , "    Where: " <> slotArea s
-                      , ""
-                      , "The exact kitchen address is announced by email around now - if it"
-                      , "hasn't reached you within a day or two, just reply to this email."
-                      , ""
-                      , "See you very soon,"
-                      , bcSiteName ctx
-                      ]
+                      ( [ "Hello " <> redName r <> ","
+                        , ""
+                        , "A quick reminder that your class is one week away:"
+                        , ""
+                        , "    What:  " <> tkProduct t
+                        , "    When:  " <> fmtSlotDay (slotDate s) <> ", " <> slotStart s <> "-" <> slotEnd s
+                        ]
+                          <> whereLines "    Where: "
+                          <> [""]
+                          <> ( case mvenue of
+                                 Just _ ->
+                                   [ "That's the exact " <> noun <> " address - your calendar invitation has"
+                                   , "been updated with it too."
+                                   ]
+                                 Nothing ->
+                                   [ "The exact " <> noun <> " address is announced by email around now - if it"
+                                   , "hasn't reached you within a day or two, just reply to this email."
+                                   ]
+                             )
+                          <> [ ""
+                             , "See you very soon,"
+                             , bcSiteName ctx
+                             ]
+                      )
                   )
               markIf ctx sent (tkCode t) "t7"
+              -- The calendar catches up with the announcement (quiet patch;
+              -- best-effort — the mail above already carries the address).
+              case (sent, mvenue, redEventId r) of
+                (True, Just v, Just evId) -> do
+                  mcreds <- bcCreds ctx
+                  case mcreds of
+                    Nothing -> pure ()
+                    Just creds -> do
+                      res <-
+                        patchEventLocation
+                          (bcManager ctx)
+                          creds
+                          evId
+                          (vnName v <> ", " <> vnAddress v)
+                      case res of
+                        Right () -> pure ()
+                        Left err -> putStrLn ("[booking] event location patch failed: " <> T.unpack err)
+                _ -> pure ()
           | slotDate s == today && hourOfDay >= 7 && due "day0" -> do
               sent <-
                 trySend ctx (tkEmail t) $
                   ( "Today's class: " <> tkProduct t <> ", " <> slotStart s <> "-" <> slotEnd s
                   , T.intercalate
                       "\n"
-                      [ "Hello " <> redName r <> ","
-                      , ""
-                      , "It's today!"
-                      , ""
-                      , "    What:  " <> tkProduct t
-                      , "    When:  today, " <> slotStart s <> "-" <> slotEnd s
-                      , "    Where: " <> slotArea s <> " - the exact address was emailed to you this week"
-                      , ""
-                      , "Everything is provided; bring a small box or bag for the sweets you"
-                      , "make. If anything comes up, reply to this email."
-                      , ""
-                      , "See you in a few hours,"
-                      , bcSiteName ctx
-                      ]
+                      ( [ "Hello " <> redName r <> ","
+                        , ""
+                        , "It's today!"
+                        , ""
+                        , "    What:  " <> tkProduct t
+                        , "    When:  today, " <> slotStart s <> "-" <> slotEnd s
+                        ]
+                          <> ( case mvenue of
+                                 Just v ->
+                                   [ "    Where: " <> vnName v <> ", " <> vnAddress v ]
+                                     <> ["           " <> vnMapUrl v | not (T.null (vnMapUrl v))]
+                                 Nothing ->
+                                   [ "    Where: " <> slotArea s <> " - the exact address was emailed to you this week" ]
+                             )
+                          <> [ ""
+                             , "Everything is provided; bring a small box or bag for the sweets you"
+                             , "make. If anything comes up, reply to this email."
+                             , ""
+                             , "See you in a few hours,"
+                             , bcSiteName ctx
+                             ]
+                      )
                   )
               markIf ctx sent (tkCode t) "day0"
           | otherwise -> pure ()

@@ -30,6 +30,8 @@
 --   * @SWW_BOOKING_TZ@        — IANA zone classes run in (default Europe\/London)
 --   * @SWW_BOOKING_TZ_OFFSET@ — that zone's UTC offset for the class dates
 --                               (default +01:00; no tz database in-process)
+--   * @SWW_BOOKING_VENUE_NOUN@— what this site calls a venue in student-facing
+--                               copy (default \"venue\"; e.g. \"kitchen\")
 --   * @SWW_GOOGLE_CLIENT_ID@ \/ @SWW_GOOGLE_CLIENT_SECRET@ \/
 --     @SWW_GOOGLE_REFRESH_TOKEN@ — seed the Google connection (calendar
 --     invites + Gmail booking mail), same store-wins rule as the Stripe keys
@@ -53,6 +55,7 @@ import Swwstructor.Content (siteTitle)
 import Swwstructor.Server.App (AppEnv (..), Stage (Prod, Test), swwApp)
 import Swwstructor.Server.Booking (newBookingStore)
 import Swwstructor.Server.Google (googleCredsOf)
+import Swwstructor.Server.Venues (listVenues, newVenueStore)
 import Swwstructor.Server.Notify (BookingCtx (..), siteSlots)
 import Swwstructor.Server.Reminders (startReminderLoop)
 import Swwstructor.Server.SecretStore
@@ -143,11 +146,13 @@ main = do
   -- is, mail-wise). Staff addresses are invited to every calendar event and
   -- copied on every booking mail.
   bookings <- newBookingStore (dataDir </> "bookings.json")
+  venues <- newVenueStore (dataDir </> "venues.json")
   staff <- splitCsv . fromMaybe "" <$> lookupEnv "SWW_BOOKING_STAFF"
   replyTo <- fmap T.pack . nonEmptyEnv <$> lookupEnv "SWW_BOOKING_REPLY_TO"
   bookingName <- fromMaybe (T.unpack (siteTitle site0)) . nonEmptyEnv <$> lookupEnv "SWW_BOOKING_NAME"
   tzName <- fromMaybe "Europe/London" . nonEmptyEnv <$> lookupEnv "SWW_BOOKING_TZ"
   tzOffset <- fromMaybe "+01:00" . nonEmptyEnv <$> lookupEnv "SWW_BOOKING_TZ_OFFSET"
+  venueNoun <- fromMaybe "venue" . nonEmptyEnv <$> lookupEnv "SWW_BOOKING_VENUE_NOUN"
   let bookingCtx =
         BookingCtx
           { bcManager = mgr
@@ -160,6 +165,8 @@ main = do
           , bcTimeZone = T.pack tzName
           , bcTzOffset = T.pack tzOffset
           , bcSlots = siteSlots <$> readSite store
+          , bcVenues = listVenues venues
+          , bcVenueNoun = T.pack venueNoun
           }
 
   let env =
@@ -178,6 +185,7 @@ main = do
           , aeSpentPow = spentPow
           , aeBookings = bookings
           , aeBookingCtx = bookingCtx
+          , aeVenues = venues
           }
 
   -- The reminder loop: retries unfinished booking side effects and sends the

@@ -121,6 +121,7 @@ import Swwstructor.Server.Admin
   , stripePage
   , templatePage
   , themeEditorPage
+  , venuesPage
   )
 import Swwstructor.Block (fmtSlotDay)
 import Swwstructor.Server.Booking
@@ -135,10 +136,17 @@ import Swwstructor.Server.Booking
   )
 import Swwstructor.Server.Media (deleteMedia, listAssets, listMedia, resolveMedia, saveMedia)
 import Swwstructor.Server.Notify
-  ( BookingCtx
+  ( BookingCtx (bcVenueNoun)
   , ensureReservationSideEffects
   , notifyTicketIssued
   , siteSlots
+  )
+import Swwstructor.Server.Venues
+  ( Venue (Venue)
+  , VenueStore
+  , deleteVenue
+  , listVenues
+  , upsertVenue
   )
 import Swwstructor.Server.SecretStore
   ( MasterKey
@@ -201,6 +209,8 @@ data AppEnv = AppEnv
   -- ^ tickets + reservations (for @scheduleClass@ sections)
   , aeBookingCtx :: !BookingCtx
   -- ^ the notification context (calendar invites + booking mail)
+  , aeVenues :: !VenueStore
+  -- ^ the venue address book (admin-only; feeds venue announcements)
   }
 
 currentSite :: AppEnv -> ActionM SiteSpec
@@ -346,6 +356,9 @@ swwApp env = do
   post "/admin/theme" (adminGate env (handleThemeSave env))
   get "/admin/stripe" (adminGate env (handleStripe env Nothing))
   get "/admin/bookings" (adminGate env (handleBookings env Nothing))
+  get "/admin/venues" (adminGate env (handleVenues env Nothing))
+  post "/admin/venues/save" (adminGate env (handleVenueSave env))
+  post "/admin/venues/delete" (adminGate env (handleVenueDelete env))
   post "/admin/secrets" (adminGate env (handleSaveSecrets env))
   get "/admin/media" (adminGate env (handleMediaPage env Nothing))
   post "/admin/upload" (adminGate env (handleUpload env))
@@ -581,7 +594,7 @@ handleSchedule env = do
               htmlOf . messagePage th "You're booked!" $
                 htmlConcat
                   [ elAttr "p" [("class", "sww-paragraph")] (esc ("See you on " <> slotLabel s <> " \x2014 " <> slotArea s <> "."))
-                  , elAttr "p" [("class", "sww-paragraph")] (esc "A confirmation email and a Google Calendar invitation are on their way. The exact kitchen address is emailed about a week before class.")
+                  , elAttr "p" [("class", "sww-paragraph")] (esc ("A confirmation email and a Google Calendar invitation are on their way. The exact " <> bcVenueNoun (aeBookingCtx env) <> " address is emailed about a week before class."))
                   ]
             Nothing -> htmlOf (simplePage th "You're booked!" "A confirmation email and a calendar invitation are on their way.")
 
@@ -954,6 +967,43 @@ handleBookings env mfl = do
   tickets <- liftIO (listTickets (aeBookings env))
   bundle <- liftIO (loadBundle (aeSecretFile env) (aeMasterKey env))
   htmlOf (bookingsPage tickets (siteSlots site) bundle mfl)
+
+handleVenues :: AppEnv -> Maybe Text -> ActionM ()
+handleVenues env mfl = do
+  site <- currentSite env
+  venues <- liftIO (listVenues (aeVenues env))
+  let areas = dedupe [slotArea s | s <- siteSlots site]
+  htmlOf (venuesPage (bcVenueNoun (aeBookingCtx env)) venues areas mfl)
+  where
+    dedupe = foldr (\x acc -> if x `elem` acc then acc else x : acc) []
+
+handleVenueSave :: AppEnv -> ActionM ()
+handleVenueSave env = do
+  vid <- fromMaybe "" <$> formParamMaybe "id"
+  name <- fromMaybe "" <$> formParamMaybe "name"
+  addr <- fromMaybe "" <$> formParamMaybe "address"
+  area <- fromMaybe "" <$> formParamMaybe "area"
+  mapU <- fromMaybe "" <$> formParamMaybe "mapUrl"
+  notes <- fromMaybe "" <$> formParamMaybe "notes"
+  active <- formParamMaybe "active" :: ActionM (Maybe Text)
+  if T.null (T.strip name)
+    then handleVenues env (Just "A venue needs at least a name.")
+    else do
+      liftIO $
+        upsertVenue
+          (aeVenues env)
+          (Venue (T.strip vid) (T.strip name) (T.strip addr) (T.strip area) (T.strip mapU) (T.strip notes) (isOn active))
+      handleVenues env (Just "Saved.")
+  where
+    isOn (Just "on") = True
+    isOn (Just "true") = True
+    isOn _ = False
+
+handleVenueDelete :: AppEnv -> ActionM ()
+handleVenueDelete env = do
+  vid <- fromMaybe "" <$> formParamMaybe "id"
+  liftIO (deleteVenue (aeVenues env) vid)
+  handleVenues env (Just "Deleted.")
 
 handleSaveSecrets :: AppEnv -> ActionM ()
 handleSaveSecrets env = do

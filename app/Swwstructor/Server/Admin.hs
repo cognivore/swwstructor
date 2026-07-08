@@ -17,6 +17,7 @@ module Swwstructor.Server.Admin
   , themeEditorPage
   , stripePage
   , bookingsPage
+  , venuesPage
   , templatePage
   , mediaLibraryPage
     -- * Pure form parsers
@@ -44,6 +45,7 @@ import Swwstructor.Content
 import Swwstructor.Plugins.StripeCatalog (CatalogItem (..))
 import Swwstructor.Server.Booking (Redemption (..), Ticket (..))
 import Swwstructor.Server.Media (MediaEntry (..))
+import Swwstructor.Server.Venues (Venue (..))
 import Swwstructor.Edit (isPartialPath, sectionKinds, sectionLabelOf)
 import Swwstructor.Html (Html, el, elAttr, esc, htmlConcat, rawHtml, voidElAttr)
 import Swwstructor.Money
@@ -154,6 +156,7 @@ topbar =
       , elAttr "a" [("href", "/admin/theme")] (esc "Theme")
       , elAttr "a" [("href", "/admin/stripe")] (esc "Shop & Stripe")
       , elAttr "a" [("href", "/admin/bookings")] (esc "Bookings")
+      , elAttr "a" [("href", "/admin/venues")] (esc "Venues")
       , elAttr "span" [("class", "sp")] mempty
       , elAttr "a" [("href", "/"), ("target", "_blank")] (esc "View site \x2197")
       , elAttr "a" [("href", "/admin/logout")] (esc "Sign out")
@@ -845,6 +848,71 @@ bookingsPage tickets slots bundle fl =
           <> elAttr "span" [("class", "pill " <> if on then "on" else "off")] (esc (if on then "configured" else "not set"))
     isSet' (Just _) = True
     isSet' Nothing = False
+
+-- ---------------------------------------------------------------------------
+-- Venues tab (the address book)
+-- ---------------------------------------------------------------------------
+
+-- | The venue address book: each venue is an inline edit form; a blank form
+-- at the bottom adds one. Addresses live server-side only — they are
+-- announced to booked students a week ahead (automatically, when the slot's
+-- area matches exactly one active venue). @noun@ is what THIS site calls a
+-- venue in its copy — a pastry school's \"kitchen\", a club's \"hall\".
+venuesPage :: Text -> [Venue] -> [Text] -> Maybe Text -> Html
+venuesPage noun venues areas fl =
+  adminDoc "Venues" $
+    htmlConcat
+      [ topbar
+      , elAttr "div" [("class", "wrap"), ("style", "max-width:760px")] $
+          htmlConcat
+            [ flash fl
+            , el "h1" (esc "Venues")
+            , elAttr "p" [("class", "muted")] (esc ("Your address book of the " <> nouns <> " classes can happen in. Addresses are never shown on the website \x2014 students see only the area when they book. A week before a class, if its area matches exactly one active " <> noun <> " here, the reminder email announces the address automatically (and the calendar invitation is updated); otherwise you announce it by hand, as before."))
+            , areasCard
+            , htmlConcat (map venueCard venues)
+            , addCard
+            ]
+      ]
+  where
+    nouns = noun <> "s"
+    areasCard
+      | null areas = mempty
+      | otherwise =
+          elAttr "div" [("class", "card")] $
+            el "h3" (esc "Areas currently on offer")
+              <> elAttr "p" [("class", "muted")] (esc (T.intercalate "  \xB7  " areas) <> esc ("  \x2014 a " <> noun <> "'s \x201CArea\x201D must match one of these exactly for automatic announcements."))
+    venueCard v =
+      elAttr "div" [("class", "card")] $
+        elAttr "form" [("method", "post"), ("action", "/admin/venues/save")] (
+          hidden "id" (vnId v)
+            <> elAttr "div" [("class", "row")] (
+                 ipt "text" "name" "Name" (vnName v)
+                   <> ipt "text" "area" "Area (matches a slot's area)" (vnArea v)
+               )
+            <> ipt "text" "address" "Street address" (vnAddress v)
+            <> ipt "text" "mapUrl" "Map link (optional)" (vnMapUrl v)
+            <> txtArea "notes" "Notes (access, equipment, contact\x2026)" (vnNotes v)
+            <> chk "active" "Active (considered for announcements)" (vnActive v)
+            <> elAttr "div" [("class", "actions")] (elAttr "button" [("class", "primary"), ("type", "submit")] (esc "Save"))
+        )
+          <> elAttr "form" [("method", "post"), ("action", "/admin/venues/delete"), ("style", "margin-top:8px")] (
+               hidden "id" (vnId v) <> btn "danger" "delete" ("Delete this " <> noun)
+             )
+    addCard =
+      elAttr "div" [("class", "card")] $
+        el "h2" (esc ("Add a " <> noun))
+          <> elAttr "form" [("method", "post"), ("action", "/admin/venues/save")] (
+               hidden "id" ""
+                 <> elAttr "div" [("class", "row")] (
+                      ipt "text" "name" "Name" ""
+                        <> ipt "text" "area" "Area (matches a slot's area)" ""
+                    )
+                 <> ipt "text" "address" "Street address" ""
+                 <> ipt "text" "mapUrl" "Map link (optional)" ""
+                 <> txtArea "notes" "Notes (access, equipment, contact\x2026)" ""
+                 <> chk "active" "Active (considered for announcements)" True
+                 <> elAttr "div" [("class", "actions")] (elAttr "button" [("class", "primary"), ("type", "submit")] (esc ("Add " <> noun)))
+             )
 
 -- | Every product across pages AND partials, with where it is defined — the
 -- admin-facing view of the server's buy registry.

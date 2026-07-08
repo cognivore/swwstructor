@@ -73,6 +73,7 @@ executable swwstructor-server
     Swwstructor.Server.Catalog
     Swwstructor.Server.Booking
     Swwstructor.Server.Google
+    Swwstructor.Server.Venues
     Swwstructor.Server.Notify
     Swwstructor.Server.Reminders
     Swwstructor.Server.Admin

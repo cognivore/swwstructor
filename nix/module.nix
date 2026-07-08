@@ -102,6 +102,11 @@ let
             default = "+01:00";
             description = "UTC offset of the class dates in that zone (no tz database in-process).";
           };
+          venueNoun = lib.mkOption {
+            type = lib.types.str;
+            default = "venue";
+            description = "What this site calls a venue in student-facing copy (e.g. \"kitchen\" for a pastry school).";
+          };
         };
         enableCaddy = lib.mkOption {
           type = lib.types.bool;
@@ -157,6 +162,7 @@ in
           SYSTEM_CERTIFICATE_PATH = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
           SWW_BOOKING_TZ = inst.booking.timeZone;
           SWW_BOOKING_TZ_OFFSET = inst.booking.tzOffset;
+          SWW_BOOKING_VENUE_NOUN = inst.booking.venueNoun;
         }
         // lib.optionalAttrs (inst.booking.staff != [ ]) {
           SWW_BOOKING_STAFF = lib.concatStringsSep "," inst.booking.staff;

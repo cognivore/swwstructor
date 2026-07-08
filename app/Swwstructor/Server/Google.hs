@@ -17,6 +17,7 @@ module Swwstructor.Server.Google
   , googleCredsOf
   , CalendarEvent (..)
   , createCalendarEvent
+  , patchEventLocation
   , Mail (..)
   , sendMail
   ) where
@@ -148,6 +149,30 @@ createCalendarEvent mgr creds ev = do
       pure $ do
         v <- resp
         either (\e -> Left ("calendar response: " <> T.pack e)) Right (T.pack <$> (jstr =<< v .: "id"))
+
+-- | Update an event's location (e.g. when the exact kitchen is announced a
+-- week ahead). Quiet — attendees' calendars sync the change; the reminder
+-- mail is the announcement, so no extra Google notification is sent.
+patchEventLocation :: Manager -> GoogleCreds -> Text -> Text -> IO (Either Text ())
+patchEventLocation mgr creds eventId location = do
+  etok <- mintAccessToken mgr creds
+  case etok of
+    Left e -> pure (Left e)
+    Right tok -> do
+      let body = JObj [("location", JStr (T.unpack location))]
+      resp <-
+        httpJson
+          mgr
+          "PATCH"
+          ("https://www.googleapis.com/calendar/v3/calendars/primary/events/" <> T.unpack (sanitizeId eventId) <> "?sendUpdates=none")
+          (Just tok)
+          "application/json; charset=utf-8"
+          (Just (TE.encodeUtf8 (T.pack (encode body))))
+      pure (() <$ resp)
+  where
+    -- Event ids are base32hex-ish; strip anything else so a stored id can
+    -- never smuggle path segments into the URL.
+    sanitizeId = T.filter (\c -> (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-')
 
 -- ---------------------------------------------------------------------------
 -- Gmail

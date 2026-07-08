@@ -338,7 +338,7 @@ instance BlockSym HtmlBlock where
     HtmlBlock $
       elAttr "form" [("class", "sww-sched"), ("method", "post"), ("action", "/schedule")] $
         htmlConcat (map weekGroup (groupSlotsByArea slots))
-          <> elAttr "p" [("class", "sww-schednote")] (esc "The exact kitchen address is emailed about a week before each class \x2014 for now, pick the week and area that suit you.")
+          <> elAttr "p" [("class", "sww-schednote")] (esc "The exact address is emailed about a week before each class \x2014 for now, pick the week and area that suit you.")
           <> elAttr "div" [("class", "sww-schedfields")] (
                field "Ticket code (from your booking email)" [("name", "code"), ("required", "required"), ("placeholder", "e.g. K7Q2-M4XW"), ("autocomplete", "off")]
                  <> field "Email used at checkout" [("type", "email"), ("name", "email"), ("required", "required"), ("autocomplete", "email")]
