@@ -61,6 +61,48 @@ let
           default = "test";
           description = "Stripe stage label (test|prod).";
         };
+        googleClientIdFile = lib.mkOption {
+          type = lib.types.nullOr lib.types.path;
+          default = null;
+          description = "age file holding the Google OAuth client id (seed-only, like stripePkFile). Powers class-booking calendar invites + Gmail mail.";
+        };
+        googleClientSecretFile = lib.mkOption {
+          type = lib.types.nullOr lib.types.path;
+          default = null;
+          description = "age file holding the Google OAuth client secret (seed-only).";
+        };
+        googleRefreshTokenFile = lib.mkOption {
+          type = lib.types.nullOr lib.types.path;
+          default = null;
+          description = "age file holding the Google refresh token for the account the site acts as (seed-only).";
+        };
+        booking = {
+          staff = lib.mkOption {
+            type = lib.types.listOf lib.types.str;
+            default = [ ];
+            description = "Addresses invited to every class-booking calendar event and copied on every booking mail.";
+          };
+          replyTo = lib.mkOption {
+            type = lib.types.nullOr lib.types.str;
+            default = null;
+            description = "Reply-To on outgoing booking mail (e.g. the school's public address).";
+          };
+          name = lib.mkOption {
+            type = lib.types.nullOr lib.types.str;
+            default = null;
+            description = "Short brand name used in booking mail copy (default: the site title).";
+          };
+          timeZone = lib.mkOption {
+            type = lib.types.str;
+            default = "Europe/London";
+            description = "IANA time zone the classes run in.";
+          };
+          tzOffset = lib.mkOption {
+            type = lib.types.str;
+            default = "+01:00";
+            description = "UTC offset of the class dates in that zone (no tz database in-process).";
+          };
+        };
         enableCaddy = lib.mkOption {
           type = lib.types.bool;
           default = true;
@@ -111,8 +153,19 @@ in
           SWW_SITE_DIR = "${inst.siteDir}";
           SWW_DATA_DIR = inst.dataDir;
           SWW_STAGE = inst.stage;
-          # CA bundle for the outbound Stripe API TLS call.
+          # CA bundle for the outbound Stripe/Google API TLS calls.
           SYSTEM_CERTIFICATE_PATH = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+          SWW_BOOKING_TZ = inst.booking.timeZone;
+          SWW_BOOKING_TZ_OFFSET = inst.booking.tzOffset;
+        }
+        // lib.optionalAttrs (inst.booking.staff != [ ]) {
+          SWW_BOOKING_STAFF = lib.concatStringsSep "," inst.booking.staff;
+        }
+        // lib.optionalAttrs (inst.booking.replyTo != null) {
+          SWW_BOOKING_REPLY_TO = inst.booking.replyTo;
+        }
+        // lib.optionalAttrs (inst.booking.name != null) {
+          SWW_BOOKING_NAME = inst.booking.name;
         };
         # Secrets are age-decrypted with THIS host's ssh key at start — never in
         # the Nix store in plaintext, never in the unit's static environment.
@@ -141,6 +194,18 @@ in
         + lib.optionalString (inst.stripeWebhookFile != null) ''
           SWW_STRIPE_WEBHOOK="$(${pkgs.age}/bin/age -d -i "$hostkey" ${inst.stripeWebhookFile})"
           export SWW_STRIPE_WEBHOOK
+        ''
+        + lib.optionalString (inst.googleClientIdFile != null) ''
+          SWW_GOOGLE_CLIENT_ID="$(${pkgs.age}/bin/age -d -i "$hostkey" ${inst.googleClientIdFile})"
+          export SWW_GOOGLE_CLIENT_ID
+        ''
+        + lib.optionalString (inst.googleClientSecretFile != null) ''
+          SWW_GOOGLE_CLIENT_SECRET="$(${pkgs.age}/bin/age -d -i "$hostkey" ${inst.googleClientSecretFile})"
+          export SWW_GOOGLE_CLIENT_SECRET
+        ''
+        + lib.optionalString (inst.googleRefreshTokenFile != null) ''
+          SWW_GOOGLE_REFRESH_TOKEN="$(${pkgs.age}/bin/age -d -i "$hostkey" ${inst.googleRefreshTokenFile})"
+          export SWW_GOOGLE_REFRESH_TOKEN
         ''
         + ''
           exec ${cfg.package}/bin/swwstructor-server
