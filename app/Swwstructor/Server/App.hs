@@ -12,6 +12,8 @@ module Swwstructor.Server.App
   , swwApp
   ) where
 
+import Control.Exception (SomeException, try)
+import Control.Monad (void, when)
 import Control.Monad.IO.Class (liftIO)
 import Crypto.Hash (Digest, SHA256, hash)
 import qualified Data.ByteArray as BA
@@ -21,7 +23,7 @@ import Data.IORef (IORef, atomicModifyIORef', modifyIORef', readIORef)
 import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -69,14 +71,17 @@ import Swwstructor.Checkout
   ( CheckoutItem (ItemAdHoc, ItemPrice)
   , CheckoutRequest (CheckoutRequest)
   , CheckoutSession (csUrl)
+  , LineItem (liName)
   , Url (Url)
   )
 import Swwstructor.Content
   ( PageSpec (PageSpec, pagePath, pageSections, pageTitle)
   , Partial (partialSections)
-  , SectionSpec (Contact, StripeCatalog)
+  , SectionSpec (Contact, ScheduleClass, StripeCatalog)
   , SiteSpec (siteFooter, sitePages, sitePartials, siteTheme)
+  , SlotSpec (slotArea, slotDate, slotEnd, slotStart, slotTaken)
   , allSectionsOf
+  , slotIdOf
   )
 import Swwstructor.Edit
   ( addListItem
@@ -98,14 +103,15 @@ import Swwstructor.Edit
   , setSiteMeta
   , setTheme
   )
-import Swwstructor.Html (Html, renderHtml)
+import Swwstructor.Html (Html, el, elAttr, esc, htmlConcat, renderHtml)
 import Swwstructor.Media (contentTypeFor, isSafeMediaName)
 import Swwstructor.Money (Quantity (Quantity))
 import Swwstructor.Plugins.Stripe (siteBuyRegistry)
-import Swwstructor.Plugins.StripeCatalog (CatalogItem (ciPriceId), catalogSection, isPriceId)
+import Swwstructor.Plugins.StripeCatalog (CatalogItem (ciName, ciPriceId), catalogSection, isPriceId)
 import Swwstructor.Server.Catalog (CatalogCache, getCatalog)
 import Swwstructor.Server.Admin
   ( adminLoginPage
+  , bookingsPage
   , dashboardPage
   , mediaLibraryPage
   , pageEditorPage
@@ -116,7 +122,24 @@ import Swwstructor.Server.Admin
   , templatePage
   , themeEditorPage
   )
+import Swwstructor.Block (fmtSlotDay)
+import Swwstructor.Server.Booking
+  ( BookingStore
+  , RedeemError (AlreadyRedeemed, CodeNotFound, EmailMismatch, SlotFull, SlotUnknown)
+  , Redemption (redSlotId)
+  , Ticket (tkCode, tkProduct, tkRedemption)
+  , issueTicket
+  , listTickets
+  , redeemTicket
+  , takenCounts
+  )
 import Swwstructor.Server.Media (deleteMedia, listAssets, listMedia, resolveMedia, saveMedia)
+import Swwstructor.Server.Notify
+  ( BookingCtx
+  , ensureReservationSideEffects
+  , notifyTicketIssued
+  , siteSlots
+  )
 import Swwstructor.Server.SecretStore
   ( MasterKey
   , SecretBundle (..)
@@ -128,9 +151,17 @@ import Swwstructor.Server.SecretStore
   , secretText
   )
 import Swwstructor.Server.Store (SiteStore, modifySite, readSite)
-import Swwstructor.Server.Stripe (peekEventType, stripeCreate, verifyStripeSig)
-import Swwstructor.Site (renderFullPage, renderStageWith, renderStaticPage, simplePage)
+import Swwstructor.Server.Stripe
+  ( SessionInfo (siEmail, siId, siPaid, siProduct)
+  , peekEventType
+  , stripeCreate
+  , stripeGetSession
+  , verifyStripeSig
+  , webhookSessionOf
+  )
+import Swwstructor.Site (messagePage, renderFullPage, renderStageWith, renderStaticPage, simplePage)
 import Swwstructor.Templates (Section (secLayout), expandSection, renderSections, resolvedSection)
+import Swwstructor.Theme (Theme)
 import StickyWM
   ( JSON (JArr, JNum, JObj, JStr)
   , Viewport (Viewport)
@@ -166,30 +197,46 @@ data AppEnv = AppEnv
   , aeSpentPow :: !(IORef (Map Text UTCTime))
   -- ^ proof-of-work challenges already redeemed (challenge -> issue time),
   -- pruned as they expire — each challenge reveals the email at most once
+  , aeBookings :: !BookingStore
+  -- ^ tickets + reservations (for @scheduleClass@ sections)
+  , aeBookingCtx :: !BookingCtx
+  -- ^ the notification context (calendar invites + booking mail)
   }
 
 currentSite :: AppEnv -> ActionM SiteSpec
 currentSite env = liftIO (readSite (aeStore env))
 
 -- | The site with dynamic sections resolved: every 'StripeCatalog' marker is
--- replaced with a live 'ProductGrid' built from the owner's Stripe catalogue.
--- Public rendering uses THIS; the admin editor sees the raw marker (it edits
--- the marker's title/intro, never the fetched products).
+-- replaced with a live 'ProductGrid' built from the owner's Stripe catalogue,
+-- and every 'ScheduleClass' section gets its live reservation counts. Public
+-- rendering uses THIS; the admin editor sees the raw markers (it edits their
+-- title/intro/slots, never the injected live data).
 currentSiteResolved :: AppEnv -> ActionM SiteSpec
 currentSiteResolved env = do
-  site <- currentSite env
-  if not (anySection isCatalogMarker site)
-    then pure site
+  site0 <- currentSite env
+  site1 <-
+    if not (anySection isCatalogMarker site0)
+      then pure site0
+      else do
+        items <- liftIO (fetchCatalogFor env)
+        if null items
+          then pure site0 -- template renders the book-by-email fallback
+          else pure (mapAllSections (swapMarker items) site0)
+  if not (anySection isSchedule site1)
+    then pure site1
     else do
-      items <- liftIO (fetchCatalogFor env)
-      if null items
-        then pure site -- template renders the book-by-email fallback
-        else pure (mapAllSections (swapMarker items) site)
+      taken <- liftIO (takenCounts <$> listTickets (aeBookings env))
+      pure (mapAllSections (fillSchedule taken) site1)
   where
     isCatalogMarker StripeCatalog{} = True
     isCatalogMarker _ = False
     swapMarker items (StripeCatalog t i) = catalogSection t i items
     swapMarker _ s = s
+    isSchedule ScheduleClass{} = True
+    isSchedule _ = False
+    fillSchedule taken (ScheduleClass t i slots) =
+      ScheduleClass t i [s {slotTaken = M.findWithDefault 0 (slotIdOf s) taken} | s <- slots]
+    fillSchedule _ s = s
 
 fetchCatalogFor :: AppEnv -> IO [CatalogItem]
 fetchCatalogFor env =
@@ -264,12 +311,12 @@ swwApp env = do
   post "/email-reveal" (handleEmailReveal env)
 
   post "/buy/:id" (handleBuy env)
-  get "/success" $ do
-    site <- currentSite env
-    htmlOf (simplePage (siteTheme site) "Thank you" "Your payment was received. A receipt is on its way.")
+  get "/success" (handleSuccess env)
   get "/cancel" $ do
     site <- currentSite env
     htmlOf (simplePage (siteTheme site) "Checkout cancelled" "No charge was made — you can return any time.")
+
+  post "/schedule" (handleSchedule env)
 
   post "/stripe/webhook" (handleWebhook env)
 
@@ -298,6 +345,7 @@ swwApp env = do
   get "/admin/theme" (adminGate env (handleThemeForm env Nothing))
   post "/admin/theme" (adminGate env (handleThemeSave env))
   get "/admin/stripe" (adminGate env (handleStripe env Nothing))
+  get "/admin/bookings" (adminGate env (handleBookings env Nothing))
   post "/admin/secrets" (adminGate env (handleSaveSecrets env))
   get "/admin/media" (adminGate env (handleMediaPage env Nothing))
   post "/admin/upload" (adminGate env (handleUpload env))
@@ -370,11 +418,20 @@ handleBuy env = do
         Nothing ->
           htmlOf (simplePage (siteTheme site) "Checkout unavailable" "The shop owner has not connected Stripe yet.")
         Just sk -> do
+          -- The product's display name rides on the session as metadata, and
+          -- the success URL carries the session id — both feed ticket
+          -- issuance after payment.
+          productName <- case item of
+            ItemAdHoc li -> pure (liName li)
+            ItemPrice priceId _ -> do
+              items <- liftIO (fetchCatalogFor env)
+              pure (fromMaybe priceId (listToMaybe [ciName i | i <- items, ciPriceId i == priceId]))
           let req =
                 CheckoutRequest
                   (item :| [])
-                  (Url (aeBaseUrl env <> "/success"))
+                  (Url (aeBaseUrl env <> "/success?session_id={CHECKOUT_SESSION_ID}"))
                   (Url (aeBaseUrl env <> "/cancel"))
+                  [("sww_product", productName)]
           res <- liftIO (stripeCreate (aeManager env) sk req)
           case res of
             Right session -> do
@@ -392,7 +449,8 @@ handleWebhook env = do
   msig <- header "Stripe-Signature"
   bundle <- liftIO (loadBundle (aeSecretFile env) (aeMasterKey env))
   let rawStrict = TL.toStrict (TLE.decodeUtf8 raw_)
-      evType = peekEventType (TE.encodeUtf8 rawStrict)
+      rawBytes = TE.encodeUtf8 rawStrict
+      evType = peekEventType rawBytes
   case sbStripeWebhook bundle of
     Nothing -> do
       liftIO (putStrLn "[stripe webhook] REJECTED: no webhook secret configured")
@@ -404,14 +462,134 @@ handleWebhook env = do
         status status400
         text "missing signature"
       Just sig ->
-        if verifyStripeSig (secretText whsec) (TE.encodeUtf8 rawStrict) (TL.toStrict sig)
+        if verifyStripeSig (secretText whsec) rawBytes (TL.toStrict sig)
           then do
             liftIO (putStrLn ("[stripe webhook] verified event: " <> T.unpack evType))
+            -- Fulfilment: a completed, paid checkout issues a ticket (and
+            -- its email). Idempotent against the success page doing the same.
+            when (evType == "checkout.session.completed") $
+              case webhookSessionOf rawBytes of
+                Just info | siPaid info, Just email <- siEmail info ->
+                  liftIO (void (fulfillPaidSession env (siId info) email (fromMaybe "Class" (siProduct info))))
+                _ -> liftIO (putStrLn "[stripe webhook] completed session without payment/email — skipped")
             text "ok"
           else do
             liftIO (putStrLn "[stripe webhook] REJECTED: bad signature")
             status status400
             text "bad signature"
+
+-- | Issue (or find) the ticket for a paid session and send its email.
+-- Shared by the webhook and the success page; both may run — 'issueTicket'
+-- is idempotent on the session id, the ticket mail on its ledger note.
+fulfillPaidSession :: AppEnv -> Text -> Text -> Text -> IO Ticket
+fulfillPaidSession env sessionId email productName = do
+  et <- issueTicket (aeBookings env) sessionId email productName
+  case et of
+    Left err -> do
+      putStrLn ("[booking] ticket issuance failed: " <> T.unpack err)
+      ioError (userError (T.unpack err))
+    Right (t, fresh) -> do
+      when fresh (putStrLn ("[booking] ticket " <> T.unpack (tkCode t) <> " issued for " <> T.unpack productName))
+      notifyTicketIssued (aeBookingCtx env) t
+      pure t
+
+-- ---------------------------------------------------------------------------
+-- Success page: verify the session, hand over the ticket code
+-- ---------------------------------------------------------------------------
+
+handleSuccess :: AppEnv -> ActionM ()
+handleSuccess env = do
+  site <- currentSite env
+  let th = siteTheme site
+      plainThanks = htmlOf (simplePage th "Thank you" "Your payment was received. A receipt is on its way.")
+  msess <- queryParamMaybe "session_id"
+  bundle <- liftIO (loadBundle (aeSecretFile env) (aeMasterKey env))
+  case (msess, sbStripeSk bundle) of
+    (Just sid, Just sk) -> do
+      einfo <- liftIO (stripeGetSession (aeManager env) sk sid)
+      case einfo of
+        Left err -> do
+          liftIO (putStrLn ("[booking] success-page session lookup failed: " <> T.unpack err))
+          plainThanks
+        Right info
+          | not (siPaid info) ->
+              htmlOf (simplePage th "Almost there" "Your payment is still processing — your class ticket will arrive by email as soon as it completes.")
+          | Just email <- siEmail info -> do
+              mt <- liftIO (fulfillSafe env (siId info) email (fromMaybe "Class" (siProduct info)))
+              case mt of
+                Nothing -> plainThanks
+                Just t -> htmlOf (ticketPage th t)
+          | otherwise -> plainThanks
+    _ -> plainThanks
+
+fulfillSafe :: AppEnv -> Text -> Text -> Text -> IO (Maybe Ticket)
+fulfillSafe env sid email productName = do
+  r <- try (fulfillPaidSession env sid email productName) :: IO (Either SomeException Ticket)
+  case r of
+    Right t -> pure (Just t)
+    Left e -> Nothing <$ putStrLn ("[booking] fulfilment failed: " <> show e)
+
+-- | The post-payment page: the ticket code, and where to cash it in.
+ticketPage :: Theme -> Ticket -> Html
+ticketPage th t =
+  messagePage th "Thank you — you have a ticket!" $
+    htmlConcat
+      [ para ("Your payment for \x201C" <> tkProduct t <> "\x201D is confirmed. This is your class ticket code (also on its way to your inbox):")
+      , elAttr "p" [("class", "sww-price"), ("style", "font-size:28px;letter-spacing:.06em")] (esc (tkCode t))
+      , para "Now pick the date of your class — choose a slot and enter this code together with the email address you used at checkout."
+      , elAttr "p" [] (elAttr "a" [("href", "/classes"), ("class", "sww-buy sww-schedsubmit"), ("style", "display:inline-block;text-decoration:none")] (esc "Schedule your class \x2192"))
+      ]
+  where
+    para txt = elAttr "p" [("class", "sww-paragraph")] (esc txt)
+
+-- ---------------------------------------------------------------------------
+-- Schedule: cash a ticket in for a slot
+-- ---------------------------------------------------------------------------
+
+handleSchedule :: AppEnv -> ActionM ()
+handleSchedule env = do
+  site <- currentSite env
+  let th = siteTheme site
+  code <- fromMaybe "" <$> formParamMaybe "code"
+  email <- fromMaybe "" <$> formParamMaybe "email"
+  name <- fromMaybe "" <$> formParamMaybe "name"
+  slotId <- fromMaybe "" <$> formParamMaybe "slot"
+  let slots = siteSlots site
+      oops msg = do
+        status status400
+        htmlOf (simplePage th "Could not reserve that" msg)
+  if T.null (T.strip code) || T.null (T.strip email) || T.null (T.strip name) || T.null slotId
+    then oops "Please fill in the ticket code, your email address, your name, and pick a slot."
+    else do
+      res <- liftIO (redeemTicket (aeBookings env) slots code email name slotId)
+      case res of
+        Left CodeNotFound -> oops "That ticket code was not recognised — check it against your booking email (the code looks like XXXX-XXXX)."
+        Left EmailMismatch -> oops "That email address does not match the one used at checkout. Enter the address your receipt was sent to."
+        Left (AlreadyRedeemed r) ->
+          oops ("This ticket is already booked in" <> maybe "." (\s -> " for " <> slotLabel s <> ".") (slotById slots (redSlotId r)) <> " If you need to change the date, just reply to your confirmation email.")
+        Left SlotUnknown -> oops "That slot is no longer offered — please go back and pick another."
+        Left SlotFull -> oops "Sorry — that class filled up moments ago. Please go back and pick another slot."
+        Right t -> do
+          -- Calendar invite + confirmation mail; failures are retried by the
+          -- reminder loop, so the student's reservation stands regardless.
+          r <- liftIO (try (ensureReservationSideEffects (aeBookingCtx env) t) :: IO (Either SomeException ()))
+          case r of
+            Left e -> liftIO (putStrLn ("[booking] side effects deferred to the retry loop: " <> show e))
+            Right () -> pure ()
+          case tkRedemption t >>= (slotById slots . redSlotId) of
+            Just s ->
+              htmlOf . messagePage th "You're booked!" $
+                htmlConcat
+                  [ elAttr "p" [("class", "sww-paragraph")] (esc ("See you on " <> slotLabel s <> " \x2014 " <> slotArea s <> "."))
+                  , elAttr "p" [("class", "sww-paragraph")] (esc "A confirmation email and a Google Calendar invitation are on their way. The exact kitchen address is emailed about a week before class.")
+                  ]
+            Nothing -> htmlOf (simplePage th "You're booked!" "A confirmation email and a calendar invitation are on their way.")
+
+slotById :: [SlotSpec] -> Text -> Maybe SlotSpec
+slotById slots sid = listToMaybe [s | s <- slots, slotIdOf s == sid]
+
+slotLabel :: SlotSpec -> Text
+slotLabel s = fmtSlotDay (slotDate s) <> ", " <> slotStart s <> "\x2013" <> slotEnd s
 
 -- ---------------------------------------------------------------------------
 -- Email protection: proof-of-work gated reveal
@@ -770,12 +948,22 @@ handleStripe env mfl = do
   catalog <- liftIO (fetchCatalogFor env)
   htmlOf (stripePage (aeBaseUrl env) site catalog bundle mfl)
 
+handleBookings :: AppEnv -> Maybe Text -> ActionM ()
+handleBookings env mfl = do
+  site <- currentSite env
+  tickets <- liftIO (listTickets (aeBookings env))
+  bundle <- liftIO (loadBundle (aeSecretFile env) (aeMasterKey env))
+  htmlOf (bookingsPage tickets (siteSlots site) bundle mfl)
+
 handleSaveSecrets :: AppEnv -> ActionM ()
 handleSaveSecrets env = do
   bundle <- liftIO (loadBundle (aeSecretFile env) (aeMasterKey env))
   pk <- formParamMaybe "stripePk"
   sk <- formParamMaybe "stripeSk"
   wh <- formParamMaybe "stripeWebhook"
+  gid <- formParamMaybe "googleClientId"
+  gsec <- formParamMaybe "googleClientSecret"
+  gtok <- formParamMaybe "googleRefreshToken"
   -- A non-empty field updates that key; a blank field keeps the existing one.
   let pick mval old = case fmap T.strip mval of
         Just v | not (T.null v) -> Just (SecretValue v)
@@ -785,16 +973,25 @@ handleSaveSecrets env = do
           { sbStripePk = pick pk (sbStripePk bundle)
           , sbStripeSk = pick sk (sbStripeSk bundle)
           , sbStripeWebhook = pick wh (sbStripeWebhook bundle)
+          , sbGoogleClientId = pick gid (sbGoogleClientId bundle)
+          , sbGoogleClientSecret = pick gsec (sbGoogleClientSecret bundle)
+          , sbGoogleRefreshToken = pick gtok (sbGoogleRefreshToken bundle)
           }
   res <- liftIO (saveBundle (aeSecretFile env) (aeMasterKey env) updated)
-  bundle' <- liftIO (loadBundle (aeSecretFile env) (aeMasterKey env))
-  site <- currentSite env
-  catalog <- liftIO (fetchCatalogFor env)
+  let mfl = case res of
+        Right () -> Just "Saved."
+        Left _ -> Just "Could not save keys (see server log)."
   case res of
-    Right () -> htmlOf (stripePage (aeBaseUrl env) site catalog bundle' (Just "Saved."))
-    Left e -> do
-      liftIO (putStrLn ("[admin] save failed: " <> T.unpack e))
-      htmlOf (stripePage (aeBaseUrl env) site catalog bundle' (Just "Could not save keys (see server log)."))
+    Left e -> liftIO (putStrLn ("[admin] save failed: " <> T.unpack e))
+    Right () -> pure ()
+  from <- queryParamMaybe "from"
+  case (from :: Maybe Text) of
+    Just "bookings" -> handleBookings env mfl
+    _ -> do
+      bundle' <- liftIO (loadBundle (aeSecretFile env) (aeMasterKey env))
+      site <- currentSite env
+      catalog <- liftIO (fetchCatalogFor env)
+      htmlOf (stripePage (aeBaseUrl env) site catalog bundle' mfl)
 
 -- ---------------------------------------------------------------------------
 -- Cookies

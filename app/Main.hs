@@ -20,6 +20,19 @@
 --                           unset, an ephemeral key is generated (dev only)
 --   * @SWW_ADMIN_PASSWORD@— admin login password; if unset, a random one is
 --                           generated and printed once (dev only)
+--
+-- Booking (the @scheduleClass@ section; all optional):
+--
+--   * @SWW_BOOKING_STAFF@     — comma-separated addresses invited to every
+--                               class event and copied on every booking mail
+--   * @SWW_BOOKING_REPLY_TO@  — Reply-To on booking mail
+--   * @SWW_BOOKING_NAME@      — short brand name for mail copy (default: site title)
+--   * @SWW_BOOKING_TZ@        — IANA zone classes run in (default Europe\/London)
+--   * @SWW_BOOKING_TZ_OFFSET@ — that zone's UTC offset for the class dates
+--                               (default +01:00; no tz database in-process)
+--   * @SWW_GOOGLE_CLIENT_ID@ \/ @SWW_GOOGLE_CLIENT_SECRET@ \/
+--     @SWW_GOOGLE_REFRESH_TOKEN@ — seed the Google connection (calendar
+--     invites + Gmail booking mail), same store-wins rule as the Stripe keys
 module Main (main) where
 
 import Control.Monad (when)
@@ -38,9 +51,20 @@ import Web.Scotty (scotty)
 
 import Swwstructor.Content (siteTitle)
 import Swwstructor.Server.App (AppEnv (..), Stage (Prod, Test), swwApp)
+import Swwstructor.Server.Booking (newBookingStore)
+import Swwstructor.Server.Google (googleCredsOf)
+import Swwstructor.Server.Notify (BookingCtx (..), siteSlots)
+import Swwstructor.Server.Reminders (startReminderLoop)
 import Swwstructor.Server.SecretStore
   ( MasterKey
-  , SecretBundle (sbStripePk, sbStripeSk, sbStripeWebhook)
+  , SecretBundle
+      ( sbGoogleClientId
+      , sbGoogleClientSecret
+      , sbGoogleRefreshToken
+      , sbStripePk
+      , sbStripeSk
+      , sbStripeWebhook
+      )
   , SecretValue (SecretValue)
   , genAdminPassword
   , genMasterKey
@@ -96,6 +120,7 @@ main = do
   -- so a fresh clone with correct rageveil credentials works without manual
   -- entry. Never clobbers keys already set via the admin WebUI.
   seedStripeFromEnv secretFile masterKey
+  seedGoogleFromEnv secretFile masterKey
 
   -- Open the runtime content store: a writable site.json in the data dir,
   -- seeded once from the deployed template (SWW_SITE_DIR). Admin edits mutate
@@ -113,6 +138,30 @@ main = do
   sessionRef <- newIORef =<< genSessionSeed
   catalogCache <- newCatalogCache
   spentPow <- newIORef M.empty
+
+  -- Bookings: the ticket store, and the notification context (who the school
+  -- is, mail-wise). Staff addresses are invited to every calendar event and
+  -- copied on every booking mail.
+  bookings <- newBookingStore (dataDir </> "bookings.json")
+  staff <- splitCsv . fromMaybe "" <$> lookupEnv "SWW_BOOKING_STAFF"
+  replyTo <- fmap T.pack . nonEmptyEnv <$> lookupEnv "SWW_BOOKING_REPLY_TO"
+  bookingName <- fromMaybe (T.unpack (siteTitle site0)) . nonEmptyEnv <$> lookupEnv "SWW_BOOKING_NAME"
+  tzName <- fromMaybe "Europe/London" . nonEmptyEnv <$> lookupEnv "SWW_BOOKING_TZ"
+  tzOffset <- fromMaybe "+01:00" . nonEmptyEnv <$> lookupEnv "SWW_BOOKING_TZ_OFFSET"
+  let bookingCtx =
+        BookingCtx
+          { bcManager = mgr
+          , bcStore = bookings
+          , bcCreds = googleCredsOf <$> loadBundle secretFile masterKey
+          , bcStaff = staff
+          , bcReplyTo = replyTo
+          , bcSiteName = T.pack bookingName
+          , bcBaseUrl = T.pack baseUrl
+          , bcTimeZone = T.pack tzName
+          , bcTzOffset = T.pack tzOffset
+          , bcSlots = siteSlots <$> readSite store
+          }
+
   let env =
         AppEnv
           { aeStore = store
@@ -127,7 +176,13 @@ main = do
           , aeDataDir = dataDir
           , aeCatalog = catalogCache
           , aeSpentPow = spentPow
+          , aeBookings = bookings
+          , aeBookingCtx = bookingCtx
           }
+
+  -- The reminder loop: retries unfinished booking side effects and sends the
+  -- week-before / day-of nags. In-process, minute tick, ledger-idempotent.
+  startReminderLoop bookingCtx
 
   when (T.null adminPw) (putStrLn "[swwstructor] note: admin is unconfigured (no password).")
   putStrLn ("[swwstructor] serving \"" <> T.unpack (siteTitle site0) <> "\" (editable) from " <> contentFile <> " on port " <> show port <> " (" <> show stage <> ")")
@@ -204,9 +259,45 @@ seedStripeFromEnv file key = do
   where
     orKeep new old = case new of Just _ -> new; Nothing -> old
 
+-- | Seed the Google OAuth credentials from @SWW_GOOGLE_{CLIENT_ID,CLIENT_SECRET,REFRESH_TOKEN}@,
+-- but only when the store has no refresh token yet (admin WebUI wins after).
+seedGoogleFromEnv :: FilePath -> MasterKey -> IO ()
+seedGoogleFromEnv file key = do
+  tok <- envSecret "SWW_GOOGLE_REFRESH_TOKEN"
+  case tok of
+    Nothing -> pure ()
+    Just _ -> do
+      cur <- loadBundle file key
+      case sbGoogleRefreshToken cur of
+        Just _ -> pure () -- already configured; never clobber
+        Nothing -> do
+          gid <- envSecret "SWW_GOOGLE_CLIENT_ID"
+          gsec <- envSecret "SWW_GOOGLE_CLIENT_SECRET"
+          r <-
+            saveBundle
+              file
+              key
+              cur
+                { sbGoogleClientId = gid `orKeep` sbGoogleClientId cur
+                , sbGoogleClientSecret = gsec `orKeep` sbGoogleClientSecret cur
+                , sbGoogleRefreshToken = tok
+                }
+          case r of
+            Right () -> putStrLn "[swwstructor] seeded Google credentials from the environment."
+            Left e -> putStrLn ("[swwstructor] WARNING: could not seed Google credentials: " <> T.unpack e)
+  where
+    orKeep new old = case new of Just _ -> new; Nothing -> old
+
 envSecret :: String -> IO (Maybe SecretValue)
 envSecret name = do
   mv <- lookupEnv name
   pure $ case mv of
     Just s | not (null s) -> Just (SecretValue (T.pack s))
     _ -> Nothing
+
+nonEmptyEnv :: Maybe String -> Maybe String
+nonEmptyEnv (Just s) | not (null s) = Just s
+nonEmptyEnv _ = Nothing
+
+splitCsv :: String -> [T.Text]
+splitCsv = filter (not . T.null) . map T.strip . T.splitOn "," . T.pack

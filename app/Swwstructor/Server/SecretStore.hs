@@ -98,7 +98,7 @@ genSessionSeed = do
   bs <- getRandomBytes 8 :: IO ByteString
   pure (BS.foldl' (\a w -> a * 256 + fromIntegral w) 0 bs)
 
--- | The owner-entered Stripe secrets. 'SecretValue' fields keep them un-loggable.
+-- | The owner-entered secrets. 'SecretValue' fields keep them un-loggable.
 data SecretBundle = SecretBundle
   { sbStripePk :: !(Maybe SecretValue)
   -- ^ publishable key (browser-safe)
@@ -106,11 +106,17 @@ data SecretBundle = SecretBundle
   -- ^ secret key (backend only)
   , sbStripeWebhook :: !(Maybe SecretValue)
   -- ^ webhook signing secret (backend only)
+  , sbGoogleClientId :: !(Maybe SecretValue)
+  -- ^ Google OAuth client id (calendar invites + booking mail)
+  , sbGoogleClientSecret :: !(Maybe SecretValue)
+  -- ^ Google OAuth client secret
+  , sbGoogleRefreshToken :: !(Maybe SecretValue)
+  -- ^ refresh token for the Google account the site acts as
   }
   deriving (Show)
 
 emptyBundle :: SecretBundle
-emptyBundle = SecretBundle Nothing Nothing Nothing
+emptyBundle = SecretBundle Nothing Nothing Nothing Nothing Nothing Nothing
 
 -- | Whether the bundle has enough to run checkout (a secret key).
 bundleHasCheckout :: SecretBundle -> Bool
@@ -124,6 +130,9 @@ bundleToJSON b =
     [ ("stripePk", enc (sbStripePk b))
     , ("stripeSk", enc (sbStripeSk b))
     , ("stripeWebhook", enc (sbStripeWebhook b))
+    , ("googleClientId", enc (sbGoogleClientId b))
+    , ("googleClientSecret", enc (sbGoogleClientSecret b))
+    , ("googleRefreshToken", enc (sbGoogleRefreshToken b))
     ]
   where
     enc Nothing = JNull
@@ -131,7 +140,13 @@ bundleToJSON b =
 
 bundleFromJSON :: JSON -> SecretBundle
 bundleFromJSON v =
-  SecretBundle (field "stripePk") (field "stripeSk") (field "stripeWebhook")
+  SecretBundle
+    (field "stripePk")
+    (field "stripeSk")
+    (field "stripeWebhook")
+    (field "googleClientId")
+    (field "googleClientSecret")
+    (field "googleRefreshToken")
   where
     field k = case v .:? k of
       Just j -> case jstr j of

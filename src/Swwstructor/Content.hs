@@ -19,6 +19,9 @@ module Swwstructor.Content
   , Product (..)
   , Story (..)
   , story
+  , SlotSpec (..)
+  , slotIdOf
+  , groupSlotsByArea
 
     -- * Sections, pages, sites
   , HeroContent (..)
@@ -46,7 +49,15 @@ module Swwstructor.Content
 
 import Data.Text (Text)
 import qualified Data.Text as T
-import Swwstructor.Block (BuyTarget (BuyTarget), NavLink (NavLink), navHref, navLabel)
+import Swwstructor.Block
+  ( BuyTarget (BuyTarget)
+  , NavLink (NavLink)
+  , SlotSpec (..)
+  , groupSlotsByArea
+  , navHref
+  , navLabel
+  , slotIdOf
+  )
 import Swwstructor.Money (Cents (Cents), Currency, Price (Price), centsInt, currencyCode, currencyOfCode)
 import Swwstructor.Theme (Theme, defaultTheme, themeFromJSON, themeToJSON)
 import StickyWM (JSON (..), jarr, jnum, jstr, (.:), (.:?))
@@ -146,6 +157,11 @@ data SectionSpec
     -- downloads the owner's Stripe products and renders them as a grid —
     -- Stripe is the single source of truth, zero site-side maintenance
     StripeCatalog !(Maybe Text) !(Maybe Text)
+  | -- | \"schedule a class\": a ticket-redemption form (optional title,
+    -- optional intro, the owner-defined slots). A buyer's checkout issues a
+    -- ticket; this section lets them cash it in for a concrete slot. The
+    -- server injects live availability into 'slotTaken' at render time.
+    ScheduleClass !(Maybe Text) !(Maybe Text) ![SlotSpec]
   | -- | N prose columns under an optional title
     RichColumns !(Maybe Text) ![Text]
   | -- | an image gallery under an optional title
@@ -338,6 +354,26 @@ optImage v k = case v .:? k of
   Just j -> Just <$> imageRefFromJSON j
   Nothing -> Right Nothing
 
+-- | 'slotTaken' is deliberately omitted: it is live server state, not content.
+slotSpecToJSON :: SlotSpec -> JSON
+slotSpecToJSON s =
+  obj
+    [ req "date" (jS (slotDate s))
+    , req "start" (jS (slotStart s))
+    , req "end" (jS (slotEnd s))
+    , req "area" (jS (slotArea s))
+    , req "cap" (JNum (fromIntegral (slotCap s)))
+    ]
+
+slotSpecFromJSON :: JSON -> Either String SlotSpec
+slotSpecFromJSON v = do
+  d <- reqText v "date"
+  st <- reqText v "start"
+  en <- reqText v "end"
+  area <- reqText v "area"
+  let cap = maybe 6 round (optDouble v "cap")
+  pure (SlotSpec d st en area (max 1 cap) 0)
+
 storyToJSON :: Story -> JSON
 storyToJSON s =
   obj
@@ -410,6 +446,13 @@ sectionSpecToJSON spec = case spec of
       ]
   StripeCatalog title intro ->
     obj [tag' "stripeCatalog", optF "title" title jS, optF "intro" intro jS]
+  ScheduleClass title intro slots ->
+    obj
+      [ tag' "scheduleClass"
+      , optF "title" title jS
+      , optF "intro" intro jS
+      , req "slots" (arrOf slotSpecToJSON slots)
+      ]
   RichColumns title cols ->
     obj [tag' "richColumns", optF "title" title jS, req "columns" (arrOf jS cols)]
   Gallery title imgs ->
@@ -462,6 +505,9 @@ sectionSpecFromJSON v = do
       products <- decArrAt productFromJSON v "products"
       pure (ProductGrid (optText v "title") (optText v "intro") products)
     "stripeCatalog" -> pure (StripeCatalog (optText v "title") (optText v "intro"))
+    "scheduleClass" -> do
+      slots <- decArrAt slotSpecFromJSON v "slots"
+      pure (ScheduleClass (optText v "title") (optText v "intro") slots)
     "richColumns" -> do
       cols <- decArrAt jText v "columns"
       pure (RichColumns (optText v "title") cols)

@@ -71,6 +71,10 @@ executable swwstructor-server
     Swwstructor.Server.Store
     Swwstructor.Server.Media
     Swwstructor.Server.Catalog
+    Swwstructor.Server.Booking
+    Swwstructor.Server.Google
+    Swwstructor.Server.Notify
+    Swwstructor.Server.Reminders
     Swwstructor.Server.Admin
     Swwstructor.Server.App
   build-depends:

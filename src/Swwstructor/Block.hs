@@ -22,6 +22,11 @@ module Swwstructor.Block
     NavLink (..)
   , navLink
   , BuyTarget (..)
+  , SlotSpec (..)
+  , slotIdOf
+  , groupSlotsByArea
+  , slotsLeft
+  , fmtSlotDay
 
     -- * The algebra
   , BlockSym (..)
@@ -47,6 +52,7 @@ import Swwstructor.Html
   , esc
   , htmlConcat
   , rawHtml
+  , voidElAttr
   )
 import Swwstructor.Money
   ( Cents (Cents)
@@ -84,6 +90,62 @@ navLink = NavLink
 -- 'Text'.
 newtype BuyTarget = BuyTarget Text
   deriving (Eq, Ord, Show)
+
+-- | A bookable class slot: a calendar date, a time window, the area the class
+-- runs in (the precise venue is typically announced closer to the date), and
+-- how many students fit. 'slotTaken' is NOT owner content: it is the live
+-- reservation count, injected by the server when the page is resolved — the
+-- content codec never persists it (the same marker-resolution idea as the
+-- Stripe catalogue).
+data SlotSpec = SlotSpec
+  { slotDate :: !Text
+  -- ^ ISO date, @YYYY-MM-DD@
+  , slotStart :: !Text
+  -- ^ start of class, @HH:MM@ (site-local wall clock)
+  , slotEnd :: !Text
+  -- ^ end of class, @HH:MM@
+  , slotArea :: !Text
+  -- ^ neighbourhood/area label, e.g. @\"Islington \/ Finsbury Park\"@
+  , slotCap :: !Int
+  -- ^ places in the class
+  , slotTaken :: !Int
+  -- ^ live reservations (server-injected; never persisted)
+  }
+  deriving (Eq, Show)
+
+-- | The stable id a reservation form posts for a slot: @date-HHMM@.
+slotIdOf :: SlotSpec -> Text
+slotIdOf s = slotDate s <> "-" <> T.filter (/= ':') (slotStart s)
+
+-- | Places still free (never negative).
+slotsLeft :: SlotSpec -> Int
+slotsLeft s = max 0 (slotCap s - slotTaken s)
+
+-- | Group slots by area, preserving first-appearance order — one fieldset per
+-- area (\"week\") in the reservation form.
+groupSlotsByArea :: [SlotSpec] -> [(Text, [SlotSpec])]
+groupSlotsByArea = foldr ins []
+  where
+    ins s acc = case lookup (slotArea s) acc of
+      Just _ -> [(a, if a == slotArea s then s : ss else ss) | (a, ss) <- acc]
+      Nothing -> (slotArea s, [s]) : acc
+
+-- | @\"2026-09-01\"@ → @\"Tue 1 Sep\"@ (pure, no time dependency — Sakamoto's
+-- day-of-week congruence). Malformed dates render verbatim.
+fmtSlotDay :: Text -> Text
+fmtSlotDay iso = case mapM readIntT (T.splitOn "-" iso) of
+  Just [y, m, d]
+    | m >= 1 && m <= 12 && d >= 1 && d <= 31 ->
+        dayName (sakamoto y m d) <> " " <> T.pack (show d) <> " " <> monthName m
+  _ -> iso
+  where
+    readIntT t = case reads (T.unpack t) of [(n :: Int, "")] -> Just n; _ -> Nothing
+    sakamoto y m d =
+      let t = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4]
+          y' = if m < 3 then y - 1 else y
+       in (y' + y' `div` 4 - y' `div` 100 + y' `div` 400 + t !! (m - 1) + d) `mod` 7
+    dayName n = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] !! max 0 (min 6 n)
+    monthName m = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] !! (m - 1)
 
 -- ---------------------------------------------------------------------------
 -- The algebra
@@ -138,6 +200,13 @@ class BlockSym repr where
   -- harvesters reading the page (or the content JSON routes) get nothing.
   emailReveal :: repr
 
+  -- | The ticket-redemption form: pick a slot (grouped by area, with live
+  -- availability), enter the ticket code + the checkout email + a name, and
+  -- POST to @\/schedule@. Plain HTML — no client JS, so it survives the
+  -- relayout stage swap by construction (form-post-and-navigate, like
+  -- 'buyButton').
+  scheduleForm :: [SlotSpec] -> repr
+
   -- | A hairline rule — a section divider.
   ruleLine :: repr
 
@@ -162,6 +231,7 @@ data Block
   | BBuyButton !BuyTarget !Text
   | BLinkText !Text !Text
   | BEmailReveal
+  | BScheduleForm ![SlotSpec]
   | BRuleLine
   deriving (Eq, Show)
 
@@ -180,6 +250,7 @@ instance BlockSym Block where
   buyButton = BBuyButton
   linkText = BLinkText
   emailReveal = BEmailReveal
+  scheduleForm = BScheduleForm
   ruleLine = BRuleLine
 
 -- | The initial→final transform: interpret a stored 'Block' into any
@@ -199,6 +270,7 @@ buildBlock (BPriceTag p) = priceTag p
 buildBlock (BBuyButton tgt l) = buyButton tgt l
 buildBlock (BLinkText l h) = linkText l h
 buildBlock BEmailReveal = emailReveal
+buildBlock (BScheduleForm slots) = scheduleForm slots
 buildBlock BRuleLine = ruleLine
 
 -- ---------------------------------------------------------------------------
@@ -262,6 +334,41 @@ instance BlockSym HtmlBlock where
           <> elAttr "noscript" [] (esc "Please enable JavaScript to see the address (spam protection).")
       )
         <> rawHtml powClientJs
+  scheduleForm slots =
+    HtmlBlock $
+      elAttr "form" [("class", "sww-sched"), ("method", "post"), ("action", "/schedule")] $
+        htmlConcat (map weekGroup (groupSlotsByArea slots))
+          <> elAttr "p" [("class", "sww-schednote")] (esc "The exact kitchen address is emailed about a week before each class \x2014 for now, pick the week and area that suit you.")
+          <> elAttr "div" [("class", "sww-schedfields")] (
+               field "Ticket code (from your booking email)" [("name", "code"), ("required", "required"), ("placeholder", "e.g. K7Q2-M4XW"), ("autocomplete", "off")]
+                 <> field "Email used at checkout" [("type", "email"), ("name", "email"), ("required", "required"), ("autocomplete", "email")]
+                 <> field "Your name" [("name", "name"), ("required", "required"), ("autocomplete", "name")]
+             )
+          <> elAttr "button" [("class", "sww-buy sww-schedsubmit"), ("type", "submit")] (esc "Reserve my place")
+    where
+      field lbl attrs =
+        elAttr "label" [("class", "sww-schedfield")] (elAttr "span" [] (esc lbl) <> voidElAttr "input" attrs)
+      weekGroup (area, ss) =
+        elAttr "fieldset" [("class", "sww-schedweek")] $
+          elAttr "legend" [] (esc (area <> rangeOf ss))
+            <> htmlConcat (map slotRow ss)
+      rangeOf ss = case map slotDate ss of
+        [] -> ""
+        ds -> " \xB7 " <> fmtSlotDay (minimum ds) <> " \x2013 " <> fmtSlotDay (maximum ds)
+      slotRow s =
+        let full = slotsLeft s <= 0
+            left = slotsLeft s
+            leftLabel
+              | full = "fully booked"
+              | left == 1 = "1 place left"
+              | otherwise = T.pack (show left) <> " places left"
+            radioAttrs =
+              [("type", "radio"), ("name", "slot"), ("value", slotIdOf s)]
+                <> (if full then [("disabled", "disabled")] else [("required", "required")])
+         in elAttr "label" [("class", if full then "sww-slot sww-slot-full" else "sww-slot")] $
+              voidElAttr "input" radioAttrs
+                <> elAttr "span" [("class", "sww-slotwhen")] (esc (fmtSlotDay (slotDate s) <> " \xB7 " <> slotStart s <> "\x2013" <> slotEnd s))
+                <> elAttr "span" [("class", "sww-slotleft")] (esc leftLabel)
   ruleLine = HtmlBlock $ elAttr "hr" [("class", "sww-rule")] mempty
 
 -- | The proof-of-work reveal client — a fixed literal (never owner content),
@@ -341,6 +448,8 @@ instance BlockSym PlainBlock where
   buyButton _ lbl = PlainBlock ("[" <> lbl <> "]")
   linkText lbl _ = PlainBlock lbl
   emailReveal = PlainBlock "(email address \x2014 revealed on the website)"
+  scheduleForm slots =
+    PlainBlock ("(schedule a class \x2014 " <> T.pack (show (length slots)) <> " slots)")
   ruleLine = PlainBlock "\x2014"
 
 -- ---------------------------------------------------------------------------
@@ -364,9 +473,21 @@ blockToJSON b = case b of
   BBuyButton (BuyTarget tgt) l -> tagged "buyButton" [("target", JStr (T.unpack tgt)), ("label", JStr (T.unpack l))]
   BLinkText l h -> tagged "linkText" [("label", JStr (T.unpack l)), ("href", JStr (T.unpack h))]
   BEmailReveal -> tagged "emailReveal" []
+  BScheduleForm slots -> tagged "scheduleForm" [("slots", JArr (map slotJSON slots))]
   BRuleLine -> tagged "ruleLine" []
   where
     tagged k extra = JObj (("b", JStr k) : extra)
+    -- The block codec is a render-state codec, so 'slotTaken' rides along
+    -- (unlike the content codec, which never persists it).
+    slotJSON s =
+      JObj
+        [ ("date", JStr (T.unpack (slotDate s)))
+        , ("start", JStr (T.unpack (slotStart s)))
+        , ("end", JStr (T.unpack (slotEnd s)))
+        , ("area", JStr (T.unpack (slotArea s)))
+        , ("cap", JNum (fromIntegral (slotCap s)))
+        , ("taken", JNum (fromIntegral (slotTaken s)))
+        ]
 
 -- | Decode a 'Block' from wire JSON.
 blockFromJSON :: JSON -> Either String Block
@@ -394,12 +515,25 @@ blockFromJSON v = do
     "buyButton" -> BBuyButton . BuyTarget <$> txt "target" <*> txt "label"
     "linkText" -> BLinkText <$> txt "label" <*> txt "href"
     "emailReveal" -> Right BEmailReveal
+    "scheduleForm" -> do
+      arr <- jarr' =<< v .: "slots"
+      BScheduleForm <$> mapM slotOf arr
     "ruleLine" -> Right BRuleLine
     other -> Left ("unknown block kind: " ++ other)
   where
     txt key = T.pack <$> (jstr =<< v .: key)
     jarr' (JArr xs) = Right xs
     jarr' _ = Left "expected array"
+    slotOf sv = do
+      d <- T.pack <$> (jstr =<< sv .: "date")
+      st <- T.pack <$> (jstr =<< sv .: "start")
+      en <- T.pack <$> (jstr =<< sv .: "end")
+      area <- T.pack <$> (jstr =<< sv .: "area")
+      cap <- jnum =<< sv .: "cap"
+      let taken = case sv .:? "taken" of
+            Just (JNum n) -> round n
+            _ -> 0
+      pure (SlotSpec d st en area (round cap) taken)
 
 navLinkToJSON :: NavLink -> JSON
 navLinkToJSON (NavLink l h) = JObj [("label", JStr (T.unpack l)), ("href", JStr (T.unpack h))]

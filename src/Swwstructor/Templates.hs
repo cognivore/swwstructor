@@ -48,6 +48,7 @@ import Swwstructor.Block
   , navBar
   , paragraph
   , priceTag
+  , scheduleForm
   , subhead
   , timestamp
   )
@@ -60,6 +61,7 @@ import Swwstructor.Content
   , Product (..)
   , SectionSpec (..)
   , SiteSpec (sitePartials)
+  , SlotSpec
   , Story (..)
   )
 import StickyWM
@@ -233,6 +235,7 @@ renderSection i spec = case spec of
         , (\t -> leafWith (prose (pfx <> "-intro") (chars t)) (subhead t)) <$> intro
         , Just (leafWith (prose (pfx <> "-body") 120) (paragraph "Online booking is being set up — please get in touch to book a class."))
         ]
+  ScheduleClass title intro slots -> scheduleClassSection pfx title intro slots
   RichColumns title cols -> richColumnsSection pfx title cols
   Gallery title imgs -> gallerySection pfx title imgs
   CtaBand h body cta -> ctaSection pfx h body cta
@@ -336,6 +339,25 @@ productCard pfx p =
     imgOrDefault = case prodImage p of
       Just ir -> Just ir
       Nothing -> Just (ImageRef Nothing (prodName p) 1.2 220)
+
+-- | The reservation form is ONE window (a plain HTML form block): the engine
+-- places it, the browser's second layout pass measures its true height. With
+-- no slots at all the form degrades to a book-by-email note (mirroring the
+-- 'StripeCatalog' fallback).
+scheduleClassSection :: String -> Maybe Text -> Maybe Text -> [SlotSpec] -> Section
+scheduleClassSection pfx title intro slots =
+  sectionOf $
+    catMaybes
+      [ (\t -> leafWith (headline (pfx <> "-h") (chars t)) (heading t)) <$> title
+      , (\t -> leafWith (prose (pfx <> "-intro") (chars t)) (subhead t)) <$> intro
+      , Just $
+          if null slots
+            then leafWith (prose (pfx <> "-body") 120) (paragraph "Scheduling opens soon \x2014 please get in touch to arrange your class.")
+            else leafWith (chrome (Custom "schedule") (pfx <> "-form") (formHeight slots)) (scheduleForm slots)
+      ]
+  where
+    -- A serviceable first-pass estimate; the relayout pass measures reality.
+    formHeight ss = 430 + 44 * fromIntegral (length ss)
 
 richColumnsSection :: String -> Maybe Text -> [Text] -> Section
 richColumnsSection pfx title cols =

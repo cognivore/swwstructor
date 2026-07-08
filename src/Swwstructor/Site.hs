@@ -20,6 +20,7 @@ module Swwstructor.Site
   , renderStaticPage
   , renderChrome
   , simplePage
+  , messagePage
   ) where
 
 import Data.Map.Strict (Map)
@@ -203,12 +204,17 @@ footerHtml (Just t) = elAttr "footer" [("class", "sww-footer")] (esc t)
 -- | A minimal branded one-message page — used for @\/success@, @\/cancel@, and
 -- friendly error pages. Reuses the Block DSL and the same shell.
 simplePage :: Theme -> Text -> Text -> Html
-simplePage th h body =
+simplePage th h body = messagePage th h (runHtmlBlock (buildBlock (paragraph body) :: HtmlBlock))
+
+-- | Like 'simplePage' but the body is arbitrary (trusted) markup — for pages
+-- that need more than one paragraph (a ticket code, a booking summary).
+messagePage :: Theme -> Text -> Html -> Html
+messagePage th h inner =
   renderDocument th h Nothing $
     elAttr "main" [] $
       elAttr "div" [("class", "sww-page-msg")] $
         runHtmlBlock (buildBlock (heading h) :: HtmlBlock)
-          <> runHtmlBlock (buildBlock (paragraph body) :: HtmlBlock)
+          <> inner
           <> elAttr "p" [] (elAttr "a" [("href", "/"), ("class", "sww-navlink")] (esc "\x2190 home"))
 
 -- ---------------------------------------------------------------------------

@@ -23,6 +23,7 @@ import Swwstructor.Block
   , blockFromJSON
   , blockToJSON
   , buildBlock
+  , fmtSlotDay
   )
 import Swwstructor.Html (renderHtml)
 import Swwstructor.Site (renderStage)
@@ -214,10 +215,21 @@ sinkSite =
             , CtaBand "Subscribe" (Just "for 50p a week") (Just (Cta "Subscribe" "/sub"))
             , Contact "Visit" (Just "come by") (Just "hello@example.test")
             , ProseSection (Just "Note") (Just "Heading") "Some prose."
+            , ScheduleClass (Just "Schedule your class") (Just "Pick a date.") demoSlots
             , FooterBand "the end"
             ]
         ]
     }
+
+-- Week 1 / week 2 areas, one slot already full. 'slotTaken' MUST be 0 here:
+-- the content codec never persists it, so a non-zero value would (rightly)
+-- break the round-trip test.
+demoSlots :: [SlotSpec]
+demoSlots =
+  [ SlotSpec "2026-09-01" "11:00" "13:00" "Islington / Finsbury Park" 6 0
+  , SlotSpec "2026-09-01" "18:00" "20:00" "Islington / Finsbury Park" 6 0
+  , SlotSpec "2026-09-08" "11:00" "13:00" "Marylebone / Clerkenwell" 6 0
+  ]
 
 demoProduct :: Product
 demoProduct = Product "Demo Widget" "A demo product." (price Money.EUR 85) (Just (img "a product photo" 1.4 220)) (BuyTarget "demo-widget")
@@ -338,6 +350,7 @@ blockRoundTrip = do
         , BBuyButton (BuyTarget "x") "Buy"
         , BLinkText "l" "/l"
         , BEmailReveal
+        , BScheduleForm [SlotSpec "2026-09-01" "11:00" "13:00" "Islington" 6 3]
         , BRuleLine
         ]
       ok b = blockFromJSON (blockToJSON b) == Right b
@@ -378,6 +391,7 @@ checkoutTests = do
           (ItemAdHoc (lineItem "Demo Widget" (price Money.EUR 85)) :| [])
           (Url "https://x.test/success")
           (Url "https://x.test/cancel")
+          [("sww_product", "Demo Widget")]
       params = stripeFormParams req
       look k = lookup k params
       reqP =
@@ -385,6 +399,7 @@ checkoutTests = do
           (ItemPrice "price_1ABCdef" (Money.Quantity 1) :| [])
           (Url "https://x.test/success")
           (Url "https://x.test/cancel")
+          []
       paramsP = stripeFormParams reqP
       lookP k = lookup k paramsP
       body = encodeForm [("a b", "c&d")]
@@ -393,8 +408,10 @@ checkoutTests = do
     , check "unit_amount is minor units (8500)" (look "line_items[0][price_data][unit_amount]" == Just "8500")
     , check "currency is eur" (look "line_items[0][price_data][currency]" == Just "eur")
     , check "quantity is 1" (look "line_items[0][quantity]" == Just "1")
+    , check "session metadata is encoded" (look "metadata[sww_product]" == Just "Demo Widget")
     , check "a price-id item encodes line_items[0][price]" (lookP "line_items[0][price]" == Just "price_1ABCdef")
     , check "a price-id item sends no price_data" (lookP "line_items[0][price_data][unit_amount]" == Nothing)
+    , check "no metadata params when none given" (all (\(k, _) -> not ("metadata[" `T.isPrefixOf` k)) paramsP)
     , check "form encoding escapes & and space" (body == "a+b=c%26d")
     ]
 
@@ -562,6 +579,33 @@ mediaTests = do
     , check "content type follows the extension" (contentTypeFor "x.webp" == Just "image/webp" && contentTypeFor "x.bin" == Nothing)
     ]
 
+-- The schedule-a-class section: grouping, availability, and the no-JS form.
+scheduleTests :: IO [Bool]
+scheduleTests = do
+  section "schedule a class (ticket redemption form)"
+  let slots =
+        [ SlotSpec "2026-09-01" "11:00" "13:00" "Islington / Finsbury Park" 6 0
+        , SlotSpec "2026-09-02" "18:00" "20:00" "Islington / Finsbury Park" 6 6 -- full
+        , SlotSpec "2026-09-08" "11:00" "13:00" "Marylebone / Clerkenwell" 6 5
+        ]
+      sec = renderSection 0 (ScheduleClass (Just "Schedule") Nothing slots)
+      html = renderHtml (renderStage nytTheme sec (Viewport 1180 900))
+      persisted = sectionSpecToJSON (ScheduleClass Nothing Nothing [SlotSpec "2026-09-01" "11:00" "13:00" "A" 6 3])
+  sequence
+    [ check "form posts to /schedule" ("action=\"/schedule\"" `T.isInfixOf` html)
+    , check "slots become radios with stable ids" ("value=\"2026-09-01-1100\"" `T.isInfixOf` html)
+    , check "one fieldset per area" (T.count "sww-schedweek" html >= 2)
+    , check "a full slot is disabled and marked" ("disabled" `T.isInfixOf` html && "fully booked" `T.isInfixOf` html && "sww-slot-full" `T.isInfixOf` html)
+    , check "scarcity shows (1 place left)" ("1 place left" `T.isInfixOf` html)
+    , check "the venue-announcement note is present" ("about a week before" `T.isInfixOf` html)
+    , check "ticket code + email + name fields present" (all (`T.isInfixOf` html) ["name=\"code\"", "name=\"email\"", "name=\"name\""])
+    , check "no client JS in the widget (form-post-and-navigate)" (not ("<script" `T.isInfixOf` html))
+    , check "day formatting (Sakamoto)" (fmtSlotDay "2026-09-01" == "Tue 1 Sep" && fmtSlotDay "2026-09-08" == "Tue 8 Sep" && fmtSlotDay "2026-09-13" == "Sun 13 Sep")
+    , check "slot ids strip the colon" (slotIdOf (SlotSpec "2026-09-01" "11:00" "13:00" "A" 6 0) == "2026-09-01-1100")
+    , check "grouping preserves first-appearance order" (map fst (groupSlotsByArea slots) == ["Islington / Finsbury Park", "Marylebone / Clerkenwell"])
+    , check "live counts are NOT persisted by the content codec" (sectionSpecFromJSON persisted == Right (ScheduleClass Nothing Nothing [SlotSpec "2026-09-01" "11:00" "13:00" "A" 6 0]))
+    ]
+
 main :: IO ()
 main = do
   results <-
@@ -579,6 +623,7 @@ main = do
         , mediaTests
         , checkoutTests
         , catalogTests
+        , scheduleTests
         , moneyTests
         ]
   let passed = length (filter id results)

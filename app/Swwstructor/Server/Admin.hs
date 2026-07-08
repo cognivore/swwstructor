@@ -16,6 +16,7 @@ module Swwstructor.Server.Admin
   , sectionFormPage
   , themeEditorPage
   , stripePage
+  , bookingsPage
   , templatePage
   , mediaLibraryPage
     -- * Pure form parsers
@@ -26,7 +27,7 @@ module Swwstructor.Server.Admin
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
-import Swwstructor.Block (BuyTarget (BuyTarget), NavLink (NavLink), navHref, navLabel)
+import Swwstructor.Block (BuyTarget (BuyTarget), NavLink (NavLink), fmtSlotDay, navHref, navLabel)
 import Swwstructor.Content
   ( Cta (Cta)
   , HeroContent (..)
@@ -36,9 +37,12 @@ import Swwstructor.Content
   , Product (..)
   , SectionSpec (..)
   , SiteSpec (siteDescription, sitePages, sitePartials, siteTitle)
+  , SlotSpec (..)
   , Story (..)
+  , slotIdOf
   )
 import Swwstructor.Plugins.StripeCatalog (CatalogItem (..))
+import Swwstructor.Server.Booking (Redemption (..), Ticket (..))
 import Swwstructor.Server.Media (MediaEntry (..))
 import Swwstructor.Edit (isPartialPath, sectionKinds, sectionLabelOf)
 import Swwstructor.Html (Html, el, elAttr, esc, htmlConcat, rawHtml, voidElAttr)
@@ -51,7 +55,16 @@ import Swwstructor.Money
   , currencyOfCode
   , priceCurrency
   )
-import Swwstructor.Server.SecretStore (SecretBundle (sbStripePk, sbStripeSk, sbStripeWebhook))
+import Swwstructor.Server.SecretStore
+  ( SecretBundle
+      ( sbGoogleClientId
+      , sbGoogleClientSecret
+      , sbGoogleRefreshToken
+      , sbStripePk
+      , sbStripeSk
+      , sbStripeWebhook
+      )
+  )
 import Swwstructor.Theme
   ( Color (Color)
   , Density (Airy, Compact, Cozy)
@@ -140,6 +153,7 @@ topbar =
       , elAttr "a" [("href", "/admin/media")] (esc "Media")
       , elAttr "a" [("href", "/admin/theme")] (esc "Theme")
       , elAttr "a" [("href", "/admin/stripe")] (esc "Shop & Stripe")
+      , elAttr "a" [("href", "/admin/bookings")] (esc "Bookings")
       , elAttr "span" [("class", "sp")] mempty
       , elAttr "a" [("href", "/"), ("target", "_blank")] (esc "View site \x2197")
       , elAttr "a" [("href", "/admin/logout")] (esc "Sign out")
@@ -385,6 +399,7 @@ sectionSummary s = case s of
   StoryRow ss -> headlines ss
   ProductGrid t _ ps -> fromMaybe "Shop" t <> " (" <> T.pack (show (length ps)) <> " products)"
   StripeCatalog t _ -> fromMaybe "Book a class" t <> " (live from your Stripe catalogue)"
+  ScheduleClass t _ slots -> fromMaybe "Schedule a class" t <> " (" <> T.pack (show (length slots)) <> " slots)"
   RichColumns t cs -> fromMaybe "Columns" t <> " (" <> T.pack (show (length cs)) <> ")"
   Gallery t imgs -> fromMaybe "Gallery" t <> " (" <> T.pack (show (length imgs)) <> ")"
   CtaBand h _ _ -> h
@@ -467,6 +482,12 @@ sectionFields partials s = case s of
     elAttr "p" [("class", "muted")] (esc "This section shows your LIVE Stripe catalogue \x2014 names, prices and photos come straight from Stripe and refresh automatically. To change the products, edit them at dashboard.stripe.com \x2192 Product catalogue; there is nothing to maintain here.")
       <> ipt "text" "title" "Title above the grid (optional)" (orEmpty t)
       <> txtArea "intro" "Intro line (optional)" (orEmpty intro)
+  ScheduleClass t intro slots ->
+    elAttr "p" [("class", "muted")] (esc "Students who bought a class cash their ticket in here: they pick one of the slots below and the site handles the calendar invitations and reminder emails. Give each slot a date, a time window, the area it runs in, and how many students fit. Slots in the same area are shown grouped together.")
+      <> ipt "text" "title" "Title (optional)" (orEmpty t)
+      <> txtArea "intro" "Intro (optional)" (orEmpty intro)
+      <> el "h3" (esc "Slots")
+      <> slotList "slots" slots
   RichColumns t cs ->
     ipt "text" "title" "Title (optional)" (orEmpty t) <> el "h3" (esc "Columns") <> textList "columns" cs
   Gallery t imgs ->
@@ -526,6 +547,26 @@ productFields ln i p =
           <> ipt "text" (ix ln i "buy") "Buy id (unique, for checkout)" tgt
           <> imgFields (ln <> "-" <> T.pack (show i) <> "-img") (prodImage p)
           <> btn "danger" ("del-" <> ln <> "-" <> T.pack (show i)) "Remove product"
+
+slotList :: Text -> [SlotSpec] -> Html
+slotList ln ss =
+  hidden (ln <> "-count") (T.pack (show (length ss)))
+    <> htmlConcat (zipWith (slotFields ln) [0 ..] ss)
+    <> btn "ghost" ("add-" <> ln) "+ add slot"
+
+slotFields :: Text -> Int -> SlotSpec -> Html
+slotFields ln i s =
+  fieldset' ("Slot " <> T.pack (show (i + 1)) <> " \x2014 " <> fmtSlotDay (slotDate s) <> " " <> slotStart s) $
+    elAttr "div" [("class", "row")] (
+      ipt "text" (ix ln i "date") "Date (YYYY-MM-DD)" (slotDate s)
+        <> ipt "text" (ix ln i "start") "Starts (HH:MM)" (slotStart s)
+        <> ipt "text" (ix ln i "end") "Ends (HH:MM)" (slotEnd s)
+    )
+      <> elAttr "div" [("class", "row")] (
+           ipt "text" (ix ln i "area") "Area (e.g. Islington / Finsbury Park)" (slotArea s)
+             <> ipt "number" (ix ln i "cap") "Places" (T.pack (show (slotCap s)))
+         )
+      <> btn "danger" ("del-" <> ln <> "-" <> T.pack (show i)) "Remove slot"
 
 textList :: Text -> [Text] -> Html
 textList ln cs =
@@ -721,6 +762,90 @@ stripePage baseUrl site catalog bundle fl =
     isSet (Just _) = True
     isSet Nothing = False
 
+-- ---------------------------------------------------------------------------
+-- Bookings tab
+-- ---------------------------------------------------------------------------
+
+-- | Tickets sold, reservations made, and the Google connection that powers
+-- calendar invites + booking mail.
+bookingsPage :: [Ticket] -> [SlotSpec] -> SecretBundle -> Maybe Text -> Html
+bookingsPage tickets slots bundle fl =
+  adminDoc "Bookings" $
+    htmlConcat
+      [ topbar
+      , elAttr "div" [("class", "wrap"), ("style", "max-width:980px")] $
+          htmlConcat
+            [ flash fl
+            , el "h1" (esc "Bookings")
+            , slotsCard
+            , ticketsCard
+            , googleCard
+            ]
+      ]
+  where
+    slotLabelOf sid = case [s | s <- slots, slotIdOf s == sid] of
+      (s : _) -> fmtSlotDay (slotDate s) <> " " <> slotStart s <> "\x2013" <> slotEnd s <> " \xB7 " <> slotArea s
+      [] -> sid <> " (slot no longer defined)"
+    takenOf s = length [() | t <- tickets, Just r <- [tkRedemption t], redSlotId r == slotIdOf s]
+    slotsCard =
+      elAttr "div" [("class", "card")] $
+        el "h2" (esc "Slots on offer")
+          <> if null slots
+            then elAttr "p" [("class", "muted")] (esc "No slots defined yet \x2014 add a \x201CSchedule a class\x201D section to a page and define slots there.")
+            else
+              elAttr "table" [("class", "plist")] $
+                elAttr "tr" [] (el "th" (esc "When") <> el "th" (esc "Area") <> el "th" (esc "Booked"))
+                  <> htmlConcat
+                    [ elAttr "tr" [] $
+                        el "td" (esc (fmtSlotDay (slotDate s) <> " " <> slotStart s <> "\x2013" <> slotEnd s))
+                          <> el "td" (esc (slotArea s))
+                          <> el "td" (esc (T.pack (show (takenOf s)) <> " / " <> T.pack (show (slotCap s))))
+                    | s <- slots
+                    ]
+    ticketsCard =
+      elAttr "div" [("class", "card")] $
+        el "h2" (esc ("Tickets (" <> T.pack (show (length tickets)) <> ")"))
+          <> if null tickets
+            then elAttr "p" [("class", "muted")] (esc "No tickets yet. A ticket is issued automatically the moment a checkout is paid.")
+            else
+              elAttr "table" [("class", "plist")] $
+                elAttr "tr" [] (el "th" (esc "Code") <> el "th" (esc "Buyer") <> el "th" (esc "Class") <> el "th" (esc "Reservation") <> el "th" (esc "Calendar") <> el "th" (esc "Mails"))
+                  <> htmlConcat (map ticketRow tickets)
+    ticketRow t =
+      elAttr "tr" [] $
+        el "td" (elAttr "code" [] (esc (tkCode t)))
+          <> el "td" (esc (tkEmail t))
+          <> el "td" (esc (tkProduct t))
+          <> el "td" (case tkRedemption t of
+                        Nothing -> elAttr "span" [("class", "pill off")] (esc "not scheduled")
+                        Just r -> esc (redName r <> " \xB7 " <> slotLabelOf (redSlotId r)))
+          <> el "td" (case tkRedemption t >>= redEventId of
+                        Just _ -> elAttr "span" [("class", "pill on")] (esc "invited")
+                        Nothing
+                          | Just _ <- tkRedemption t -> elAttr "span" [("class", "pill off")] (esc "pending")
+                          | otherwise -> esc "\x2014")
+          <> el "td" (esc (if null (tkNotesSent t) then "\x2014" else T.intercalate ", " (tkNotesSent t)))
+    googleCard =
+      elAttr "div" [("class", "card")] $
+        htmlConcat
+          [ el "h2" (esc "Google connection (calendar invites + booking mail)")
+          , elAttr "p" [("class", "muted")] (esc "Bookings create a Google Calendar event that invites the student and the school, and all booking emails (ticket, confirmation, reminders a week before and on the day) are sent through Gmail. Paste the OAuth client id + secret and a refresh token for the school's Google account. A blank field keeps its current value.")
+          , statusRow "Client id" (isSet' (sbGoogleClientId bundle))
+          , statusRow "Client secret" (isSet' (sbGoogleClientSecret bundle))
+          , statusRow "Refresh token" (isSet' (sbGoogleRefreshToken bundle))
+          , elAttr "form" [("method", "post"), ("action", "/admin/secrets?from=bookings")] $
+              ipt "text" "googleClientId" "OAuth client id" ""
+                <> ipt "password" "googleClientSecret" "OAuth client secret" ""
+                <> ipt "password" "googleRefreshToken" "Refresh token" ""
+                <> elAttr "div" [("class", "actions")] (elAttr "button" [("class", "primary"), ("type", "submit")] (esc "Save Google keys"))
+          ]
+    statusRow lbl on =
+      elAttr "div" [("class", "sec")] $
+        elAttr "span" [("class", "sum")] (esc lbl)
+          <> elAttr "span" [("class", "pill " <> if on then "on" else "off")] (esc (if on then "configured" else "not set"))
+    isSet' (Just _) = True
+    isSet' Nothing = False
+
 -- | Every product across pages AND partials, with where it is defined — the
 -- admin-facing view of the server's buy registry.
 siteProducts :: SiteSpec -> [(Text, Text, Price, Text)]
@@ -895,6 +1020,7 @@ parseSection old ps = case old of
   StoryRow{} -> StoryRow (stories "stories")
   ProductGrid{} -> ProductGrid (opt "title") (opt "intro") (products "products")
   StripeCatalog{} -> StripeCatalog (opt "title") (opt "intro")
+  ScheduleClass{} -> ScheduleClass (opt "title") (opt "intro") (slots "slots")
   RichColumns{} -> RichColumns (opt "title") (texts "columns")
   Gallery{} -> Gallery (opt "title") (images "images")
   CtaBand{} -> CtaBand (req "headline") (opt "body") (cta "cta")
@@ -911,6 +1037,16 @@ parseSection old ps = case old of
     count ln = maybe 0 id (g (ln <> "-count") >>= readInt)
     stories ln = [pStory ln j | j <- [0 .. count ln - 1]]
     products ln = [pProduct ln j | j <- [0 .. count ln - 1]]
+    slots ln = [pSlot ln j | j <- [0 .. count ln - 1]]
+    pSlot ln j =
+      SlotSpec
+        { slotDate = T.strip (fromMaybe "" (g (ix ln j "date")))
+        , slotStart = T.strip (fromMaybe "" (g (ix ln j "start")))
+        , slotEnd = T.strip (fromMaybe "" (g (ix ln j "end")))
+        , slotArea = T.strip (fromMaybe "" (g (ix ln j "area")))
+        , slotCap = max 1 (maybe 6 round (g (ix ln j "cap") >>= readD))
+        , slotTaken = 0
+        }
     texts ln = [fromMaybe "" (g (ix ln j "text")) | j <- [0 .. count ln - 1]]
     images ln = [pImage (\f -> ix ln j f) | j <- [0 .. count ln - 1]]
     links ln = [NavLink (fromMaybe "" (g (ix ln j "label"))) (fromMaybe "/" (g (ix ln j "href"))) | j <- [0 .. count ln - 1]]
