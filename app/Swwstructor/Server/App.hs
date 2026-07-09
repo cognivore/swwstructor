@@ -107,10 +107,11 @@ import Swwstructor.Html (Html, el, elAttr, esc, htmlConcat, renderHtml)
 import Swwstructor.Media (contentTypeFor, isSafeMediaName)
 import Swwstructor.Money (Quantity (Quantity))
 import Swwstructor.Plugins.Stripe (siteBuyRegistry)
-import Swwstructor.Plugins.StripeCatalog (CatalogItem (ciName, ciPriceId), catalogSection, isPriceId)
+import Swwstructor.Plugins.StripeCatalog (CatalogItem (ciName, ciPriceId, ciSeats), catalogSection, isPriceId)
 import Swwstructor.Server.Catalog (CatalogCache, getCatalog)
 import Swwstructor.Server.Admin
   ( adminLoginPage
+  , appendGeneratedSlots
   , bookingsPage
   , dashboardPage
   , mediaLibraryPage
@@ -126,19 +127,20 @@ import Swwstructor.Server.Admin
 import Swwstructor.Block (fmtSlotDay)
 import Swwstructor.Server.Booking
   ( BookingStore
-  , RedeemError (AlreadyRedeemed, CodeNotFound, EmailMismatch, SlotFull, SlotUnknown)
+  , RedeemError (AlreadyRedeemed, CodeNotFound, EmailMismatch, SlotFull, SlotUnknown, WeekFull)
   , Redemption (redSlotId)
   , Ticket (tkCode, tkProduct, tkRedemption)
   , issueTicket
   , listTickets
   , redeemTicket
-  , takenCounts
+  , takenFor
   )
 import Swwstructor.Server.Media (deleteMedia, listAssets, listMedia, resolveMedia, saveMedia)
 import Swwstructor.Server.Notify
   ( BookingCtx (bcVenueNoun)
   , ensureReservationSideEffects
   , notifyTicketIssued
+  , siteMaxWeekly
   , siteSlots
   )
 import Swwstructor.Server.Venues
@@ -160,7 +162,7 @@ import Swwstructor.Server.SecretStore
   )
 import Swwstructor.Server.Store (SiteStore, modifySite, readSite)
 import Swwstructor.Server.Stripe
-  ( SessionInfo (siEmail, siId, siPaid, siProduct)
+  ( SessionInfo (siEmail, siId, siPaid, siProduct, siSeats)
   , peekEventType
   , stripeCreate
   , stripeGetSession
@@ -235,8 +237,8 @@ currentSiteResolved env = do
   if not (anySection isSchedule site1)
     then pure site1
     else do
-      taken <- liftIO (takenCounts <$> listTickets (aeBookings env))
-      pure (mapAllSections (fillSchedule taken) site1)
+      tickets <- liftIO (listTickets (aeBookings env))
+      pure (mapAllSections (fillSchedule tickets) site1)
   where
     isCatalogMarker StripeCatalog{} = True
     isCatalogMarker _ = False
@@ -244,8 +246,8 @@ currentSiteResolved env = do
     swapMarker _ s = s
     isSchedule ScheduleClass{} = True
     isSchedule _ = False
-    fillSchedule taken (ScheduleClass t i slots) =
-      ScheduleClass t i [s {slotTaken = M.findWithDefault 0 (slotIdOf s) taken} | s <- slots]
+    fillSchedule tickets (ScheduleClass t i mw slots) =
+      ScheduleClass t i mw [s {slotTaken = takenFor tickets s} | s <- slots]
     fillSchedule _ s = s
 
 fetchCatalogFor :: AppEnv -> IO [CatalogItem]
@@ -431,20 +433,22 @@ handleBuy env = do
         Nothing ->
           htmlOf (simplePage (siteTheme site) "Checkout unavailable" "The shop owner has not connected Stripe yet.")
         Just sk -> do
-          -- The product's display name rides on the session as metadata, and
-          -- the success URL carries the session id — both feed ticket
-          -- issuance after payment.
-          productName <- case item of
-            ItemAdHoc li -> pure (liName li)
+          -- The product's display name and seat semantics ride on the
+          -- session as metadata, and the success URL carries the session
+          -- id — all three feed ticket issuance after payment.
+          (productName, seats) <- case item of
+            ItemAdHoc li -> pure (liName li, "1")
             ItemPrice priceId _ -> do
               items <- liftIO (fetchCatalogFor env)
-              pure (fromMaybe priceId (listToMaybe [ciName i | i <- items, ciPriceId i == priceId]))
+              pure $ case [i | i <- items, ciPriceId i == priceId] of
+                (i : _) -> (ciName i, ciSeats i)
+                [] -> (priceId, "1")
           let req =
                 CheckoutRequest
                   (item :| [])
                   (Url (aeBaseUrl env <> "/success?session_id={CHECKOUT_SESSION_ID}"))
                   (Url (aeBaseUrl env <> "/cancel"))
-                  [("sww_product", productName)]
+                  [("sww_product", productName), ("sww_seats", seats)]
           res <- liftIO (stripeCreate (aeManager env) sk req)
           case res of
             Right session -> do
@@ -483,7 +487,7 @@ handleWebhook env = do
             when (evType == "checkout.session.completed") $
               case webhookSessionOf rawBytes of
                 Just info | siPaid info, Just email <- siEmail info ->
-                  liftIO (void (fulfillPaidSession env (siId info) email (fromMaybe "Class" (siProduct info))))
+                  liftIO (void (fulfillPaidSession env (siId info) email (fromMaybe "Class" (siProduct info)) (fromMaybe "1" (siSeats info))))
                 _ -> liftIO (putStrLn "[stripe webhook] completed session without payment/email — skipped")
             text "ok"
           else do
@@ -494,9 +498,9 @@ handleWebhook env = do
 -- | Issue (or find) the ticket for a paid session and send its email.
 -- Shared by the webhook and the success page; both may run — 'issueTicket'
 -- is idempotent on the session id, the ticket mail on its ledger note.
-fulfillPaidSession :: AppEnv -> Text -> Text -> Text -> IO Ticket
-fulfillPaidSession env sessionId email productName = do
-  et <- issueTicket (aeBookings env) sessionId email productName
+fulfillPaidSession :: AppEnv -> Text -> Text -> Text -> Text -> IO Ticket
+fulfillPaidSession env sessionId email productName seats = do
+  et <- issueTicket (aeBookings env) sessionId email productName seats
   case et of
     Left err -> do
       putStrLn ("[booking] ticket issuance failed: " <> T.unpack err)
@@ -528,16 +532,16 @@ handleSuccess env = do
           | not (siPaid info) ->
               htmlOf (simplePage th "Almost there" "Your payment is still processing — your class ticket will arrive by email as soon as it completes.")
           | Just email <- siEmail info -> do
-              mt <- liftIO (fulfillSafe env (siId info) email (fromMaybe "Class" (siProduct info)))
+              mt <- liftIO (fulfillSafe env (siId info) email (fromMaybe "Class" (siProduct info)) (fromMaybe "1" (siSeats info)))
               case mt of
                 Nothing -> plainThanks
                 Just t -> htmlOf (ticketPage th t)
           | otherwise -> plainThanks
     _ -> plainThanks
 
-fulfillSafe :: AppEnv -> Text -> Text -> Text -> IO (Maybe Ticket)
-fulfillSafe env sid email productName = do
-  r <- try (fulfillPaidSession env sid email productName) :: IO (Either SomeException Ticket)
+fulfillSafe :: AppEnv -> Text -> Text -> Text -> Text -> IO (Maybe Ticket)
+fulfillSafe env sid email productName seats = do
+  r <- try (fulfillPaidSession env sid email productName seats) :: IO (Either SomeException Ticket)
   case r of
     Right t -> pure (Just t)
     Left e -> Nothing <$ putStrLn ("[booking] fulfilment failed: " <> show e)
@@ -574,7 +578,7 @@ handleSchedule env = do
   if T.null (T.strip code) || T.null (T.strip email) || T.null (T.strip name) || T.null slotId
     then oops "Please fill in the ticket code, your email address, your name, and pick a slot."
     else do
-      res <- liftIO (redeemTicket (aeBookings env) slots code email name slotId)
+      res <- liftIO (redeemTicket (aeBookings env) slots (siteMaxWeekly site) code email name slotId)
       case res of
         Left CodeNotFound -> oops "That ticket code was not recognised — check it against your booking email (the code looks like XXXX-XXXX)."
         Left EmailMismatch -> oops "That email address does not match the one used at checkout. Enter the address your receipt was sent to."
@@ -582,6 +586,7 @@ handleSchedule env = do
           oops ("This ticket is already booked in" <> maybe "." (\s -> " for " <> slotLabel s <> ".") (slotById slots (redSlotId r)) <> " If you need to change the date, just reply to your confirmation email.")
         Left SlotUnknown -> oops "That slot is no longer offered — please go back and pick another."
         Left SlotFull -> oops "Sorry — that class filled up moments ago. Please go back and pick another slot."
+        Left WeekFull -> oops "That week's classes are now all scheduled — please pick a date in another week, or join one of the classes already on the calendar."
         Right t -> do
           -- Calendar invite + confirmation mail; failures are retried by the
           -- reminder loop, so the student's reservation stands regardless.
@@ -845,7 +850,10 @@ handleSectionSave env = do
   case sectionAt path i site of
     Nothing -> redirect (TL.fromStrict ("/admin/page?path=" <> path))
     Just old -> do
-      let newSec = applyAction action (parseSection old ps)
+      let parsed = parseSection old ps
+          newSec
+            | action == "gen-slots" = appendGeneratedSlots ps parsed
+            | otherwise = applyAction action parsed
       _ <- liftIO (modifySite (aeStore env) (setSectionAt path i newSec))
       redirect (TL.fromStrict ("/admin/section?path=" <> path <> "&i=" <> T.pack (show i)))
   where

@@ -33,6 +33,10 @@ data CatalogItem = CatalogItem
   , ciPriceId :: !Text
   -- ^ the default price id (@price_…@) — the buy target
   , ciPrice :: !Price
+  , ciSeats :: !Text
+  -- ^ the product's @sww_seats@ metadata: how many class places one purchase
+  -- occupies at scheduling time — @\"1\"@, @\"2\"@…, or @\"all\"@ (a private
+  -- whole-class ticket). Defaults to @\"1\"@ when unset.
   }
   deriving (Eq, Show)
 
@@ -65,6 +69,11 @@ itemOf v = do
       img = case v .:? "images" of
         Just (JArr (JStr u : _)) -> Just (T.pack u)
         _ -> Nothing
+      seats = case v .:? "metadata" of
+        Just md@JObj{} -> case md .:? "sww_seats" of
+          Just (JStr s) | not (null s) -> T.pack s
+          _ -> "1"
+        _ -> "1"
   pure
     CatalogItem
       { ciName = T.pack name
@@ -72,6 +81,7 @@ itemOf v = do
       , ciImage = img
       , ciPriceId = T.pack pid
       , ciPrice = Price (Cents (max 0 (round amount))) cur
+      , ciSeats = seats
       }
 
 -- | The catalogue as an engine section: a 'ProductGrid' whose buy targets are

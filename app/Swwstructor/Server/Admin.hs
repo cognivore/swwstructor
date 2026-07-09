@@ -23,6 +23,7 @@ module Swwstructor.Server.Admin
     -- * Pure form parsers
   , parseSection
   , parseTheme
+  , appendGeneratedSlots
   ) where
 
 import Data.Maybe (fromMaybe)
@@ -46,7 +47,7 @@ import Swwstructor.Plugins.StripeCatalog (CatalogItem (..))
 import Swwstructor.Server.Booking (Redemption (..), Ticket (..))
 import Swwstructor.Server.Media (MediaEntry (..))
 import Swwstructor.Server.Venues (Venue (..))
-import Swwstructor.Edit (isPartialPath, sectionKinds, sectionLabelOf)
+import Swwstructor.Edit (generateSlots, isPartialPath, sectionKinds, sectionLabelOf)
 import Swwstructor.Html (Html, el, elAttr, esc, htmlConcat, rawHtml, voidElAttr)
 import Swwstructor.Money
   ( Cents (Cents)
@@ -402,7 +403,11 @@ sectionSummary s = case s of
   StoryRow ss -> headlines ss
   ProductGrid t _ ps -> fromMaybe "Shop" t <> " (" <> T.pack (show (length ps)) <> " products)"
   StripeCatalog t _ -> fromMaybe "Book a class" t <> " (live from your Stripe catalogue)"
-  ScheduleClass t _ slots -> fromMaybe "Schedule a class" t <> " (" <> T.pack (show (length slots)) <> " slots)"
+  ScheduleClass t _ mw slots ->
+    fromMaybe "Schedule a class" t
+      <> " (" <> T.pack (show (length slots)) <> " slots"
+      <> (if mw > 0 then ", max " <> T.pack (show mw) <> "/week" else "")
+      <> ")"
   RichColumns t cs -> fromMaybe "Columns" t <> " (" <> T.pack (show (length cs)) <> ")"
   Gallery t imgs -> fromMaybe "Gallery" t <> " (" <> T.pack (show (length imgs)) <> ")"
   CtaBand h _ _ -> h
@@ -485,11 +490,14 @@ sectionFields partials s = case s of
     elAttr "p" [("class", "muted")] (esc "This section shows your LIVE Stripe catalogue \x2014 names, prices and photos come straight from Stripe and refresh automatically. To change the products, edit them at dashboard.stripe.com \x2192 Product catalogue; there is nothing to maintain here.")
       <> ipt "text" "title" "Title above the grid (optional)" (orEmpty t)
       <> txtArea "intro" "Intro line (optional)" (orEmpty intro)
-  ScheduleClass t intro slots ->
-    elAttr "p" [("class", "muted")] (esc "Students who bought a class cash their ticket in here: they pick one of the slots below and the site handles the calendar invitations and reminder emails. Give each slot a date, a time window, the area it runs in, and how many students fit. Slots in the same area are shown grouped together.")
+  ScheduleClass t intro maxWeekly slots ->
+    elAttr "p" [("class", "muted")] (esc "Students who bought a class cash their ticket in here: they pick a date on a calendar and the site handles the calendar invitations and reminder emails. Classes that fill up (or are claimed whole by a private ticket) disappear from the calendar by themselves.")
       <> ipt "text" "title" "Title (optional)" (orEmpty t)
       <> txtArea "intro" "Intro (optional)" (orEmpty intro)
-      <> el "h3" (esc "Slots")
+      <> ipt "number" "maxWeekly" "Most classes you'll teach in one week (0 = no limit)" (T.pack (show maxWeekly))
+      <> elAttr "p" [("class", "hint")] (esc "Once that many classes in a week have at least one booking, the week's remaining empty times disappear \x2014 students can still join the classes already scheduled.")
+      <> availabilityBuilder
+      <> elAttr "h3" [("style", "margin-top:18px")] (esc ("Classes on offer (" <> T.pack (show (length slots)) <> ")"))
       <> slotList "slots" slots
   RichColumns t cs ->
     ipt "text" "title" "Title (optional)" (orEmpty t) <> el "h3" (esc "Columns") <> textList "columns" cs
@@ -551,25 +559,56 @@ productFields ln i p =
           <> imgFields (ln <> "-" <> T.pack (show i) <> "-img") (prodImage p)
           <> btn "danger" ("del-" <> ln <> "-" <> T.pack (show i)) "Remove product"
 
+-- | The availability plan: a date range, teaching days, up to two time
+-- windows (afternoon / evening), an area and a capacity — one submit
+-- generates all the matching slots below. The okashi rhythm (class, 2h
+-- break, class) is the pre-filled default.
+availabilityBuilder :: Html
+availabilityBuilder =
+  fieldset' "Add availability \x2014 fills the list below in one go" $
+    elAttr "p" [("class", "hint")] (esc "Pick the dates, tick the days you teach, and set the two daily time windows (leave a window blank to skip it). Generated classes appear in the list below \x2014 remove any you don't want, then Save.")
+      <> elAttr "div" [("class", "row")] (
+           ipt "text" "gen-from" "From (YYYY-MM-DD)" ""
+             <> ipt "text" "gen-to" "To (YYYY-MM-DD)" ""
+         )
+      <> elAttr "div" [("class", "inline"), ("style", "gap:14px;flex-wrap:wrap;margin:10px 0 2px")] (
+           htmlConcat
+             [ elAttr "div" [("class", "inline")] (
+                 voidElAttr "input" ([("type", "checkbox"), ("name", "gen-day-" <> T.pack (show j)), ("value", "on")] <> [("checked", "checked") | j < (5 :: Int)])
+                   <> elAttr "label" [] (esc d)
+               )
+             | (j, d) <- zip [0 :: Int ..] ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+             ]
+         )
+      <> elAttr "div" [("class", "row")] (
+           ipt "text" "gen-aft-start" "Afternoon class starts" "14:00"
+             <> ipt "text" "gen-aft-end" "\x2026 ends" "16:00"
+             <> ipt "text" "gen-eve-start" "Evening class starts" "18:00"
+             <> ipt "text" "gen-eve-end" "\x2026 ends" "20:00"
+         )
+      <> elAttr "div" [("class", "row")] (
+           ipt "text" "gen-area" "Area (e.g. Islington / Finsbury Park)" ""
+             <> ipt "number" "gen-cap" "Places per class" "6"
+         )
+      <> elAttr "div" [("class", "actions")] (btn "primary" "gen-slots" "Add these classes")
+
 slotList :: Text -> [SlotSpec] -> Html
 slotList ln ss =
   hidden (ln <> "-count") (T.pack (show (length ss)))
     <> htmlConcat (zipWith (slotFields ln) [0 ..] ss)
-    <> btn "ghost" ("add-" <> ln) "+ add slot"
+    <> btn "ghost" ("add-" <> ln) "+ add a single class"
 
 slotFields :: Text -> Int -> SlotSpec -> Html
 slotFields ln i s =
-  fieldset' ("Slot " <> T.pack (show (i + 1)) <> " \x2014 " <> fmtSlotDay (slotDate s) <> " " <> slotStart s) $
-    elAttr "div" [("class", "row")] (
-      ipt "text" (ix ln i "date") "Date (YYYY-MM-DD)" (slotDate s)
-        <> ipt "text" (ix ln i "start") "Starts (HH:MM)" (slotStart s)
-        <> ipt "text" (ix ln i "end") "Ends (HH:MM)" (slotEnd s)
+  elAttr "div" [("class", "sec"), ("style", "align-items:flex-end;gap:8px")] $
+    elAttr "div" [("class", "row"), ("style", "flex:1")] (
+      ipt "text" (ix ln i "date") ("Date \x2014 " <> fmtSlotDay (slotDate s)) (slotDate s)
+        <> ipt "text" (ix ln i "start") "Starts" (slotStart s)
+        <> ipt "text" (ix ln i "end") "Ends" (slotEnd s)
+        <> ipt "text" (ix ln i "area") "Area" (slotArea s)
+        <> ipt "number" (ix ln i "cap") "Places" (T.pack (show (slotCap s)))
     )
-      <> elAttr "div" [("class", "row")] (
-           ipt "text" (ix ln i "area") "Area (e.g. Islington / Finsbury Park)" (slotArea s)
-             <> ipt "number" (ix ln i "cap") "Places" (T.pack (show (slotCap s)))
-         )
-      <> btn "danger" ("del-" <> ln <> "-" <> T.pack (show i)) "Remove slot"
+      <> btn "danger" ("del-" <> ln <> "-" <> T.pack (show i)) "\x2715"
 
 textList :: Text -> [Text] -> Html
 textList ln cs =
@@ -1088,7 +1127,7 @@ parseSection old ps = case old of
   StoryRow{} -> StoryRow (stories "stories")
   ProductGrid{} -> ProductGrid (opt "title") (opt "intro") (products "products")
   StripeCatalog{} -> StripeCatalog (opt "title") (opt "intro")
-  ScheduleClass{} -> ScheduleClass (opt "title") (opt "intro") (slots "slots")
+  ScheduleClass{} -> ScheduleClass (opt "title") (opt "intro") (max 0 (intF "maxWeekly" 0)) (slots "slots")
   RichColumns{} -> RichColumns (opt "title") (texts "columns")
   Gallery{} -> Gallery (opt "title") (images "images")
   CtaBand{} -> CtaBand (req "headline") (opt "body") (cta "cta")
@@ -1102,6 +1141,7 @@ parseSection old ps = case old of
     opt k = case fmap T.strip (g k) of Just v | not (T.null v) -> Just v; _ -> Nothing
     bool k = case g k of Just "on" -> True; Just "true" -> True; _ -> False
     dbl k d = maybe d id (g k >>= readD)
+    intF k d = maybe d round (g k >>= readD)
     count ln = maybe 0 id (g (ln <> "-count") >>= readInt)
     stories ln = [pStory ln j | j <- [0 .. count ln - 1]]
     products ln = [pProduct ln j | j <- [0 .. count ln - 1]]
@@ -1150,6 +1190,30 @@ parseSection old ps = case old of
         , imgAspect = maybe 1.5 id (g (key "aspect") >>= readD)
         , imgCap = maybe 360 id (g (key "cap") >>= readD)
         }
+
+-- | The \"Add these classes\" action: expand the availability-builder fields
+-- into slots and append them to a @scheduleClass@ section (a no-op for any
+-- other kind, or when the range/windows are empty).
+appendGeneratedSlots :: [(Text, Text)] -> SectionSpec -> SectionSpec
+appendGeneratedSlots ps (ScheduleClass t i mw ss) =
+  ScheduleClass t i mw (ss <> generated)
+  where
+    look k = T.strip (fromMaybe "" (lookup k ps))
+    days = [j | j <- [0 .. 6], lookup ("gen-day-" <> T.pack (show j)) ps == Just "on"]
+    windows =
+      [ (s, e)
+      | (s, e) <-
+          [ (look "gen-aft-start", look "gen-aft-end")
+          , (look "gen-eve-start", look "gen-eve-end")
+          ]
+      , not (T.null s)
+      , not (T.null e)
+      ]
+    cap = maybe 6 round (readD (look "gen-cap"))
+    generated
+      | T.null (look "gen-from") || T.null (look "gen-to") = []
+      | otherwise = generateSlots (look "gen-from") (look "gen-to") days windows (look "gen-area") cap
+appendGeneratedSlots _ s = s
 
 -- | Parse the theme form (field by field, falling back to the current theme).
 parseTheme :: Theme -> [(Text, Text)] -> Theme

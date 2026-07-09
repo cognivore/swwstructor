@@ -51,11 +51,12 @@ module Swwstructor.Edit
   , blankStory
   , blankProduct
   , blankSlot
+  , generateSlots
   ) where
 
 import Data.Text (Text)
 import qualified Data.Text as T
-import Swwstructor.Block (BuyTarget (BuyTarget), NavLink (NavLink))
+import Swwstructor.Block (BuyTarget (BuyTarget), NavLink (NavLink), addDaysIso, mondayOf)
 import Swwstructor.Content
   ( Cta (Cta)
   , HeroContent (HeroContent)
@@ -133,7 +134,7 @@ blankSection tag = case tag of
   "storyRow" -> Just (StoryRow [blankStory])
   "productGrid" -> Just (ProductGrid (Just "Shop") Nothing [blankProduct 0])
   "stripeCatalog" -> Just (StripeCatalog (Just "Book a class") Nothing)
-  "scheduleClass" -> Just (ScheduleClass (Just "Schedule your class") (Just "Bought a ticket? Pick your date below.") [blankSlot])
+  "scheduleClass" -> Just (ScheduleClass (Just "Schedule your class") (Just "Bought a ticket? Pick your date below.") 0 [blankSlot])
   "richColumns" -> Just (RichColumns (Just "Section title") ["First column.", "Second column."])
   "gallery" -> Just (Gallery (Just "Gallery") [imageRef "A picture"])
   "ctaBand" -> Just (CtaBand "Call to action" (Just "Supporting line.") (Just (Cta "Go" "/")))
@@ -151,7 +152,25 @@ blankProduct n =
   Product "New item" "What it is." (Price (Cents 1000) EUR) Nothing (BuyTarget ("item-" <> T.pack (show n)))
 
 blankSlot :: SlotSpec
-blankSlot = SlotSpec "2026-09-01" "11:00" "13:00" "Area to be announced" 6 0
+blankSlot = SlotSpec "2026-09-01" "14:00" "16:00" "Area to be announced" 6 0
+
+-- | Expand an availability plan into concrete slots: every selected weekday
+-- in @[from .. to]@ gets one slot per time window. The admin's \"generate\"
+-- button feeds this — a fortnight of afternoon-and-evening classes is one
+-- form submit instead of 26 hand-typed slots. Bounded to a year of days;
+-- malformed dates yield nothing.
+generateSlots :: Text -> Text -> [Int] -> [(Text, Text)] -> Text -> Int -> [SlotSpec]
+generateSlots from to weekdays windows area cap =
+  [ SlotSpec d start end area (max 1 cap) 0
+  | d <- days
+  , dayOfWeekMon d `elem` weekdays
+  , (start, end) <- windows
+  ]
+  where
+    days = take 366 (takeWhile (<= to) (iterate (addDaysIso 1) from))
+    -- Monday-based weekday index (0 = Mon .. 6 = Sun), matching the calendar.
+    dayOfWeekMon d = daysBetween (mondayOf d) d
+    daysBetween a b = length (takeWhile (/= b) (take 7 (iterate (addDaysIso 1) a)))
 
 -- ---------------------------------------------------------------------------
 -- Page operations
@@ -280,7 +299,7 @@ addListItem listName sec = case (sec, listName) of
   (FeatureSplit r g m rl, "rail") -> FeatureSplit r g m (rl <> [blankStory])
   (StoryRow ss, "stories") -> StoryRow (ss <> [blankStory])
   (ProductGrid t i ps, "products") -> ProductGrid t i (ps <> [blankProduct (length ps)])
-  (ScheduleClass t i ss, "slots") -> ScheduleClass t i (ss <> [blankSlot])
+  (ScheduleClass t i mw ss, "slots") -> ScheduleClass t i mw (ss <> [blankSlot])
   (RichColumns t cs, "columns") -> RichColumns t (cs <> ["New column."])
   (Gallery t imgs, "images") -> Gallery t (imgs <> [imageRef "A picture"])
   (NavStrip ls sticky, "links") -> NavStrip (ls <> [NavLink "Link" "/"]) sticky
@@ -294,7 +313,7 @@ deleteListItem listName i sec = case (sec, listName) of
   (FeatureSplit r g m rl, "rail") -> FeatureSplit r g m (dropIndex i rl)
   (StoryRow ss, "stories") -> StoryRow (dropIndex i ss)
   (ProductGrid t ix ps, "products") -> ProductGrid t ix (dropIndex i ps)
-  (ScheduleClass t ix ss, "slots") -> ScheduleClass t ix (dropIndex i ss)
+  (ScheduleClass t ix mw ss, "slots") -> ScheduleClass t ix mw (dropIndex i ss)
   (RichColumns t cs, "columns") -> RichColumns t (dropIndex i cs)
   (Gallery t imgs, "images") -> Gallery t (dropIndex i imgs)
   (NavStrip ls sticky, "links") -> NavStrip (dropIndex i ls) sticky

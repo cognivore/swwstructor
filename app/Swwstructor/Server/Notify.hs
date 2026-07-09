@@ -14,6 +14,7 @@
 module Swwstructor.Server.Notify
   ( BookingCtx (..)
   , siteSlots
+  , siteMaxWeekly
   , notifyTicketIssued
   , ensureReservationSideEffects
   , sendDueReminders
@@ -78,7 +79,13 @@ data BookingCtx = BookingCtx
 
 -- | Every slot defined by any @scheduleClass@ section of the site.
 siteSlots :: SiteSpec -> [SlotSpec]
-siteSlots site = concat [ss | ScheduleClass _ _ ss <- allSectionsOf site]
+siteSlots site = concat [ss | ScheduleClass _ _ _ ss <- allSectionsOf site]
+
+-- | The site's per-week session cap: the strictest (largest) cap any
+-- @scheduleClass@ section declares — it models the teacher's capacity, so
+-- one value governs the whole site. 0 = no cap.
+siteMaxWeekly :: SiteSpec -> Int
+siteMaxWeekly site = maximum (0 : [mw | ScheduleClass _ _ mw _ <- allSectionsOf site])
 
 -- ---------------------------------------------------------------------------
 -- The notifications

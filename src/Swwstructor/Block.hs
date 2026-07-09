@@ -27,6 +27,11 @@ module Swwstructor.Block
   , groupSlotsByArea
   , slotsLeft
   , fmtSlotDay
+  , addDaysIso
+  , mondayOf
+  , weekSessionCount
+  , weekIsClosed
+  , slotVisible
 
     -- * The algebra
   , BlockSym (..)
@@ -133,19 +138,76 @@ groupSlotsByArea = foldr ins []
 -- | @\"2026-09-01\"@ → @\"Tue 1 Sep\"@ (pure, no time dependency — Sakamoto's
 -- day-of-week congruence). Malformed dates render verbatim.
 fmtSlotDay :: Text -> Text
-fmtSlotDay iso = case mapM readIntT (T.splitOn "-" iso) of
-  Just [y, m, d]
-    | m >= 1 && m <= 12 && d >= 1 && d <= 31 ->
-        dayName (sakamoto y m d) <> " " <> T.pack (show d) <> " " <> monthName m
+fmtSlotDay iso = case isoParts iso of
+  Just (y, m, d) ->
+    dayName (sakamoto y m d) <> " " <> T.pack (show d) <> " " <> monthName m
   _ -> iso
   where
-    readIntT t = case reads (T.unpack t) of [(n :: Int, "")] -> Just n; _ -> Nothing
-    sakamoto y m d =
-      let t = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4]
-          y' = if m < 3 then y - 1 else y
-       in (y' + y' `div` 4 - y' `div` 100 + y' `div` 400 + t !! (m - 1) + d) `mod` 7
     dayName n = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] !! max 0 (min 6 n)
-    monthName m = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] !! (m - 1)
+
+monthName :: Int -> Text
+monthName m = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] !! max 0 (min 11 (m - 1))
+
+isoParts :: Text -> Maybe (Int, Int, Int)
+isoParts iso = case mapM readIntT (T.splitOn "-" iso) of
+  Just [y, m, d] | m >= 1 && m <= 12 && d >= 1 && d <= 31 -> Just (y, m, d)
+  _ -> Nothing
+  where
+    readIntT t = case reads (T.unpack t) of [(n :: Int, "")] -> Just n; _ -> Nothing
+
+sakamoto :: Int -> Int -> Int -> Int
+sakamoto y m d =
+  let t = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4]
+      y' = if m < 3 then y - 1 else y
+   in (y' + y' `div` 4 - y' `div` 100 + y' `div` 400 + t !! (m - 1) + d) `mod` 7
+
+-- | @YYYY-MM-DD@ plus N days (N may be negative) — pure Gregorian arithmetic.
+-- Malformed dates pass through verbatim.
+addDaysIso :: Int -> Text -> Text
+addDaysIso n iso = case isoParts iso of
+  Just (y, m, d) -> fmt (go n y m d)
+  _ -> iso
+  where
+    go 0 y m d = (y, m, d)
+    go k y m d
+      | k > 0 = if d < monthLen y m then go (k - 1) y m (d + 1) else if m < 12 then go (k - 1) y (m + 1) 1 else go (k - 1) (y + 1) 1 1
+      | otherwise = if d > 1 then go (k + 1) y m (d - 1) else if m > 1 then go (k + 1) y (m - 1) (monthLen y (m - 1)) else go (k + 1) (y - 1) 12 31
+    monthLen y m
+      | m == 2 = if leap y then 29 else 28
+      | m `elem` [4, 6, 9, 11] = 30
+      | otherwise = 31
+    leap y = (y `mod` 4 == 0 && y `mod` 100 /= 0) || y `mod` 400 == 0
+    fmt (y, m, d) = T.pack (pad 4 y <> "-" <> pad 2 m <> "-" <> pad 2 d)
+    pad w v = let s = show v in replicate (w - length s) '0' <> s
+
+-- | The Monday that starts the (ISO, Monday-based) week a date falls in —
+-- the calendar's week key.
+mondayOf :: Text -> Text
+mondayOf iso = case isoParts iso of
+  Just (y, m, d) -> addDaysIso (negate ((sakamoto y m d + 6) `mod` 7)) iso
+  _ -> iso
+
+-- | Sessions already underway in a week: distinct slots with at least one
+-- reservation. Adding a student to one of these costs the teacher nothing;
+-- a booking on an empty slot opens a NEW session.
+weekSessionCount :: [SlotSpec] -> Text -> Int
+weekSessionCount slots wk =
+  length [() | s <- slots, mondayOf (slotDate s) == wk, slotTaken s > 0]
+
+-- | Whether a week has hit the per-week session cap (0 = no cap): no NEW
+-- sessions may open, though started ones can still fill.
+weekIsClosed :: Int -> [SlotSpec] -> Text -> Bool
+weekIsClosed maxWeekly slots wk =
+  maxWeekly > 0 && weekSessionCount slots wk >= maxWeekly
+
+-- | Whether a slot is offered to students right now: it has places, and it
+-- is not an unopened slot in a week that already teaches at capacity. A slot
+-- an individual (whole-class) ticket claimed has no places, so it simply
+-- disappears.
+slotVisible :: Int -> [SlotSpec] -> SlotSpec -> Bool
+slotVisible maxWeekly slots s =
+  slotsLeft s > 0
+    && not (slotTaken s == 0 && weekIsClosed maxWeekly slots (mondayOf (slotDate s)))
 
 -- ---------------------------------------------------------------------------
 -- The algebra
@@ -200,12 +262,13 @@ class BlockSym repr where
   -- harvesters reading the page (or the content JSON routes) get nothing.
   emailReveal :: repr
 
-  -- | The ticket-redemption form: pick a slot (grouped by area, with live
-  -- availability), enter the ticket code + the checkout email + a name, and
-  -- POST to @\/schedule@. Plain HTML — no client JS, so it survives the
-  -- relayout stage swap by construction (form-post-and-navigate, like
-  -- 'buyButton').
-  scheduleForm :: [SlotSpec] -> repr
+  -- | The ticket-redemption form: a month-grid calendar of slots (live
+  -- \"spots free\" on each date; full or week-capped slots disappear), then
+  -- ticket code + checkout email + name, POSTing to @\/schedule@. Plain
+  -- HTML — no client JS, so it survives the relayout stage swap by
+  -- construction (form-post-and-navigate, like 'buyButton'). The 'Int' is
+  -- the per-week session cap (0 = none).
+  scheduleForm :: Int -> [SlotSpec] -> repr
 
   -- | A hairline rule — a section divider.
   ruleLine :: repr
@@ -231,7 +294,7 @@ data Block
   | BBuyButton !BuyTarget !Text
   | BLinkText !Text !Text
   | BEmailReveal
-  | BScheduleForm ![SlotSpec]
+  | BScheduleForm !Int ![SlotSpec]
   | BRuleLine
   deriving (Eq, Show)
 
@@ -270,7 +333,7 @@ buildBlock (BPriceTag p) = priceTag p
 buildBlock (BBuyButton tgt l) = buyButton tgt l
 buildBlock (BLinkText l h) = linkText l h
 buildBlock BEmailReveal = emailReveal
-buildBlock (BScheduleForm slots) = scheduleForm slots
+buildBlock (BScheduleForm mw slots) = scheduleForm mw slots
 buildBlock BRuleLine = ruleLine
 
 -- ---------------------------------------------------------------------------
@@ -334,10 +397,11 @@ instance BlockSym HtmlBlock where
           <> elAttr "noscript" [] (esc "Please enable JavaScript to see the address (spam protection).")
       )
         <> rawHtml powClientJs
-  scheduleForm slots =
+  scheduleForm maxWeekly slots =
     HtmlBlock $
       elAttr "form" [("class", "sww-sched"), ("method", "post"), ("action", "/schedule")] $
-        htmlConcat (map weekGroup (groupSlotsByArea slots))
+        calendar
+          <> (if anyVisible then mempty else elAttr "p" [("class", "sww-schednote sww-schedsoldout")] (esc "Every class is now fully booked \x2014 get in touch and we'll find you a date."))
           <> elAttr "p" [("class", "sww-schednote")] (esc "The exact address is emailed about a week before each class \x2014 for now, pick the week and area that suit you.")
           <> elAttr "div" [("class", "sww-schedfields")] (
                field "Ticket code (from your booking email)" [("name", "code"), ("required", "required"), ("placeholder", "e.g. K7Q2-M4XW"), ("autocomplete", "off")]
@@ -348,27 +412,47 @@ instance BlockSym HtmlBlock where
     where
       field lbl attrs =
         elAttr "label" [("class", "sww-schedfield")] (elAttr "span" [] (esc lbl) <> voidElAttr "input" attrs)
-      weekGroup (area, ss) =
-        elAttr "fieldset" [("class", "sww-schedweek")] $
-          elAttr "legend" [] (esc (area <> rangeOf ss))
-            <> htmlConcat (map slotRow ss)
-      rangeOf ss = case map slotDate ss of
-        [] -> ""
-        ds -> " \xB7 " <> fmtSlotDay (minimum ds) <> " \x2013 " <> fmtSlotDay (maximum ds)
-      slotRow s =
-        let full = slotsLeft s <= 0
-            left = slotsLeft s
-            leftLabel
-              | full = "fully booked"
-              | left == 1 = "1 place left"
-              | otherwise = T.pack (show left) <> " places left"
-            radioAttrs =
-              [("type", "radio"), ("name", "slot"), ("value", slotIdOf s)]
-                <> (if full then [("disabled", "disabled")] else [("required", "required")])
-         in elAttr "label" [("class", if full then "sww-slot sww-slot-full" else "sww-slot")] $
-              voidElAttr "input" radioAttrs
-                <> elAttr "span" [("class", "sww-slotwhen")] (esc (fmtSlotDay (slotDate s) <> " \xB7 " <> slotStart s <> "\x2013" <> slotEnd s))
-                <> elAttr "span" [("class", "sww-slotleft")] (esc leftLabel)
+      visible = slotVisible maxWeekly slots
+      anyVisible = any visible slots
+      -- One grid row per calendar week (Monday-based), in date order.
+      mondays = dedupe (map (mondayOf . slotDate) slots)
+      dedupe = foldr (\x acc -> if x `elem` acc then acc else x : acc) []
+      calendar =
+        elAttr "div" [("class", "sww-cal")] $
+          dowHeader <> htmlConcat (map weekBlock mondays)
+      dowHeader =
+        elAttr "div" [("class", "sww-caldows")] $
+          htmlConcat [elAttr "span" [] (esc d) | d <- ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]]
+      weekSlots wk = [s | s <- slots, mondayOf (slotDate s) == wk]
+      weekBlock wk =
+        let ss = weekSlots wk
+            areas = T.intercalate " \xB7 " (dedupe (map slotArea ss))
+            range = case map slotDate ss of
+              [] -> ""
+              ds -> fmtSlotDay (minimum ds) <> " \x2013 " <> fmtSlotDay (maximum ds)
+            closedNote
+              | weekIsClosed maxWeekly slots wk && not (any visible ss) = " \xB7 fully booked"
+              | weekIsClosed maxWeekly slots wk = " \xB7 last places"
+              | otherwise = ""
+         in elAttr "div" [("class", "sww-calweekhead")] (esc (areas <> " \xB7 " <> range) <> elAttr "em" [] (esc closedNote))
+              <> elAttr "div" [("class", "sww-calgrid")] (htmlConcat [dayCell (addDaysIso i wk) | i <- [0 .. 6]])
+      dayCell d =
+        let ss = [s | s <- slots, slotDate s == d]
+            offered = filter visible ss
+            dayNum = T.dropWhile (== '0') (T.takeWhileEnd (/= '-') d)
+            cellClass = if null offered then "sww-calday sww-calday-off" else "sww-calday"
+         in elAttr "div" [("class", cellClass)] $
+              elAttr "span" [("class", "sww-caldate")] (esc dayNum)
+                <> htmlConcat (map slotChip offered)
+      slotChip s =
+        let left = slotsLeft s
+            freeLabel
+              | left == 1 = "1 spot free"
+              | otherwise = T.pack (show left) <> " spots free"
+         in elAttr "label" [("class", "sww-calslot")] $
+              voidElAttr "input" [("type", "radio"), ("name", "slot"), ("value", slotIdOf s), ("required", "required")]
+                <> elAttr "span" [("class", "sww-calslottime")] (esc (slotStart s <> "\x2013" <> slotEnd s))
+                <> elAttr "em" [("class", "sww-calslotfree")] (esc freeLabel)
   ruleLine = HtmlBlock $ elAttr "hr" [("class", "sww-rule")] mempty
 
 -- | The proof-of-work reveal client — a fixed literal (never owner content),
@@ -448,7 +532,7 @@ instance BlockSym PlainBlock where
   buyButton _ lbl = PlainBlock ("[" <> lbl <> "]")
   linkText lbl _ = PlainBlock lbl
   emailReveal = PlainBlock "(email address \x2014 revealed on the website)"
-  scheduleForm slots =
+  scheduleForm _ slots =
     PlainBlock ("(schedule a class \x2014 " <> T.pack (show (length slots)) <> " slots)")
   ruleLine = PlainBlock "\x2014"
 
@@ -473,7 +557,7 @@ blockToJSON b = case b of
   BBuyButton (BuyTarget tgt) l -> tagged "buyButton" [("target", JStr (T.unpack tgt)), ("label", JStr (T.unpack l))]
   BLinkText l h -> tagged "linkText" [("label", JStr (T.unpack l)), ("href", JStr (T.unpack h))]
   BEmailReveal -> tagged "emailReveal" []
-  BScheduleForm slots -> tagged "scheduleForm" [("slots", JArr (map slotJSON slots))]
+  BScheduleForm mw slots -> tagged "scheduleForm" [("maxWeekly", JNum (fromIntegral mw)), ("slots", JArr (map slotJSON slots))]
   BRuleLine -> tagged "ruleLine" []
   where
     tagged k extra = JObj (("b", JStr k) : extra)
@@ -517,7 +601,10 @@ blockFromJSON v = do
     "emailReveal" -> Right BEmailReveal
     "scheduleForm" -> do
       arr <- jarr' =<< v .: "slots"
-      BScheduleForm <$> mapM slotOf arr
+      let mw = case v .:? "maxWeekly" of
+            Just (JNum n) -> round n
+            _ -> 0
+      BScheduleForm mw <$> mapM slotOf arr
     "ruleLine" -> Right BRuleLine
     other -> Left ("unknown block kind: " ++ other)
   where

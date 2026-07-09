@@ -106,6 +106,8 @@ data SessionInfo = SessionInfo
   , siEmail :: !(Maybe Text)
   , siProduct :: !(Maybe Text)
   -- ^ our own @sww_product@ metadata, set at session creation
+  , siSeats :: !(Maybe Text)
+  -- ^ our own @sww_seats@ metadata (seat semantics of the bought product)
   }
   deriving (Show)
 
@@ -152,12 +154,14 @@ sessionInfoOf v = do
           Just (JStr e) -> Just (T.pack e)
           _ -> Nothing
         _ -> Nothing
-      product' = case v .:? "metadata" of
-        Just md@JObj{} -> case md .:? "sww_product" of
+      meta k = case v .:? "metadata" of
+        Just md@JObj{} -> case md .:? k of
           Just (JStr p) -> Just (T.pack p)
           _ -> Nothing
         _ -> Nothing
-  pure (SessionInfo sid paid email product')
+      product' = meta "sww_product"
+      seats = meta "sww_seats"
+  pure (SessionInfo sid paid email product' seats)
 
 looksLikeSessionId :: Text -> Bool
 looksLikeSessionId t =

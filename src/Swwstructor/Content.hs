@@ -157,11 +157,12 @@ data SectionSpec
     -- downloads the owner's Stripe products and renders them as a grid —
     -- Stripe is the single source of truth, zero site-side maintenance
     StripeCatalog !(Maybe Text) !(Maybe Text)
-  | -- | \"schedule a class\": a ticket-redemption form (optional title,
-    -- optional intro, the owner-defined slots). A buyer's checkout issues a
-    -- ticket; this section lets them cash it in for a concrete slot. The
-    -- server injects live availability into 'slotTaken' at render time.
-    ScheduleClass !(Maybe Text) !(Maybe Text) ![SlotSpec]
+  | -- | \"schedule a class\": a ticket-redemption calendar (optional title,
+    -- optional intro, a per-week session cap — 0 for none — and the
+    -- owner-defined slots). A buyer's checkout issues a ticket; this section
+    -- lets them cash it in for a concrete slot. The server injects live
+    -- availability into 'slotTaken' at render time.
+    ScheduleClass !(Maybe Text) !(Maybe Text) !Int ![SlotSpec]
   | -- | N prose columns under an optional title
     RichColumns !(Maybe Text) ![Text]
   | -- | an image gallery under an optional title
@@ -446,11 +447,12 @@ sectionSpecToJSON spec = case spec of
       ]
   StripeCatalog title intro ->
     obj [tag' "stripeCatalog", optF "title" title jS, optF "intro" intro jS]
-  ScheduleClass title intro slots ->
+  ScheduleClass title intro maxWeekly slots ->
     obj
       [ tag' "scheduleClass"
       , optF "title" title jS
       , optF "intro" intro jS
+      , req "maxWeekly" (JNum (fromIntegral maxWeekly))
       , req "slots" (arrOf slotSpecToJSON slots)
       ]
   RichColumns title cols ->
@@ -507,7 +509,8 @@ sectionSpecFromJSON v = do
     "stripeCatalog" -> pure (StripeCatalog (optText v "title") (optText v "intro"))
     "scheduleClass" -> do
       slots <- decArrAt slotSpecFromJSON v "slots"
-      pure (ScheduleClass (optText v "title") (optText v "intro") slots)
+      let maxWeekly = maybe 0 (max 0 . round) (optDouble v "maxWeekly")
+      pure (ScheduleClass (optText v "title") (optText v "intro") maxWeekly slots)
     "richColumns" -> do
       cols <- decArrAt jText v "columns"
       pure (RichColumns (optText v "title") cols)

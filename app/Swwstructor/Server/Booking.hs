@@ -1,3 +1,4 @@
+{-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | The booking store: tickets issued by Stripe checkout and their
@@ -22,7 +23,7 @@ module Swwstructor.Server.Booking
   , redeemTicket
   , setEventId
   , claimNote
-  , takenCounts
+  , takenFor
   ) where
 
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar, readMVar)
@@ -36,7 +37,8 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Time.Clock (getCurrentTime)
 import Data.Time.Format (defaultTimeLocale, formatTime)
-import Swwstructor.Content (SlotSpec, slotCap, slotIdOf)
+import Swwstructor.Block (mondayOf)
+import Swwstructor.Content (SlotSpec, slotCap, slotDate, slotIdOf)
 import StickyWM (JSON (JArr, JNull, JNum, JObj, JStr), decode, encode, jstr, (.:), (.:?))
 import System.Directory (doesFileExist, renameFile)
 import System.IO (hPutStrLn, stderr)
@@ -66,6 +68,10 @@ data Ticket = Ticket
   -- ^ Stripe Checkout session id (idempotency key for issuance)
   , tkCreatedAt :: !Text
   -- ^ ISO-8601 UTC
+  , tkSeats :: !Text
+  -- ^ what this ticket occupies when redeemed: @\"1\"@, @\"2\"@… seats, or
+  -- @\"all\"@ (a private/whole-class ticket — the slot closes entirely).
+  -- Sourced from the Stripe product's @sww_seats@ metadata; default @\"1\"@.
   , tkRedemption :: !(Maybe Redemption)
   , tkNotesSent :: ![Text]
   -- ^ notification ledger (@\"ticket\"@, @\"confirm\"@, @\"t7\"@, @\"day0\"@) —
@@ -80,6 +86,7 @@ data RedeemError
   | AlreadyRedeemed !Redemption
   | SlotUnknown
   | SlotFull
+  | WeekFull
   deriving (Eq, Show)
 
 data BookingStore = BookingStore
@@ -113,16 +120,44 @@ newBookingStore path = do
 listTickets :: BookingStore -> IO [Ticket]
 listTickets = readMVar . bsVar
 
--- | Reservations per slot id, across all redeemed tickets.
-takenCounts :: [Ticket] -> Map Text Int
-takenCounts ts =
-  M.fromListWith (+) [(redSlotId r, 1) | t <- ts, Just r <- [tkRedemption t]]
+-- | Seat usage per slot id: total seats claimed, and whether a whole-class
+-- (@\"all\"@) ticket sits on it.
+seatUsage :: [Ticket] -> Map Text (Int, Bool)
+seatUsage ts =
+  M.fromListWith
+    (\(a, x) (b, y) -> (a + b, x || y))
+    [ (redSlotId r, usage (tkSeats t))
+    | t <- ts
+    , Just r <- [tkRedemption t]
+    ]
+  where
+    usage s
+      | s == "all" = (0, True)
+      | otherwise = (seatCount s, False)
+
+seatCount :: Text -> Int
+seatCount s = case reads (T.unpack (T.strip s)) of
+  [(n, "")] | n >= 1 -> n
+  _ -> 1
+
+-- | Seats effectively taken on a slot (a whole-class booking counts as the
+-- full capacity — the slot is simply gone).
+takenFor :: [Ticket] -> SlotSpec -> Int
+takenFor ts s = case M.lookup (slotIdOf s) (seatUsage ts) of
+  Nothing -> 0
+  Just (n, exclusive) -> if exclusive then slotCap s else min (slotCap s) n
+
+-- | Distinct slots in the same (Monday-based) week that already have a
+-- booking — the teacher's committed sessions for that week.
+weekSessions :: [Ticket] -> [SlotSpec] -> Text -> Int
+weekSessions ts slots wk =
+  length [() | s <- slots, mondayOf (slotDate s) == wk, takenFor ts s > 0]
 
 -- | Issue a ticket for a paid checkout session. Idempotent on the session id:
 -- the webhook and the success page can both call this and exactly one ticket
 -- exists afterwards. Returns the ticket and whether this call created it.
-issueTicket :: BookingStore -> Text -> Text -> Text -> IO (Either Text (Ticket, Bool))
-issueTicket store sessionId email product' = do
+issueTicket :: BookingStore -> Text -> Text -> Text -> Text -> IO (Either Text (Ticket, Bool))
+issueTicket store sessionId email product' seats = do
   now <- iso8601Now
   code <- freshCode store
   modifyStore store $ \ts ->
@@ -136,15 +171,23 @@ issueTicket store sessionId email product' = do
                 , tkProduct = product'
                 , tkSessionId = sessionId
                 , tkCreatedAt = now
+                , tkSeats = normSeats seats
                 , tkRedemption = Nothing
                 , tkNotesSent = []
                 }
          in (ts <> [t], Right (t, True))
+  where
+    normSeats s
+      | T.toLower (T.strip s) == "all" = "all"
+      | otherwise = T.pack (show (seatCount s))
 
 -- | Cash a ticket in for a slot. All checks and the write happen in one
 -- atomic step, so two students racing for the last place cannot both win.
-redeemTicket :: BookingStore -> [SlotSpec] -> Text -> Text -> Text -> Text -> IO (Either RedeemError Ticket)
-redeemTicket store slots code email name slotId = do
+-- A whole-class ticket needs the slot untouched; an n-seat ticket needs n
+-- free places; and a booking that would OPEN a new session is refused once
+-- the week already teaches @maxWeekly@ sessions (0 = no cap).
+redeemTicket :: BookingStore -> [SlotSpec] -> Int -> Text -> Text -> Text -> Text -> IO (Either RedeemError Ticket)
+redeemTicket store slots maxWeekly code email name slotId = do
   now <- iso8601Now
   modifyStore store $ \ts ->
     let norm = T.toUpper (T.filter (/= '-') (T.strip code))
@@ -157,12 +200,24 @@ redeemTicket store slots code email name slotId = do
             | otherwise ->
                 case [s | s <- slots, slotIdOf s == slotId] of
                   [] -> (ts, Left SlotUnknown)
-                  (s : _)
-                    | M.findWithDefault 0 slotId (takenCounts ts) >= slotCap s -> (ts, Left SlotFull)
-                    | otherwise ->
-                        let red = Redemption slotId (T.strip name) now Nothing
-                            t' = t {tkRedemption = Just red}
-                         in (replaceTicket t' ts, Right t')
+                  (s : _) ->
+                    let taken = takenFor ts s
+                        free = slotCap s - taken
+                        need
+                          | tkSeats t == "all" = slotCap s
+                          | otherwise = seatCount (tkSeats t)
+                        opensSession = taken == 0
+                        weekAtCap =
+                          maxWeekly > 0
+                            && weekSessions ts slots (mondayOf (slotDate s)) >= maxWeekly
+                     in if
+                          | tkSeats t == "all" && taken > 0 -> (ts, Left SlotFull)
+                          | need > free -> (ts, Left SlotFull)
+                          | opensSession && weekAtCap -> (ts, Left WeekFull)
+                          | otherwise ->
+                              let red = Redemption slotId (T.strip name) now Nothing
+                                  t' = t {tkRedemption = Just red}
+                               in (replaceTicket t' ts, Right t')
 
 -- | Record the created calendar event id on a redeemed ticket.
 setEventId :: BookingStore -> Text -> Text -> IO ()
@@ -264,6 +319,7 @@ ticketToJSON t =
     , ("product", JStr (T.unpack (tkProduct t)))
     , ("sessionId", JStr (T.unpack (tkSessionId t)))
     , ("createdAt", JStr (T.unpack (tkCreatedAt t)))
+    , ("seats", JStr (T.unpack (tkSeats t)))
     , ("notesSent", JArr [JStr (T.unpack n) | n <- tkNotesSent t])
     ]
       <> case tkRedemption t of
@@ -286,7 +342,10 @@ ticketFromJSON v = do
   product' <- txt v "product"
   sess <- txt v "sessionId"
   created <- txt v "createdAt"
-  let notes = case v .:? "notesSent" of
+  let seats = case v .:? "seats" of
+        Just (JStr s) | not (null s) -> T.pack s
+        _ -> "1"
+      notes = case v .:? "notesSent" of
         Just (JArr xs) -> [T.pack s | JStr s <- xs]
         _ -> []
   red <- case v .:? "redemption" of
@@ -307,6 +366,7 @@ ticketFromJSON v = do
       , tkProduct = product'
       , tkSessionId = sess
       , tkCreatedAt = created
+      , tkSeats = seats
       , tkRedemption = red
       , tkNotesSent = notes
       }

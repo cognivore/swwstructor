@@ -20,10 +20,12 @@ import Swwstructor.Block
   , BuyTarget (BuyTarget)
   , NavLink (NavLink)
   , PlainBlock (runPlainBlock)
+  , addDaysIso
   , blockFromJSON
   , blockToJSON
   , buildBlock
   , fmtSlotDay
+  , mondayOf
   )
 import Swwstructor.Html (renderHtml)
 import Swwstructor.Site (renderStage)
@@ -49,6 +51,7 @@ import Swwstructor.Edit
   , blankSection
   , deletePage
   , deleteSection
+  , generateSlots
   , moveSection
   , pageIndex
   , sectionAt
@@ -215,7 +218,7 @@ sinkSite =
             , CtaBand "Subscribe" (Just "for 50p a week") (Just (Cta "Subscribe" "/sub"))
             , Contact "Visit" (Just "come by") (Just "hello@example.test")
             , ProseSection (Just "Note") (Just "Heading") "Some prose."
-            , ScheduleClass (Just "Schedule your class") (Just "Pick a date.") demoSlots
+            , ScheduleClass (Just "Schedule your class") (Just "Pick a date.") 3 demoSlots
             , FooterBand "the end"
             ]
         ]
@@ -350,7 +353,7 @@ blockRoundTrip = do
         , BBuyButton (BuyTarget "x") "Buy"
         , BLinkText "l" "/l"
         , BEmailReveal
-        , BScheduleForm [SlotSpec "2026-09-01" "11:00" "13:00" "Islington" 6 3]
+        , BScheduleForm 3 [SlotSpec "2026-09-01" "11:00" "13:00" "Islington" 6 3]
         , BRuleLine
         ]
       ok b = blockFromJSON (blockToJSON b) == Right b
@@ -441,7 +444,7 @@ catalogTests = do
       sequence
         [ check "unpriced + recurring products are skipped (2 of 4)" (length items == 2)
         , check "sorted cheapest first" (map ciPriceId items == ["price_single", "price_indiv"])
-        , check "amount + currency parsed" (fmap (\(CatalogItem _ _ _ _ p) -> p) (listToMaybe' items) == Just (Money.cents Money.GBP 8000))
+        , check "amount + currency parsed" (fmap ciPrice (listToMaybe' items) == Just (Money.cents Money.GBP 8000))
         , check "image url survives" (ciImage (last items) == Just "https://files.stripe.com/links/abc")
         , check "buy targets are price ids" (all (isPriceId . ciPriceId) items)
         , check "catalogue section is a wf grid @1180/390 + unique ids" (wf d wide 1116 && wf d phone 326 && uniqueIds d)
@@ -579,31 +582,47 @@ mediaTests = do
     , check "content type follows the extension" (contentTypeFor "x.webp" == Just "image/webp" && contentTypeFor "x.bin" == Nothing)
     ]
 
--- The schedule-a-class section: grouping, availability, and the no-JS form.
+-- The schedule-a-class section: the calendar grid, seat semantics, and the
+-- per-week session cap.
 scheduleTests :: IO [Bool]
 scheduleTests = do
-  section "schedule a class (ticket redemption form)"
+  section "schedule a class (reservation calendar)"
   let slots =
-        [ SlotSpec "2026-09-01" "11:00" "13:00" "Islington / Finsbury Park" 6 0
-        , SlotSpec "2026-09-02" "18:00" "20:00" "Islington / Finsbury Park" 6 6 -- full
-        , SlotSpec "2026-09-08" "11:00" "13:00" "Marylebone / Clerkenwell" 6 5
+        [ SlotSpec "2026-09-01" "14:00" "16:00" "Islington / Finsbury Park" 6 0
+        , SlotSpec "2026-09-02" "18:00" "20:00" "Islington / Finsbury Park" 6 6 -- full (or claimed whole)
+        , SlotSpec "2026-09-08" "14:00" "16:00" "Marylebone / Clerkenwell" 6 5
         ]
-      sec = renderSection 0 (ScheduleClass (Just "Schedule") Nothing slots)
-      html = renderHtml (renderStage nytTheme sec (Viewport 1180 900))
-      persisted = sectionSpecToJSON (ScheduleClass Nothing Nothing [SlotSpec "2026-09-01" "11:00" "13:00" "A" 6 3])
+      render mw ss = renderHtml (renderStage nytTheme (renderSection 0 (ScheduleClass (Just "Schedule") Nothing mw ss)) (Viewport 1180 900))
+      html = render 3 slots
+      -- Week-cap scenario: cap 1, one session already started that week —
+      -- the week's other empty slot must vanish, the started one stays.
+      capSlots =
+        [ SlotSpec "2026-09-01" "14:00" "16:00" "A" 6 2 -- started session
+        , SlotSpec "2026-09-02" "14:00" "16:00" "A" 6 0 -- empty, same week
+        , SlotSpec "2026-09-08" "14:00" "16:00" "A" 6 0 -- next week, unaffected
+        ]
+      capHtml = render 1 capSlots
+      persisted = sectionSpecToJSON (ScheduleClass Nothing Nothing 3 [SlotSpec "2026-09-01" "14:00" "16:00" "A" 6 3])
   sequence
     [ check "form posts to /schedule" ("action=\"/schedule\"" `T.isInfixOf` html)
-    , check "slots become radios with stable ids" ("value=\"2026-09-01-1100\"" `T.isInfixOf` html)
-    , check "one fieldset per area" (T.count "sww-schedweek" html >= 2)
-    , check "a full slot is disabled and marked" ("disabled" `T.isInfixOf` html && "fully booked" `T.isInfixOf` html && "sww-slot-full" `T.isInfixOf` html)
-    , check "scarcity shows (1 place left)" ("1 place left" `T.isInfixOf` html)
+    , check "renders a week-per-row calendar grid" (T.count "sww-calgrid" html >= 2 && "sww-caldows" `T.isInfixOf` html)
+    , check "slots become radios with stable ids" ("value=\"2026-09-01-1400\"" `T.isInfixOf` html)
+    , check "spots-free overlay on each date" ("6 spots free" `T.isInfixOf` html && "1 spot free" `T.isInfixOf` html)
+    , check "a full slot disappears entirely" (not ("2026-09-02-1800" `T.isInfixOf` html) && not ("disabled" `T.isInfixOf` html))
+    , check "week at cap hides its empty slots" (not ("2026-09-02-1400" `T.isInfixOf` capHtml))
+    , check "week at cap keeps its started session joinable" ("2026-09-01-1400" `T.isInfixOf` capHtml)
+    , check "other weeks are unaffected by the cap" ("2026-09-08-1400" `T.isInfixOf` capHtml)
     , check "the venue-announcement note is present" ("about a week before" `T.isInfixOf` html)
     , check "ticket code + email + name fields present" (all (`T.isInfixOf` html) ["name=\"code\"", "name=\"email\"", "name=\"name\""])
     , check "no client JS in the widget (form-post-and-navigate)" (not ("<script" `T.isInfixOf` html))
-    , check "day formatting (Sakamoto)" (fmtSlotDay "2026-09-01" == "Tue 1 Sep" && fmtSlotDay "2026-09-08" == "Tue 8 Sep" && fmtSlotDay "2026-09-13" == "Sun 13 Sep")
-    , check "slot ids strip the colon" (slotIdOf (SlotSpec "2026-09-01" "11:00" "13:00" "A" 6 0) == "2026-09-01-1100")
+    , check "day formatting (Sakamoto)" (fmtSlotDay "2026-09-01" == "Tue 1 Sep" && fmtSlotDay "2026-09-13" == "Sun 13 Sep")
+    , check "week keys are Monday-based" (mondayOf "2026-09-01" == "2026-08-31" && mondayOf "2026-08-31" == "2026-08-31" && mondayOf "2026-09-06" == "2026-08-31" && mondayOf "2026-09-07" == "2026-09-07")
+    , check "date arithmetic crosses months both ways" (addDaysIso 7 "2026-08-31" == "2026-09-07" && addDaysIso (-3) "2026-09-02" == "2026-08-30")
+    , check "slot ids strip the colon" (slotIdOf (SlotSpec "2026-09-01" "14:00" "16:00" "A" 6 0) == "2026-09-01-1400")
     , check "grouping preserves first-appearance order" (map fst (groupSlotsByArea slots) == ["Islington / Finsbury Park", "Marylebone / Clerkenwell"])
-    , check "live counts are NOT persisted by the content codec" (sectionSpecFromJSON persisted == Right (ScheduleClass Nothing Nothing [SlotSpec "2026-09-01" "11:00" "13:00" "A" 6 0]))
+    , check "live counts are NOT persisted; maxWeekly IS" (sectionSpecFromJSON persisted == Right (ScheduleClass Nothing Nothing 3 [SlotSpec "2026-09-01" "14:00" "16:00" "A" 6 0]))
+    , check "generateSlots expands a fortnight plan" (let g = generateSlots "2026-09-01" "2026-09-13" [0 .. 6] [("14:00", "16:00"), ("18:00", "20:00")] "X" 6 in length g == 26 && all ((== "X") . slotArea) g)
+    , check "generateSlots respects weekday selection" (let g = generateSlots "2026-09-01" "2026-09-13" [5, 6] [("14:00", "16:00")] "X" 6 in map slotDate g == ["2026-09-05", "2026-09-06", "2026-09-12", "2026-09-13"])
     ]
 
 main :: IO ()
