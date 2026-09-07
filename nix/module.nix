@@ -108,6 +108,17 @@ let
             description = "What this site calls a venue in student-facing copy (e.g. \"kitchen\" for a pastry school).";
           };
         };
+        analyticsScript = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          example = "https://plausible.example.com/js/plausible.js";
+          description = ''
+            Analytics tracker script to load on every PUBLIC page (the admin and
+            its previews never carry it). It is loaded deferred with
+            `data-domain` set to this instance's domain — the shape a
+            self-hosted Plausible expects. null = no analytics.
+          '';
+        };
         enableCaddy = lib.mkOption {
           type = lib.types.bool;
           default = true;
@@ -172,6 +183,10 @@ in
         }
         // lib.optionalAttrs (inst.booking.name != null) {
           SWW_BOOKING_NAME = inst.booking.name;
+        }
+        // lib.optionalAttrs (inst.analyticsScript != null) {
+          SWW_ANALYTICS_SRC = inst.analyticsScript;
+          SWW_ANALYTICS_DOMAIN = inst.domain;
         };
         # Secrets are age-decrypted with THIS host's ssh key at start — never in
         # the Nix store in plaintext, never in the unit's static environment.

@@ -77,6 +77,7 @@ import Swwstructor.Server.SecretStore
   , saveBundle
   )
 import Swwstructor.Server.Catalog (newCatalogCache)
+import Swwstructor.Site (Analytics (Analytics))
 import Swwstructor.Server.Store (newSiteStore, readSite)
 
 main :: IO ()
@@ -93,6 +94,7 @@ main = do
   dataDir <- fromMaybe ".swwstructor-data" <$> lookupEnv "SWW_DATA_DIR"
   baseUrl <- readBaseUrl port
   stage <- readStage
+  analytics <- readAnalytics baseUrl
   let secretFile = dataDir </> "secrets.enc"
   createDirectoryIfMissing True dataDir
 
@@ -186,6 +188,7 @@ main = do
           , aeBookings = bookings
           , aeBookingCtx = bookingCtx
           , aeVenues = venues
+          , aeAnalytics = analytics
           }
 
   -- The reminder loop: retries unfinished booking side effects and sends the
@@ -220,6 +223,22 @@ readBaseUrl port = do
     _ -> "http://localhost:" <> show port
   where
     stripTrailingSlash = reverse . dropWhile (== '/') . reverse
+
+-- | The analytics tag public pages carry, if the deployment asked for one.
+-- @SWW_ANALYTICS_SRC@ is the tracker script (a self-hosted Plausible
+-- @plausible.js@, say); @SWW_ANALYTICS_DOMAIN@ is the name it reports as and
+-- defaults to the host of @BASE_URL@. Unset = no analytics at all.
+readAnalytics :: String -> IO (Maybe Analytics)
+readAnalytics baseUrl = do
+  msrc <- nonEmptyEnv <$> lookupEnv "SWW_ANALYTICS_SRC"
+  mdom <- nonEmptyEnv <$> lookupEnv "SWW_ANALYTICS_DOMAIN"
+  pure $ do
+    src <- msrc
+    pure (Analytics (T.pack src) (T.pack (fromMaybe (hostOf baseUrl) mdom)))
+  where
+    hostOf u = takeWhile (/= '/') $ case dropWhile (/= '/') u of
+      ('/' : '/' : rest) -> rest
+      _ -> u
 
 readStage :: IO Stage
 readStage = do

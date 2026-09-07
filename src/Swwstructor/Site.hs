@@ -12,7 +12,8 @@
 -- automaton are driven by the same dependency-free client script the reference
 -- app uses, faithful to @StickyWM.Sticky.stickyStep@.
 module Swwstructor.Site
-  ( pageContentWidth
+  ( Analytics (..)
+  , pageContentWidth
   , pagePad
   , renderStage
   , renderStageWith
@@ -90,9 +91,9 @@ renderStageWith th overrides section vp =
 
 -- | A complete HTML document: theme stylesheet, the solved stage, the footer,
 -- and the relayout/sticky client.
-renderFullPage :: Theme -> Text -> Maybe Text -> Section -> Viewport -> Html
-renderFullPage th title footer section vp =
-  renderDocument th title footer (el "main" (renderStage th section vp) <> relayoutScript th)
+renderFullPage :: Theme -> Maybe Analytics -> Text -> Maybe Text -> Section -> Viewport -> Html
+renderFullPage th an title footer section vp =
+  renderDocument th an title footer (el "main" (renderStage th section vp) <> relayoutScript th)
 
 -- | A static, self-contained render (no relayout client) — for previewing a
 -- partial/header/footer in the admin, where there is no public URL for the
@@ -163,28 +164,46 @@ px d = T.pack (show (round d :: Int)) <> "px"
 -- client script — for admin pages and other non-stage chrome.
 renderChrome :: Theme -> Text -> Html -> Html
 renderChrome th title body =
-  renderDocument th title (Just "") body
+  renderDocument th Nothing title (Just "") body
 
-renderDocument :: Theme -> Text -> Maybe Text -> Html -> Html
-renderDocument th title footer body =
+renderDocument :: Theme -> Maybe Analytics -> Text -> Maybe Text -> Html -> Html
+renderDocument th an title footer body =
   rawHtml "<!DOCTYPE html>"
     <> elAttr
       "html"
       [("lang", "en")]
       ( htmlConcat
-          [ el "head" (headContent th title)
+          [ el "head" (headContent th an title)
           , el "body" (body <> footerHtml footer)
           ]
       )
 
-headContent :: Theme -> Text -> Html
-headContent th title =
+-- | Deployment-level analytics: the tracker script to load and the domain it
+-- reports as. This is /config/, not content — it arrives from the unit's
+-- environment, so it never round-trips through @site.json@ and no content edit
+-- can drop it. Only public pages carry it; the admin and its previews do not.
+data Analytics = Analytics
+  { anSrc :: !Text
+  -- ^ tracker script URL (e.g. a self-hosted Plausible @\/js\/plausible.js@)
+  , anDomain :: !Text
+  -- ^ the @data-domain@ the tracker reports as (the site's public domain)
+  }
+  deriving (Eq, Show)
+
+analyticsTag :: Maybe Analytics -> [Html]
+analyticsTag Nothing = []
+analyticsTag (Just a) =
+  [elAttr "script" [("defer", ""), ("data-domain", anDomain a), ("src", anSrc a)] mempty]
+
+headContent :: Theme -> Maybe Analytics -> Text -> Html
+headContent th an title =
   htmlConcat
     ( [ voidElAttr "meta" [("charset", "utf-8")]
       , voidElAttr "meta" [("name", "viewport"), ("content", "width=device-width, initial-scale=1")]
       , el "title" (esc title)
       ]
         <> fontLinks
+        <> analyticsTag an
         <> [elAttr "style" [] (rawHtml (themeCss th))]
     )
   where
@@ -203,14 +222,14 @@ footerHtml (Just t) = elAttr "footer" [("class", "sww-footer")] (esc t)
 
 -- | A minimal branded one-message page — used for @\/success@, @\/cancel@, and
 -- friendly error pages. Reuses the Block DSL and the same shell.
-simplePage :: Theme -> Text -> Text -> Html
-simplePage th h body = messagePage th h (runHtmlBlock (buildBlock (paragraph body) :: HtmlBlock))
+simplePage :: Theme -> Maybe Analytics -> Text -> Text -> Html
+simplePage th an h body = messagePage th an h (runHtmlBlock (buildBlock (paragraph body) :: HtmlBlock))
 
 -- | Like 'simplePage' but the body is arbitrary (trusted) markup — for pages
 -- that need more than one paragraph (a ticket code, a booking summary).
-messagePage :: Theme -> Text -> Html -> Html
-messagePage th h inner =
-  renderDocument th h Nothing $
+messagePage :: Theme -> Maybe Analytics -> Text -> Html -> Html
+messagePage th an h inner =
+  renderDocument th an h Nothing $
     elAttr "main" [] $
       elAttr "div" [("class", "sww-page-msg")] $
         runHtmlBlock (buildBlock (heading h) :: HtmlBlock)

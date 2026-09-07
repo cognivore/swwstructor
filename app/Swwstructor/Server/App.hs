@@ -169,7 +169,7 @@ import Swwstructor.Server.Stripe
   , verifyStripeSig
   , webhookSessionOf
   )
-import Swwstructor.Site (messagePage, renderFullPage, renderStageWith, renderStaticPage, simplePage)
+import Swwstructor.Site (Analytics, messagePage, renderFullPage, renderStageWith, renderStaticPage, simplePage)
 import Swwstructor.Templates (Section (secLayout), expandSection, renderSections, resolvedSection)
 import Swwstructor.Theme (Theme)
 import StickyWM
@@ -213,6 +213,8 @@ data AppEnv = AppEnv
   -- ^ the notification context (calendar invites + booking mail)
   , aeVenues :: !VenueStore
   -- ^ the venue address book (admin-only; feeds venue announcements)
+  , aeAnalytics :: !(Maybe Analytics)
+  -- ^ the analytics tag public pages carry (deployment config, not content)
   }
 
 currentSite :: AppEnv -> ActionM SiteSpec
@@ -326,7 +328,7 @@ swwApp env = do
   get "/success" (handleSuccess env)
   get "/cancel" $ do
     site <- currentSite env
-    htmlOf (simplePage (siteTheme site) "Checkout cancelled" "No charge was made — you can return any time.")
+    htmlOf (simplePage (siteTheme site) (aeAnalytics env) "Checkout cancelled" "No charge was made — you can return any time.")
 
   post "/schedule" (handleSchedule env)
 
@@ -387,10 +389,10 @@ servePage env path = do
   case pageByPath site path of
     -- resolvedSection applies the template engine: header + body (includes
     -- expanded) + footer.
-    Just pg -> htmlOf (renderFullPage (siteTheme site) (pageTitle pg) (siteFooter site) (resolvedSection site pg) defaultVp)
+    Just pg -> htmlOf (renderFullPage (siteTheme site) (aeAnalytics env) (pageTitle pg) (siteFooter site) (resolvedSection site pg) defaultVp)
     Nothing -> do
       status status404
-      htmlOf (simplePage (siteTheme site) "Not found" "That page does not exist.")
+      htmlOf (simplePage (siteTheme site) (aeAnalytics env) "Not found" "That page does not exist.")
 
 serveStage :: AppEnv -> Text -> Double -> Map String Double -> ActionM ()
 serveStage env path width overrides = do
@@ -426,12 +428,12 @@ handleBuy env = do
   case mItem of
     Nothing -> do
       status status404
-      htmlOf (simplePage (siteTheme site) "Unknown item" "That item is not for sale.")
+      htmlOf (simplePage (siteTheme site) (aeAnalytics env) "Unknown item" "That item is not for sale.")
     Just item -> do
       bundle <- liftIO (loadBundle (aeSecretFile env) (aeMasterKey env))
       case sbStripeSk bundle of
         Nothing ->
-          htmlOf (simplePage (siteTheme site) "Checkout unavailable" "The shop owner has not connected Stripe yet.")
+          htmlOf (simplePage (siteTheme site) (aeAnalytics env) "Checkout unavailable" "The shop owner has not connected Stripe yet.")
         Just sk -> do
           -- The product's display name and seat semantics ride on the
           -- session as metadata, and the success URL carries the session
@@ -458,7 +460,7 @@ handleBuy env = do
             Left err -> do
               liftIO (putStrLn ("[checkout error] " <> show err))
               status status500
-              htmlOf (simplePage (siteTheme site) "Checkout error" "Something went wrong creating the checkout. Please try again.")
+              htmlOf (simplePage (siteTheme site) (aeAnalytics env) "Checkout error" "Something went wrong creating the checkout. Please try again.")
 
 handleWebhook :: AppEnv -> ActionM ()
 handleWebhook env = do
@@ -518,7 +520,7 @@ handleSuccess :: AppEnv -> ActionM ()
 handleSuccess env = do
   site <- currentSite env
   let th = siteTheme site
-      plainThanks = htmlOf (simplePage th "Thank you" "Your payment was received. A receipt is on its way.")
+      plainThanks = htmlOf (simplePage th (aeAnalytics env) "Thank you" "Your payment was received. A receipt is on its way.")
   msess <- queryParamMaybe "session_id"
   bundle <- liftIO (loadBundle (aeSecretFile env) (aeMasterKey env))
   case (msess, sbStripeSk bundle) of
@@ -530,12 +532,12 @@ handleSuccess env = do
           plainThanks
         Right info
           | not (siPaid info) ->
-              htmlOf (simplePage th "Almost there" "Your payment is still processing — your class ticket will arrive by email as soon as it completes.")
+              htmlOf (simplePage th (aeAnalytics env) "Almost there" "Your payment is still processing — your class ticket will arrive by email as soon as it completes.")
           | Just email <- siEmail info -> do
               mt <- liftIO (fulfillSafe env (siId info) email (fromMaybe "Class" (siProduct info)) (fromMaybe "1" (siSeats info)))
               case mt of
                 Nothing -> plainThanks
-                Just t -> htmlOf (ticketPage th t)
+                Just t -> htmlOf (ticketPage th (aeAnalytics env) t)
           | otherwise -> plainThanks
     _ -> plainThanks
 
@@ -547,9 +549,9 @@ fulfillSafe env sid email productName seats = do
     Left e -> Nothing <$ putStrLn ("[booking] fulfilment failed: " <> show e)
 
 -- | The post-payment page: the ticket code, and where to cash it in.
-ticketPage :: Theme -> Ticket -> Html
-ticketPage th t =
-  messagePage th "Thank you — you have a ticket!" $
+ticketPage :: Theme -> Maybe Analytics -> Ticket -> Html
+ticketPage th an t =
+  messagePage th an "Thank you — you have a ticket!" $
     htmlConcat
       [ para ("Your payment for \x201C" <> tkProduct t <> "\x201D is confirmed. This is your class ticket code (also on its way to your inbox):")
       , elAttr "p" [("class", "sww-price"), ("style", "font-size:28px;letter-spacing:.06em")] (esc (tkCode t))
@@ -574,7 +576,7 @@ handleSchedule env = do
   let slots = siteSlots site
       oops msg = do
         status status400
-        htmlOf (simplePage th "Could not reserve that" msg)
+        htmlOf (simplePage th (aeAnalytics env) "Could not reserve that" msg)
   if T.null (T.strip code) || T.null (T.strip email) || T.null (T.strip name) || T.null slotId
     then oops "Please fill in the ticket code, your email address, your name, and pick a slot."
     else do
@@ -596,12 +598,12 @@ handleSchedule env = do
             Right () -> pure ()
           case tkRedemption t >>= (slotById slots . redSlotId) of
             Just s ->
-              htmlOf . messagePage th "You're booked!" $
+              htmlOf . messagePage th (aeAnalytics env) "You're booked!" $
                 htmlConcat
                   [ elAttr "p" [("class", "sww-paragraph")] (esc ("See you on " <> slotLabel s <> " \x2014 " <> slotArea s <> "."))
                   , elAttr "p" [("class", "sww-paragraph")] (esc ("A confirmation email and a Google Calendar invitation are on their way. The exact " <> bcVenueNoun (aeBookingCtx env) <> " address is emailed about a week before class."))
                   ]
-            Nothing -> htmlOf (simplePage th "You're booked!" "A confirmation email and a calendar invitation are on their way.")
+            Nothing -> htmlOf (simplePage th (aeAnalytics env) "You're booked!" "A confirmation email and a calendar invitation are on their way.")
 
 slotById :: [SlotSpec] -> Text -> Maybe SlotSpec
 slotById slots sid = listToMaybe [s | s <- slots, slotIdOf s == sid]
