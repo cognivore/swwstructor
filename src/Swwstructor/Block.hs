@@ -49,10 +49,13 @@ module Swwstructor.Block
   , blockFromJSON
   ) where
 
+import Data.Char (isDigit)
+import Data.List (intersperse)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Swwstructor.Html
   ( Html
+  , el
   , elAttr
   , esc
   , htmlConcat
@@ -350,9 +353,9 @@ instance BlockSym HtmlBlock where
     HtmlBlock $
       elAttr "h2" [("class", "sww-heading")] $
         elAttr "a" [("class", "sww-headlink"), ("href", safeHref h)] (esc t)
-  subhead t = HtmlBlock $ elAttr "p" [("class", "sww-subhead")] (esc t)
+  subhead t = HtmlBlock $ markdownProse "sww-subhead" t
   kicker t = HtmlBlock $ elAttr "span" [("class", "sww-kicker")] (esc t)
-  paragraph t = HtmlBlock $ elAttr "p" [("class", "sww-paragraph")] (esc t)
+  paragraph t = HtmlBlock $ markdownProse "sww-paragraph" t
   byline t = HtmlBlock $ elAttr "p" [("class", "sww-byline")] (esc t)
   timestamp t = HtmlBlock $ elAttr "span" [("class", "sww-timestamp")] (esc t)
   brandMark t =
@@ -508,6 +511,96 @@ safeHref h =
    in if any (`T.isPrefixOf` probe) ["javascript:", "vbscript:", "data:"]
         then "#"
         else h
+
+-- ---------------------------------------------------------------------------
+-- Markdown (the small subset an owner types into a prose box)
+-- ---------------------------------------------------------------------------
+
+-- | Render an owner's prose as HTML. A blank line starts a new paragraph, a
+-- single newline is a line break, lines opening with @-@ \/ @*@ \/ @+@ (or
+-- @1.@) become a list, and @[text](url)@, @**bold**@ and @*italic*@ work
+-- inline; a backslash escapes any of @\\ [ ] * -@. Everything else is literal
+-- text. Every scrap still goes through 'esc' and every href through 'safeHref',
+-- so this stays as injection-safe as the plain 'esc' it replaces.
+--
+-- The @cls@ is the class the paragraphs carry, so the same renderer serves both
+-- the body ('paragraph') and the standfirst ('subhead').
+markdownProse :: Text -> Text -> Html
+markdownProse cls = htmlConcat . map (mdBlockHtml cls) . mdGroup . T.lines . T.replace "\r" ""
+
+-- | A paragraph (its lines) or a list (ordered?, its items).
+data MdBlock = MdPara [Text] | MdList Bool [Text]
+
+mdGroup :: [Text] -> [MdBlock]
+mdGroup [] = []
+mdGroup (l : ls)
+  | T.null (T.strip l) = mdGroup ls
+  | Just (ord, item) <- mdBullet l =
+      let (items, rest) = spanItems ord ls
+       in MdList ord (item : items) : mdGroup rest
+  | otherwise =
+      let (cont, rest) = break (\x -> T.null (T.strip x) || isBullet x) ls
+       in MdPara (l : cont) : mdGroup rest
+  where
+    isBullet x = case mdBullet x of Just _ -> True; Nothing -> False
+    spanItems ord (x : xs) | Just (o, i) <- mdBullet x, o == ord =
+      let (is, rest) = spanItems ord xs in (i : is, rest)
+    spanItems _ xs = ([], xs)
+
+-- | @Just (ordered?, the item's text)@ when the line opens a list item.
+mdBullet :: Text -> Maybe (Bool, Text)
+mdBullet ln
+  | any (`T.isPrefixOf` t) ["- ", "* ", "+ "] = Just (False, T.stripStart (T.drop 2 t))
+  | not (T.null digits), Just item <- T.stripPrefix ". " afterDigits = Just (True, T.stripStart item)
+  | not (T.null digits), Just item <- T.stripPrefix ") " afterDigits = Just (True, T.stripStart item)
+  | otherwise = Nothing
+  where
+    t = T.stripStart ln
+    (digits, afterDigits) = T.span isDigit t
+
+mdBlockHtml :: Text -> MdBlock -> Html
+mdBlockHtml cls (MdPara ls) =
+  elAttr "p" [("class", cls)] (htmlConcat (intersperse (rawHtml "<br>") (map mdInline ls)))
+mdBlockHtml _ (MdList ord items) =
+  elAttr (if ord then "ol" else "ul") [("class", "sww-list")] (htmlConcat (map (el "li" . mdInline) items))
+
+-- | The inline pass: literal text up to the next marker, then that marker.
+-- Every branch consumes at least the marker character, so this terminates.
+mdInline :: Text -> Html
+mdInline t =
+  let (plain, rest) = T.break (`T.elem` "\\[*") t
+   in esc plain <> case T.uncons rest of
+        Nothing -> mempty
+        Just ('\\', more) -> case T.uncons more of
+          Just (c, more') | c `T.elem` "\\[]*-" -> esc (T.singleton c) <> mdInline more'
+          _ -> esc "\\" <> mdInline more
+        Just ('[', _) -> case mdLink rest of
+          Just h -> h
+          Nothing -> esc "[" <> mdInline (T.drop 1 rest)
+        Just ('*', _)
+          | "**" `T.isPrefixOf` rest -> emph "strong" "**" (T.drop 2 rest)
+          | otherwise -> emph "em" "*" (T.drop 1 rest)
+        Just (c, more) -> esc (T.singleton c) <> mdInline more
+  where
+    -- An unclosed (or empty) run is not emphasis — the marker stays literal.
+    emph tag close body = case T.breakOn close body of
+      (inner, r)
+        | not (T.null inner) && not (T.null r) ->
+            el tag (mdInline inner) <> mdInline (T.drop (T.length close) r)
+      _ -> esc close <> mdInline body
+
+-- | @[label](href)@ at the head of the text, plus whatever follows it.
+mdLink :: Text -> Maybe Html
+mdLink t = do
+  let (label, afterLabel) = T.breakOn "]" (T.drop 1 t)
+  afterOpen <- T.stripPrefix "](" afterLabel
+  let (href, afterHref) = T.breakOn ")" afterOpen
+  if T.null label || T.null afterHref
+    then Nothing
+    else
+      Just $
+        elAttr "a" [("class", "sww-link"), ("href", safeHref (T.strip href))] (mdInline label)
+          <> mdInline (T.drop 1 afterHref)
 
 -- ---------------------------------------------------------------------------
 -- Plain interpreter (text / accessibility / tests)

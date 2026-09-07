@@ -205,6 +205,8 @@ themeCss th =
         , ".sww-subhead{font-family:var(--sww-body);font-size:15px;font-weight:400;"
         , "  color:var(--sww-muted);margin:0 0 .5em;line-height:1.4;}"
         , ".sww-paragraph{margin:0 0 .7em;font-size:15px;color:var(--sww-fg);}"
+        , ".sww-list{margin:0 0 .7em;padding-left:1.25em;font-size:15px;color:var(--sww-fg);}"
+        , ".sww-list li{margin:0 0 .25em;}"
         , ".sww-kicker{display:inline-block;font-family:var(--sww-body);font-size:11px;font-weight:700;"
         , "  letter-spacing:.08em;text-transform:uppercase;color:var(--sww-accent);margin:0 0 .35em;}"
         , ".sww-byline{font-size:12px;color:var(--sww-muted);margin:.2em 0;text-transform:uppercase;letter-spacing:.04em;}"

@@ -18,6 +18,7 @@ import System.Exit (exitFailure, exitSuccess)
 import Swwstructor.Block
   ( Block (..)
   , BuyTarget (BuyTarget)
+  , HtmlBlock (runHtmlBlock)
   , NavLink (NavLink)
   , PlainBlock (runPlainBlock)
   , addDaysIso
@@ -625,6 +626,24 @@ scheduleTests = do
     , check "generateSlots respects weekday selection" (let g = generateSlots "2026-09-01" "2026-09-13" [5, 6] [("14:00", "16:00")] "X" 6 in map slotDate g == ["2026-09-05", "2026-09-06", "2026-09-12", "2026-09-13"])
     ]
 
+markdownTests :: IO [Bool]
+markdownTests = do
+  section "markdown in prose boxes"
+  let md t = renderHtml (runHtmlBlock (buildBlock (BParagraph t)))
+  sequence
+    [ check "plain prose is unchanged" (md "Just words." == "<p class=\"sww-paragraph\">Just words.</p>")
+    , check "a blank line starts a new paragraph" (md "What is Okashi?\r\n\r\nA sweet." == "<p class=\"sww-paragraph\">What is Okashi?</p><p class=\"sww-paragraph\">A sweet.</p>")
+    , check "a single newline is a line break" ("A<br>B" `T.isInfixOf` md "A\nB")
+    , check "links render" ("<a class=\"sww-link\" href=\"https://patisserietomo.fr/\">TOMO</a>" `T.isInfixOf` md "I worked at [TOMO](https://patisserietomo.fr/) in Paris.")
+    , check "bold and italic render" (md "**a** and *b*" == "<p class=\"sww-paragraph\"><strong>a</strong> and <em>b</em></p>")
+    , check "bullets become a list" (md "Bring:\n- a tub\n- a pen" == "<p class=\"sww-paragraph\">Bring:</p><ul class=\"sww-list\"><li>a tub</li><li>a pen</li></ul>")
+    , check "numbers become an ordered list" (md "1. pound\n2. wrap" == "<ol class=\"sww-list\"><li>pound</li><li>wrap</li></ol>")
+    , check "unmatched markers stay literal" (md "2 * 3 and a [bracket" == "<p class=\"sww-paragraph\">2 * 3 and a [bracket</p>")
+    , check "a backslash escapes a marker" (md "\\*not italic\\*" == "<p class=\"sww-paragraph\">*not italic*</p>")
+    , check "content is still escaped" (md "<script>x</script> & co" == "<p class=\"sww-paragraph\">&lt;script&gt;x&lt;/script&gt; &amp; co</p>")
+    , check "link labels are escaped and javascript: hrefs neutralised" (md "[<b>](javascript:alert)" == "<p class=\"sww-paragraph\"><a class=\"sww-link\" href=\"#\">&lt;b&gt;</a></p>")
+    ]
+
 main :: IO ()
 main = do
   results <-
@@ -644,6 +663,7 @@ main = do
         , catalogTests
         , scheduleTests
         , moneyTests
+        , markdownTests
         ]
   let passed = length (filter id results)
       total = length results

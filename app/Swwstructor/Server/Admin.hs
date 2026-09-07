@@ -438,7 +438,8 @@ sectionFormPage partials path i sec fl =
                   [ elAttr "div" [("class", "card")] $
                       elAttr "form" [("method", "post"), ("action", "/admin/section?path=" <> path <> "&i=" <> T.pack (show i))] $
                         htmlConcat
-                          [ sectionFields partials sec
+                          [ elAttr "p" [("class", "hint")] (esc "Text boxes take Markdown: **bold**, *italic*, [link text](https://example.com), a line starting with \x201C- \x201D becomes a bullet, and a blank line starts a new paragraph.")
+                          , sectionFields partials sec
                           , elAttr "div" [("class", "actions")] $
                               btn "primary" "save" "Save"
                                 <> elAttr "a" [("href", "/admin/page?path=" <> path), ("class", "muted")] (esc "Done")
