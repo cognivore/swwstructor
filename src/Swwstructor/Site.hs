@@ -178,22 +178,39 @@ renderDocument th an title footer body =
           ]
       )
 
--- | Deployment-level analytics: the tracker script to load and the domain it
--- reports as. This is /config/, not content — it arrives from the unit's
--- environment, so it never round-trips through @site.json@ and no content edit
--- can drop it. Only public pages carry it; the admin and its previews do not.
+-- | Deployment-level analytics: the tracker to run and the domain it reports
+-- as. This is /config/, not content — it arrives from the unit's environment,
+-- so it never round-trips through @site.json@ and no content edit can drop it.
+-- Only public pages carry it; the admin and its previews do not.
 data Analytics = Analytics
   { anSrc :: !Text
   -- ^ tracker script URL (e.g. a self-hosted Plausible @\/js\/plausible.js@)
   , anDomain :: !Text
   -- ^ the @data-domain@ the tracker reports as (the site's public domain)
+  , anInline :: !(Maybe Text)
+  -- ^ the tracker's source, to ship /in the page/ instead of loading it from
+  -- 'anSrc'. Content blockers filter the well-known script URL, not the bytes,
+  -- so inlining is what makes a first-party, cookie-free counter actually count.
   }
   deriving (Eq, Show)
 
+-- | The analytics markup: either a plain tag that loads the tracker, or — when
+-- the deployment pinned a copy of it — the tracker's own source inlined.
+--
+-- Inlined, it needs one companion tag. A Plausible-shaped tracker reads its
+-- @data-domain@ off @querySelector('[src*=\"<endpoint>\"]')@, i.e. off the
+-- script element that loaded it; inline, there is no such element and every
+-- event would report a null domain. So we emit the tag it looks for as a data
+-- block (a non-JS @type@ makes it inert: the browser never fetches @src@, it is
+-- there to be /read/), and the tracker finds its domain exactly as it expects.
 analyticsTag :: Maybe Analytics -> [Html]
 analyticsTag Nothing = []
-analyticsTag (Just a) =
-  [elAttr "script" [("defer", ""), ("data-domain", anDomain a), ("src", anSrc a)] mempty]
+analyticsTag (Just a) = case anInline a of
+  Nothing -> [elAttr "script" [("defer", ""), ("data-domain", anDomain a), ("src", anSrc a)] mempty]
+  Just js ->
+    [ elAttr "script" [("type", "application/json"), ("data-domain", anDomain a), ("src", anSrc a)] mempty
+    , elAttr "script" [] (rawHtml js)
+    ]
 
 headContent :: Theme -> Maybe Analytics -> Text -> Html
 headContent th an title =

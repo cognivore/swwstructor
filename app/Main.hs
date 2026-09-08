@@ -37,11 +37,13 @@
 --     invites + Gmail booking mail), same store-wins rule as the Stripe keys
 module Main (main) where
 
+import Control.Exception (SomeException, try)
 import Control.Monad (when)
 import Data.IORef (newIORef)
 import qualified Data.Map.Strict as M
 import Data.Maybe (fromMaybe)
 import qualified Data.Text as T
+import qualified Data.Text.IO as TIO
 import Network.HTTP.Client (newManager)
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import System.Directory (createDirectoryIfMissing)
@@ -227,18 +229,38 @@ readBaseUrl port = do
 -- | The analytics tag public pages carry, if the deployment asked for one.
 -- @SWW_ANALYTICS_SRC@ is the tracker script (a self-hosted Plausible
 -- @plausible.js@, say); @SWW_ANALYTICS_DOMAIN@ is the name it reports as and
--- defaults to the host of @BASE_URL@. Unset = no analytics at all.
+-- defaults to the host of @BASE_URL@; @SWW_ANALYTICS_INLINE@ optionally points
+-- at a pinned copy of that script, which is then shipped inside the page
+-- instead of loaded. Unset = no analytics at all.
 readAnalytics :: String -> IO (Maybe Analytics)
 readAnalytics baseUrl = do
   msrc <- nonEmptyEnv <$> lookupEnv "SWW_ANALYTICS_SRC"
   mdom <- nonEmptyEnv <$> lookupEnv "SWW_ANALYTICS_DOMAIN"
+  mfile <- nonEmptyEnv <$> lookupEnv "SWW_ANALYTICS_INLINE"
+  inline <- maybe (pure Nothing) readTracker mfile
   pure $ do
     src <- msrc
-    pure (Analytics (T.pack src) (T.pack (fromMaybe (hostOf baseUrl) mdom)))
+    pure (Analytics (T.pack src) (T.pack (fromMaybe (hostOf baseUrl) mdom)) inline)
   where
     hostOf u = takeWhile (/= '/') $ case dropWhile (/= '/') u of
       ('/' : '/' : rest) -> rest
       _ -> u
+
+-- | The tracker source to inline. Unreadable, or carrying a closing script tag
+-- (which would end the element early and spill JS into the page), means we fall
+-- back to loading it from its URL rather than serving broken markup.
+readTracker :: FilePath -> IO (Maybe T.Text)
+readTracker path = do
+  e <- try (TIO.readFile path) :: IO (Either SomeException T.Text)
+  case e of
+    Left err -> do
+      putStrLn ("[swwstructor] WARNING: cannot read SWW_ANALYTICS_INLINE (" <> path <> "): " <> show err <> " — loading the tracker over the network instead.")
+      pure Nothing
+    Right js
+      | "</script" `T.isInfixOf` T.toLower js -> do
+          putStrLn "[swwstructor] WARNING: SWW_ANALYTICS_INLINE contains a closing script tag; loading the tracker over the network instead."
+          pure Nothing
+      | otherwise -> pure (Just (T.strip js))
 
 readStage :: IO Stage
 readStage = do

@@ -113,10 +113,24 @@ let
           default = null;
           example = "https://plausible.example.com/js/plausible.js";
           description = ''
-            Analytics tracker script to load on every PUBLIC page (the admin and
-            its previews never carry it). It is loaded deferred with
-            `data-domain` set to this instance's domain — the shape a
-            self-hosted Plausible expects. null = no analytics.
+            Analytics tracker script for every PUBLIC page (the admin and its
+            previews never carry it), with `data-domain` set to this instance's
+            domain — the shape a self-hosted Plausible expects. null = no
+            analytics.
+          '';
+        };
+        analyticsScriptHash = lib.mkOption {
+          type = lib.types.nullOr lib.types.str;
+          default = null;
+          example = "sha256-AAAA....";
+          description = ''
+            SRI hash of `analyticsScript`. Setting it INLINES the tracker: the
+            script is fetched once at build time, pinned to this hash, and
+            served inside the page instead of loaded from the tracker's host.
+            Content blockers filter the well-known script URL, not the bytes, so
+            inlining is what makes the counter actually count. The cost is that
+            upstream changes to the tracker arrive only when this hash is
+            refreshed. null = load it from the URL at run time.
           '';
         };
         enableCaddy = lib.mkOption {
@@ -184,10 +198,20 @@ in
         // lib.optionalAttrs (inst.booking.name != null) {
           SWW_BOOKING_NAME = inst.booking.name;
         }
-        // lib.optionalAttrs (inst.analyticsScript != null) {
-          SWW_ANALYTICS_SRC = inst.analyticsScript;
-          SWW_ANALYTICS_DOMAIN = inst.domain;
-        };
+        // lib.optionalAttrs (inst.analyticsScript != null) (
+          {
+            SWW_ANALYTICS_SRC = inst.analyticsScript;
+            SWW_ANALYTICS_DOMAIN = inst.domain;
+          }
+          // lib.optionalAttrs (inst.analyticsScriptHash != null) {
+            SWW_ANALYTICS_INLINE = "${
+              pkgs.fetchurl {
+                url = inst.analyticsScript;
+                hash = inst.analyticsScriptHash;
+              }
+            }";
+          }
+        );
         # Secrets are age-decrypted with THIS host's ssh key at start — never in
         # the Nix store in plaintext, never in the unit's static environment.
         script = ''
