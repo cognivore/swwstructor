@@ -30,8 +30,7 @@ import qualified Data.Text.Encoding as TE
 import Data.Text.Encoding.Error (lenientDecode)
 import qualified Data.Text.Lazy as TL
 import qualified Data.Text.Lazy.Encoding as TLE
-import Data.Time.Clock (UTCTime, addUTCTime, getCurrentTime)
-import Data.Time.Format (defaultTimeLocale, formatTime)
+import Data.Time.Clock (UTCTime, getCurrentTime)
 import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
 import Data.Word (Word8)
 import Network.HTTP.Client (Manager)
@@ -140,13 +139,11 @@ import Swwstructor.Server.Booking
   )
 import Swwstructor.Server.Media (deleteMedia, listAssets, listMedia, resolveMedia, saveMedia)
 import Swwstructor.Server.Notify
-  ( BookingCtx (bcSiteName, bcTzOffset, bcVenueNoun, bcVenues)
+  ( BookingCtx (bcSiteName, bcVenueNoun, bcVenues)
   , bookingIcs
   , ensureReservationSideEffects
-  , offsetSeconds
   , siteMaxWeekly
   , siteSlots
-  , venueAnnounced
   )
 import Swwstructor.Server.Venues
   ( Venue (Venue, vnAddress, vnMapUrl, vnName)
@@ -155,6 +152,7 @@ import Swwstructor.Server.Venues
   , listVenues
   , upsertVenue
   , venueForArea
+  , venueLocation
   )
 import Swwstructor.Server.SecretStore
   ( MasterKey
@@ -245,7 +243,8 @@ currentSiteResolved env = do
     then pure site1
     else do
       tickets <- liftIO (listTickets (aeBookings env))
-      pure (mapAllSections (fillSchedule tickets) site1)
+      venues <- liftIO (bcVenues (aeBookingCtx env))
+      pure (mapAllSections (fillSchedule tickets venues) site1)
   where
     isCatalogMarker StripeCatalog{} = True
     isCatalogMarker _ = False
@@ -253,9 +252,9 @@ currentSiteResolved env = do
     swapMarker _ s = s
     isSchedule ScheduleClass{} = True
     isSchedule _ = False
-    fillSchedule tickets (ScheduleClass t i mw slots) =
-      ScheduleClass t i mw [s {slotTaken = takenFor tickets s} | s <- slots]
-    fillSchedule _ s = s
+    fillSchedule tickets venues (ScheduleClass t i mw slots) =
+      ScheduleClass t i mw [s {slotTaken = takenFor tickets s, slotArea = venueLocation venues (slotArea s)} | s <- slots]
+    fillSchedule _ _ s = s
 
 fetchCatalogFor :: AppEnv -> IO [CatalogItem]
 fetchCatalogFor env =
@@ -619,16 +618,13 @@ handleSchedule env = do
           setHeader "Location" (TL.fromStrict ("/booking/" <> tkCode t))
 
 -- | A reservation's own page, reached by its code (the code is the only key
--- the site has): the class, where it is — the area, and the exact venue
--- from a week before — and the calendar file to save.
+-- the site has): the class, its venue address, and the calendar file to save.
 handleBookingPage :: AppEnv -> ActionM ()
 handleBookingPage env = do
   site <- currentSite env
   let th = siteTheme site
       ctx = aeBookingCtx env
-      noun = bcVenueNoun ctx
   found <- lookupBooking env
-  today <- liftIO (classToday ctx)
   venues <- liftIO (bcVenues ctx)
   case found of
     Nothing -> do
@@ -637,11 +633,10 @@ handleBookingPage env = do
     Just (t, Nothing) -> htmlOf (ticketPage th (aeAnalytics env) t)
     Just (t, Just s) -> do
       let whereHtml = case venueForArea venues (slotArea s) of
-            Just v
-              | venueAnnounced today s ->
-                  para ("Where: " <> vnName v <> ", " <> vnAddress v)
-                    <> (if T.null (vnMapUrl v) then mempty else elAttr "p" [("class", "sww-paragraph")] (elAttr "a" [("class", "sww-link"), ("href", vnMapUrl v)] (esc "Open the map")))
-            _ -> para ("Where: " <> slotArea s <> " \x2014 the exact " <> noun <> " address appears on this page about a week before the class. Bookmark it, or save the calendar file and look back here then.")
+            Just v ->
+              para ("Where: " <> vnName v <> ", " <> vnAddress v)
+                <> (if T.null (vnMapUrl v) then mempty else elAttr "p" [("class", "sww-paragraph")] (elAttr "a" [("class", "sww-link"), ("href", vnMapUrl v)] (esc "Open the map")))
+            _ -> para ("Where: " <> slotArea s)
       htmlOf . messagePage th (aeAnalytics env) "You're booked!" $
         htmlConcat
           [ para ("When: " <> slotLabel s)
@@ -657,12 +652,11 @@ handleBookingIcs env = do
   case found of
     Just (t, Just s) -> do
       let ctx = aeBookingCtx env
-      today <- liftIO (classToday ctx)
       now <- liftIO getCurrentTime
       venues <- liftIO (bcVenues ctx)
       setHeader "Content-Type" "text/calendar; charset=utf-8"
       setHeader "Content-Disposition" ("attachment; filename=\"" <> TL.fromStrict (tkCode t) <> ".ics\"")
-      raw (BL.fromStrict (TE.encodeUtf8 (bookingIcs ctx venues today now t s)))
+      raw (BL.fromStrict (TE.encodeUtf8 (bookingIcs ctx venues now t s)))
     _ -> status status404 >> text "no such booking"
 
 -- | The ticket a @:code@ path names, with its reserved slot (if any).
@@ -674,13 +668,6 @@ lookupBooking env = do
   pure $ case [t | t <- tickets, tkCode t == code] of
     (t : _) -> Just (t, tkRedemption t >>= (slotById (siteSlots site) . redSlotId))
     [] -> Nothing
-
--- | The class-timezone civil date (@YYYY-MM-DD@).
-classToday :: BookingCtx -> IO Text
-classToday ctx = do
-  now <- getCurrentTime
-  let local = addUTCTime (fromIntegral (offsetSeconds (bcTzOffset ctx))) now
-  pure (T.pack (formatTime defaultTimeLocale "%Y-%m-%d" local))
 
 slotById :: [SlotSpec] -> Text -> Maybe SlotSpec
 slotById slots sid = listToMaybe [s | s <- slots, slotIdOf s == sid]

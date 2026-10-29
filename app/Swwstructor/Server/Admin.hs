@@ -916,7 +916,7 @@ venuesPage noun venues areas fl =
           htmlConcat
             [ flash fl
             , el "h1" (esc "Venues")
-            , elAttr "p" [("class", "muted")] (esc ("Your address book of the " <> nouns <> " classes can happen in. Students see only the area when they book. From a week before a class, if its area matches exactly one active " <> noun <> " here, the address appears on each student's booking page and in their calendar file, and the staff calendar event is updated; otherwise you announce it yourself."))
+            , elAttr "p" [("class", "muted")] (esc ("Your address book of the " <> nouns <> " classes can happen in. If a class area matches exactly one active " <> noun <> " here, its address appears immediately on the class card, booking page and calendar file, and on the staff calendar event. With no unique match, the class area is shown."))
             , areasCard
             , htmlConcat (map venueCard venues)
             , addCard

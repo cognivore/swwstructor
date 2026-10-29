@@ -1,14 +1,14 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 -- | Booking side effects, all of them staff-facing or student-pulled: the
--- staff calendar event for a reservation, its week-ahead venue update, and
+-- staff calendar event for a reservation, its location update, and
 -- the calendar file a student downloads from their booking page.
 --
 -- The site holds no way to reach a student — no email, nothing personal; a
 -- ticket is a reference code and a preferred name. So nothing is ever SENT
 -- to a student: Stripe's receipt carries their code, and their booking page
--- (@\/booking\/<code>@) is where they find the details, the address once it
--- is announced, and the calendar file.
+-- (@\/booking\/<code>@) is where they find the details, the address and the
+-- calendar file immediately.
 --
 -- Side effects are retried, not fire-and-forget: each is attempted, and only
 -- a SUCCESS is recorded on the ticket (the event id / the ledger). The loop
@@ -20,7 +20,6 @@ module Swwstructor.Server.Notify
   , siteMaxWeekly
   , ensureReservationSideEffects
   , announceVenues
-  , venueAnnounced
   , bookingIcs
   , offsetSeconds
   ) where
@@ -31,7 +30,7 @@ import Data.Time.Clock (UTCTime)
 import Data.Time.Format (defaultTimeLocale, formatTime, parseTimeM)
 import Data.Time.LocalTime (LocalTime, localTimeToUTC, minutesToTimeZone)
 import Network.HTTP.Client (Manager)
-import Swwstructor.Block (addDaysIso, markdownPlain)
+import Swwstructor.Block (markdownPlain)
 import Swwstructor.Content
   ( SectionSpec (ScheduleClass)
   , SiteSpec
@@ -53,7 +52,7 @@ import Swwstructor.Server.Google
   , createCalendarEvent
   , patchEventLocation
   )
-import Swwstructor.Server.Venues (Venue (vnAddress, vnMapUrl, vnName), venueForArea)
+import Swwstructor.Server.Venues (Venue, venueForArea, venueLocation)
 
 -- | Everything the side-effect code needs — deliberately NOT 'AppEnv' (this
 -- module is shared with the loop and must not import the app).
@@ -116,6 +115,7 @@ ensureEvent ctx t r s = case redEventId r of
     case mcreds of
       Nothing -> pure ()
       Just creds -> do
+        venues <- bcVenues ctx
         let ev =
               CalendarEvent
                 { ceSummary = redName r <> " - " <> tkProduct t <> " (" <> tkCode t <> ")"
@@ -128,7 +128,7 @@ ensureEvent ctx t r s = case redEventId r of
                              , "Booking:   " <> bookingUrl ctx t
                              ]
                       )
-                , ceLocation = slotArea s
+                , ceLocation = venueLocation venues (slotArea s)
                 , ceStart = slotDate s <> "T" <> slotStart s <> ":00" <> bcTzOffset ctx
                 , ceEnd = slotDate s <> "T" <> slotEnd s <> ":00" <> bcTzOffset ctx
                 , ceTimeZone = bcTimeZone ctx
@@ -140,21 +140,13 @@ ensureEvent ctx t r s = case redEventId r of
           Left err -> putStrLn ("[booking] calendar event failed (will retry): " <> T.unpack err)
 
 -- ---------------------------------------------------------------------------
--- The week-ahead venue announcement
+-- Fill locations on existing staff events
 -- ---------------------------------------------------------------------------
 
--- | Whether a class's exact venue is announced yet: from a week before the
--- class (by the class-timezone civil date @today@). Until then only the area
--- shows anywhere a student can see.
-venueAnnounced :: Text -> SlotSpec -> Bool
-venueAnnounced today s = slotDate s <= addDaysIso 7 today
-
--- | A week out (from 09:00 local), a class whose area matches exactly one
--- active venue gets that address onto its staff calendar event. Students see
--- the same address on their booking page from the same moment.
--- @today@ is the class-timezone civil date and @hourOfDay@ its hour.
-announceVenues :: BookingCtx -> Text -> Int -> IO ()
-announceVenues ctx today hourOfDay = do
+-- | Existing future events receive their matching venue address immediately.
+-- @today@ only excludes archived classes; there is no disclosure delay.
+announceVenues :: BookingCtx -> Text -> IO ()
+announceVenues ctx today = do
   tickets <- listTickets (bcStore ctx)
   slots <- bcSlots ctx
   venues <- bcVenues ctx
@@ -163,17 +155,15 @@ announceVenues ctx today hourOfDay = do
     announceOne slots venues t = case tkRedemption t of
       Just r
         | "venue" `notElem` tkNotesSent t
-        , hourOfDay >= 9
         , Just evId <- redEventId r
         , (s : _) <- [s | s <- slots, slotIdOf s == redSlotId r]
-        , venueAnnounced today s
         , slotDate s >= today
-        , Just v <- venueForArea venues (slotArea s) -> do
+        , Just _ <- venueForArea venues (slotArea s) -> do
             mcreds <- bcCreds ctx
             case mcreds of
               Nothing -> pure ()
               Just creds -> do
-                res <- patchEventLocation (bcManager ctx) creds evId (vnName v <> ", " <> vnAddress v)
+                res <- patchEventLocation (bcManager ctx) creds evId (venueLocation venues (slotArea s))
                 case res of
                   Right () -> () <$ claimNote (bcStore ctx) (tkCode t) "venue"
                   Left err -> putStrLn ("[booking] event location patch failed (will retry): " <> T.unpack err)
@@ -185,10 +175,10 @@ announceVenues ctx today hourOfDay = do
 
 -- | An iCalendar file for one reservation, for the student to save from
 -- their booking page. It carries the class, its time (in UTC, from the
--- configured offset), where it is (the venue once announced, else the area)
+-- configured offset), where it is (the full matching venue address, else the area)
 -- and a link back to the booking page — and no name.
-bookingIcs :: BookingCtx -> [Venue] -> Text -> UTCTime -> Ticket -> SlotSpec -> Text
-bookingIcs ctx venues today now t s =
+bookingIcs :: BookingCtx -> [Venue] -> UTCTime -> Ticket -> SlotSpec -> Text
+bookingIcs ctx venues now t s =
   T.concat
     ( map
         ((<> "\r\n") . fold75)
@@ -212,9 +202,7 @@ bookingIcs ctx venues today now t s =
     )
   where
     host = T.takeWhile (/= '/') (T.drop 2 (snd (T.breakOn "//" (bcBaseUrl ctx))))
-    location = case venueForArea venues (slotArea s) of
-      Just v | venueAnnounced today s -> vnName v <> ", " <> vnAddress v <> (if T.null (vnMapUrl v) then "" else " " <> vnMapUrl v)
-      _ -> slotArea s
+    location = venueLocation venues (slotArea s)
     slotUtc hhmm = do
       lt <- parseTimeM True defaultTimeLocale "%Y-%m-%d %H:%M" (T.unpack (slotDate s <> " " <> hhmm)) :: Maybe LocalTime
       pure (localTimeToUTC (minutesToTimeZone (offsetSeconds (bcTzOffset ctx) `div` 60)) lt)

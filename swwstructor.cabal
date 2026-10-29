@@ -117,3 +117,29 @@ test-suite swwstructor-test
     , stickywebwm
     , swwstructor
     , text
+
+test-suite booking-location-test
+  import:           warnings
+  type:             exitcode-stdio-1.0
+  hs-source-dirs:   test, app
+  main-is:          BookingLocationSpec.hs
+  default-language: GHC2021
+  other-modules:
+    Swwstructor.Server.Booking
+    Swwstructor.Server.Google
+    Swwstructor.Server.Notify
+    Swwstructor.Server.SecretStore
+    Swwstructor.Server.Venues
+  build-depends:
+      base
+    , bytestring
+    , containers
+    , crypton
+    , directory
+    , http-client
+    , http-types
+    , memory
+    , stickywebwm
+    , swwstructor
+    , text
+    , time

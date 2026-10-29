@@ -79,8 +79,8 @@ data Ticket = Ticket
   -- Sourced from the Stripe product's @sww_seats@ metadata; default @\"1\"@.
   , tkRedemption :: !(Maybe Redemption)
   , tkNotesSent :: ![Text]
-  -- ^ ledger of one-off side effects done (@\"venue\"@: the week-ahead
-  -- venue announcement on the staff calendar event)
+  -- ^ ledger of one-off side effects done (@\"venue\"@: the venue
+  -- address update on the staff calendar event)
   }
   deriving (Eq, Show)
 

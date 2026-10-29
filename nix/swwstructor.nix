@@ -19,7 +19,7 @@ mkDerivation {
     http-client http-client-tls http-types memory mtl process scotty
     stickywebwm text time wai wai-extra warp
   ];
-  testHaskellDepends = [ base bytestring containers stickywebwm text ];
+  testHaskellDepends = [ base bytestring containers crypton directory http-client http-types memory stickywebwm text time ];
   description = "A single-tenant website constructor on the stickywebwm layout engine";
   license = lib.meta.getLicenseFromSpdxId "MIT";
   mainProgram = "swwstructor-server";

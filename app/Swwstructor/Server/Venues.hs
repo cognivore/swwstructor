@@ -3,18 +3,16 @@
 -- | The venue address book: the places classes/events can actually happen.
 -- Owner-managed through the admin (name, street address, the area label it
 -- belongs to, an optional map link, notes, active flag) and stored
--- server-side only — a venue's address never enters site content, so it
--- cannot leak onto a public page.
+-- separately from site content. A matching active venue's address is shown
+-- immediately on class cards, booking pages and calendar files.
 --
 -- What a venue is CALLED is the deployment's business: the booking config
 -- carries a \"venue noun\" (default @venue@; a pastry school says @kitchen@,
 -- a draft club would say @hall@) that all student-facing copy uses.
 --
 -- The booking flow consumes the book through 'venueForArea': when a class
--- slot's area matches exactly ONE active venue, the week-before reminder can
--- tell the student the real address (and the calendar event is updated);
--- with zero or several matches the copy stays vague and the school announces
--- the venue by hand, as before.
+-- slot's area matches exactly ONE active venue, that address is used;
+-- with zero or several matches the slot's area remains the location.
 module Swwstructor.Server.Venues
   ( Venue (..)
   , VenueStore
@@ -23,6 +21,7 @@ module Swwstructor.Server.Venues
   , upsertVenue
   , deleteVenue
   , venueForArea
+  , venueLocation
   ) where
 
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar, readMVar)
@@ -104,6 +103,13 @@ venueForArea :: [Venue] -> Text -> Maybe Venue
 venueForArea vs area = case [v | v <- vs, vnActive v, T.strip (vnArea v) == T.strip area] of
   [v] -> Just v
   _ -> Nothing
+
+-- | One location policy for cards, booking pages and calendar events.
+-- Ambiguous or absent venues retain the authored area, never a guessed address.
+venueLocation :: [Venue] -> Text -> Text
+venueLocation vs area = case venueForArea vs area of
+  Just v -> vnName v <> ", " <> vnAddress v
+  Nothing -> area
 
 -- ---------------------------------------------------------------------------
 -- Persistence + codec (the Booking-store pattern)

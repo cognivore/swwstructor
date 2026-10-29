@@ -637,7 +637,7 @@ scheduleTests = do
     , check "week at cap hides its empty slots" (not ("2026-09-02-1400" `T.isInfixOf` capHtml))
     , check "week at cap keeps its started session joinable" ("2026-09-01-1400" `T.isInfixOf` capHtml)
     , check "other weeks are unaffected by the cap" ("2026-09-08-1400" `T.isInfixOf` capHtml)
-    , check "the venue-announcement note is present" ("about a week before" `T.isInfixOf` html)
+    , check "the address note has no delayed-reveal promise" ("includes the venue address" `T.isInfixOf` html && not ("week before" `T.isInfixOf` html))
     , check "the form asks only for a ticket code and a preferred name" (all (`T.isInfixOf` html) ["name=\"code\"", "name=\"name\"", "preferred name"] && not ("name=\"email\"" `T.isInfixOf` html) && not ("type=\"email\"" `T.isInfixOf` html))
     , check "no client JS in the widget (form-post-and-navigate)" (not ("<script" `T.isInfixOf` html))
     , check "day formatting (Sakamoto)" (fmtSlotDay "2026-09-01" == "Tue 1 Sep" && fmtSlotDay "2026-09-13" == "Sun 13 Sep")
