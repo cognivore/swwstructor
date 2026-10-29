@@ -8,6 +8,7 @@
 module Swwstructor.Server.Stripe
   ( stripeCreate
   , PaymentInfo (..)
+  , CheckoutReference (..)
   , webhookPaymentOf
   , verifyStripeSig
   , peekEventType
@@ -47,6 +48,8 @@ import Swwstructor.Checkout
   , stripeFormParams
   )
 import Swwstructor.Server.SecretStore (SecretValue, secretText)
+import Swwstructor.Server.Booking (isTicketCode)
+import Swwstructor.Server.PaymentCodes (isPaymentCode)
 import StickyWM (JSON (JObj, JStr), decode, jstr, (.:), (.:?))
 
 -- | Create a hosted Checkout session. @POST /v1/checkout/sessions@,
@@ -101,12 +104,15 @@ lbsToString = T.unpack . TE.decodeUtf8 . BL.toStrict
 -- made by Checkout carries no customer details (the customer, the card and
 -- the billing details are only ids), so no personal data is ever parsed,
 -- kept or logged; the ticket itself rides in our own metadata.
+data CheckoutReference = ClassCode !Text | PaymentOnlyCode !Text
+  deriving (Eq, Show)
+
 data PaymentInfo = PaymentInfo
   { piId :: !Text
   -- ^ the PaymentIntent id (@pi_…@) — the idempotency key for issuance
   , piSucceeded :: !Bool
-  , piCode :: !(Maybe Text)
-  -- ^ our @sww_code@ metadata: the ticket code minted before checkout
+  , piReference :: !(Maybe CheckoutReference)
+  -- ^ Exactly one recognised code kind, never inferred from a product name.
   , piProduct :: !(Maybe Text)
   -- ^ our @sww_product@ metadata
   , piSeats :: !(Maybe Text)
@@ -127,7 +133,11 @@ paymentInfoOf v = do
           Just (JStr p) -> Just (T.pack p)
           _ -> Nothing
         _ -> Nothing
-  pure (PaymentInfo pid succeeded (meta "sww_code") (meta "sww_product") (meta "sww_seats"))
+      reference = case (meta "sww_code", meta "sww_payment_code") of
+        (Just code, Nothing) | isTicketCode code -> Just (ClassCode code)
+        (Nothing, Just code) | isPaymentCode code -> Just (PaymentOnlyCode code)
+        _ -> Nothing
+  pure (PaymentInfo pid succeeded reference (meta "sww_product") (meta "sww_seats"))
 
 -- ---------------------------------------------------------------------------
 -- Webhook signature verification

@@ -57,6 +57,7 @@ import Web.Scotty (scotty)
 import Swwstructor.Content (siteTitle)
 import Swwstructor.Server.App (AppEnv (..), Stage (Prod, Test), swwApp)
 import Swwstructor.Server.Booking (newBookingStore)
+import Swwstructor.Server.PaymentCodes (newPaymentCodeStore)
 import Swwstructor.Server.Google (googleCredsOf)
 import Swwstructor.Server.Venues (listVenues, newVenueStore)
 import Swwstructor.Server.Notify (BookingCtx (..), siteSlots)
@@ -150,6 +151,7 @@ main = do
   -- Bookings: the ticket store (codes + preferred names only), and the
   -- side-effect context. Staff addresses are invited to every class event.
   bookings <- newBookingStore (dataDir </> "bookings.json")
+  paymentCodes <- newPaymentCodeStore (dataDir </> "payment-codes.json")
   venues <- newVenueStore (dataDir </> "venues.json")
   staff <- splitCsv . fromMaybe "" <$> lookupEnv "SWW_BOOKING_STAFF"
   bookingName <- fromMaybe (T.unpack (siteTitle site0)) . nonEmptyEnv <$> lookupEnv "SWW_BOOKING_NAME"
@@ -186,6 +188,7 @@ main = do
           , aeCatalog = catalogCache
           , aeSpentPow = spentPow
           , aeBookings = bookings
+          , aePaymentCodes = paymentCodes
           , aeBookingCtx = bookingCtx
           , aeVenues = venues
           , aeAnalytics = analytics

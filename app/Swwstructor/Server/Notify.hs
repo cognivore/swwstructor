@@ -21,6 +21,8 @@ module Swwstructor.Server.Notify
   , ensureReservationSideEffects
   , announceVenues
   , bookingIcs
+  , CalendarTicket (..)
+  , CalendarStatus (..)
   , offsetSeconds
   ) where
 
@@ -177,7 +179,17 @@ announceVenues ctx today = do
 -- their booking page. It carries the class, its time (in UTC, from the
 -- configured offset), where it is (the full matching venue address, else the area)
 -- and a link back to the booking page — and no name.
-bookingIcs :: BookingCtx -> [Venue] -> UTCTime -> Ticket -> SlotSpec -> Text
+data CalendarStatus = ConfirmedClass | PaymentPending deriving (Eq, Show)
+
+-- | Calendar presentation data shared by reservations and payment previews.
+-- Constructing this value grants no lesson entitlement.
+data CalendarTicket = CalendarTicket
+  { calendarCode :: !Text
+  , calendarProduct :: !Text
+  , calendarStatus :: !CalendarStatus
+  }
+
+bookingIcs :: BookingCtx -> [Venue] -> UTCTime -> CalendarTicket -> SlotSpec -> Text
 bookingIcs ctx venues now t s =
   T.concat
     ( map
@@ -188,14 +200,14 @@ bookingIcs ctx venues now t s =
         , "CALSCALE:GREGORIAN"
         , "METHOD:PUBLISH"
         , "BEGIN:VEVENT"
-        , "UID:" <> tkCode t <> "@" <> host
+        , "UID:" <> calendarCode t <> "@" <> host
         , "DTSTAMP:" <> utcStamp now
         , "DTSTART:" <> maybe "" utcStamp (slotUtc (slotStart s))
         , "DTEND:" <> maybe "" utcStamp (slotUtc (slotEnd s))
-        , "SUMMARY:" <> icsText (tkProduct t <> " - " <> bcSiteName ctx)
+        , "SUMMARY:" <> icsText (titlePrefix <> calendarProduct t <> " - " <> bcSiteName ctx)
         , "LOCATION:" <> icsText location
-        , "DESCRIPTION:" <> icsText (T.intercalate "\n" (classLine "" s <> ["Your booking: " <> bookingUrl ctx t]))
-        , "URL:" <> bookingUrl ctx t
+        , "DESCRIPTION:" <> icsText (T.intercalate "\n" (classLine "" s <> ["Your booking: " <> calendarUrl]))
+        , "URL:" <> calendarUrl
         , "END:VEVENT"
         , "END:VCALENDAR"
         ]
@@ -203,6 +215,10 @@ bookingIcs ctx venues now t s =
   where
     host = T.takeWhile (/= '/') (T.drop 2 (snd (T.breakOn "//" (bcBaseUrl ctx))))
     location = venueLocation venues (slotArea s)
+    calendarUrl = bcBaseUrl ctx <> "/booking/" <> calendarCode t
+    titlePrefix = case calendarStatus t of
+      ConfirmedClass -> ""
+      PaymentPending -> "[PAYMENT PENDING] "
     slotUtc hhmm = do
       lt <- parseTimeM True defaultTimeLocale "%Y-%m-%d %H:%M" (T.unpack (slotDate s <> " " <> hhmm)) :: Maybe LocalTime
       pure (localTimeToUTC (minutesToTimeZone (offsetSeconds (bcTzOffset ctx) `div` 60)) lt)

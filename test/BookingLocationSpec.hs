@@ -8,7 +8,7 @@ import Data.Time.Clock (UTCTime)
 import Network.HTTP.Client (defaultManagerSettings, newManager)
 import Swwstructor.Content (SlotSpec (..))
 import Swwstructor.Server.Booking (Ticket (..), newBookingStore)
-import Swwstructor.Server.Notify (BookingCtx (..), bookingIcs)
+import Swwstructor.Server.Notify (BookingCtx (..), CalendarTicket (..), CalendarStatus (..), bookingIcs)
 import Swwstructor.Server.Venues (Venue (..), venueLocation)
 import System.Directory (getTemporaryDirectory, removeFile)
 import System.IO (hClose, openTempFile)
@@ -29,7 +29,8 @@ main = do
       -- A class months away must already contain its address. This is the
       -- actual calendar renderer, with no network, paid ticket or booking write.
       now = read "2026-10-29 12:00:00 UTC" :: UTCTime
-      ics venues = T.replace "\r\n " "" (bookingIcs ctx venues now ticket slot)
+      ics venues = T.replace "\r\n " "" (bookingIcs ctx venues now (CalendarTicket (tkCode ticket) (tkProduct ticket) ConfirmedClass) slot)
+      pending = T.replace "\r\n " "" (bookingIcs ctx [venue] now (CalendarTicket (tkCode ticket) (tkProduct ticket) PaymentPending) slot)
       location = "UKIYO, 8 Slingsby Place, London WC2E 9AB"
       check label ok = unless ok (fail label)
   check "a uniquely matched venue resolves its full address" (venueLocation [venue] area == location)
@@ -38,4 +39,5 @@ main = do
   check "missing venues retain the authored area" (venueLocation [] area == area && "LOCATION:Ukiyo\\, Covent Garden\r\n" `T.isInfixOf` ics [])
   check "inactive venues are not selected" (venueLocation [venue {vnActive = False}] area == area)
   check "ambiguous venues never select an arbitrary address" (venueLocation [venue, venue {vnId = "other", vnAddress = "Elsewhere"}] area == area)
+  check "pending and confirmed ICS differ only by the title prefix" ("SUMMARY:[PAYMENT PENDING] " `T.isInfixOf` pending && T.replace "[PAYMENT PENDING] " "" pending == ics [venue])
   putStrLn "Booking location checks passed."

@@ -25,6 +25,7 @@ module Swwstructor.Server.Booking
   , newBookingStore
   , listTickets
   , newTicketCode
+  , isTicketCode
   , issueTicket
   , redeemTicket
   , setEventId
@@ -253,6 +254,11 @@ replaceTicket t' = map (\t -> if tkCode t == tkCode t' then t' else t)
 -- ---------------------------------------------------------------------------
 -- Ticket codes
 -- ---------------------------------------------------------------------------
+
+isTicketCode :: Text -> Bool
+isTicketCode code =
+  T.length code == 9 && T.index code 4 == '-'
+    && T.all (`elem` ("23456789ABCDEFGHJKMNPQRSTVWXYZ" :: String)) (T.take 4 code <> T.drop 5 code)
 
 -- | A fresh 8-character code (Crockford-ish alphabet, no confusable glyphs),
 -- shown as @XXXX-XXXX@. ~39 bits — unguessable at booking-form rates; still

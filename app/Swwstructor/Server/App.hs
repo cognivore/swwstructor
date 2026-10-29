@@ -47,6 +47,7 @@ import System.Directory (doesFileExist)
 import System.FilePath ((</>))
 import Web.Scotty
   ( ActionM
+  , finish
   , ScottyM
   , body
   , captureParam
@@ -132,6 +133,7 @@ import Swwstructor.Server.Booking
   , Redemption (redSlotId)
   , Ticket (tkCode, tkProduct, tkRedemption)
   , issueTicket
+  , isTicketCode
   , listTickets
   , newTicketCode
   , redeemTicket
@@ -140,13 +142,15 @@ import Swwstructor.Server.Booking
 import Swwstructor.Server.Media (deleteMedia, listAssets, listMedia, resolveMedia, saveMedia)
 import Swwstructor.Server.Notify
   ( BookingCtx (bcSiteName, bcVenueNoun, bcVenues)
+  , CalendarTicket (..)
+  , CalendarStatus (..)
   , bookingIcs
   , ensureReservationSideEffects
   , siteMaxWeekly
   , siteSlots
   )
 import Swwstructor.Server.Venues
-  ( Venue (Venue, vnAddress, vnMapUrl, vnName)
+  ( Venue (Venue, vnMapUrl)
   , VenueStore
   , deleteVenue
   , listVenues
@@ -165,8 +169,13 @@ import Swwstructor.Server.SecretStore
   , secretText
   )
 import Swwstructor.Server.Store (SiteStore, modifySite, readSite)
+import Swwstructor.Server.PaymentCodes
+  ( PaymentCode (..), PaymentCodeStore, newPaymentCode, isPaymentCode
+  , lookupPaymentCode, issuePaymentCode, selectPaymentPreview
+  )
 import Swwstructor.Server.Stripe
-  ( PaymentInfo (piCode, piId, piProduct, piSeats, piSucceeded)
+  ( PaymentInfo (piReference, piId, piProduct, piSeats, piSucceeded)
+  , CheckoutReference (..)
   , peekEventType
   , stripeCreate
   , verifyStripeSig
@@ -212,6 +221,8 @@ data AppEnv = AppEnv
   -- pruned as they expire — each challenge reveals the email at most once
   , aeBookings :: !BookingStore
   -- ^ tickets + reservations (for @scheduleClass@ sections)
+  , aePaymentCodes :: !PaymentCodeStore
+  -- ^ paid references and calendar previews, with no lesson entitlement
   , aeBookingCtx :: !BookingCtx
   -- ^ the notification context (calendar invites + booking mail)
   , aeVenues :: !VenueStore
@@ -453,24 +464,21 @@ handleBuy env = do
               pure $ case [i | i <- items, ciPriceId i == priceId] of
                 (i : _) -> (ciName i, ciSeats i)
                 [] -> (priceId, "1")
-          -- Only a catalogue product is a class ticket. A product written
-          -- into the site content (a one-off payment check, say) is a plain
-          -- payment: no code, so its payment can never become a seat.
-          mcode <- case item of
-            ItemPrice _ _ -> Just <$> liftIO (newTicketCode (aeBookings env))
-            ItemAdHoc _ -> pure Nothing
-          let req =
+          reference <- case item of
+            ItemPrice _ _ -> ClassCode <$> liftIO (newTicketCode (aeBookings env))
+            ItemAdHoc _ -> PaymentOnlyCode <$> liftIO (newPaymentCode (aePaymentCodes env))
+          -- Separate metadata keys preserve the distinction even if an older
+          -- server receives this webhook after a rollback.
+          let (code, fields, description) = case reference of
+                ClassCode c -> (c, [("sww_code", c), ("sww_seats", seats)], bcSiteName (aeBookingCtx env) <> " class ticket " <> c <> ": reserve your class at " <> aeBaseUrl env <> "/classes")
+                PaymentOnlyCode c -> (c, [("sww_payment_code", c)], bcSiteName (aeBookingCtx env) <> " payment-only code " <> c <> ": not eligible for a lesson")
+              req =
                 CheckoutRequest
                   (item :| [])
-                  (Url (aeBaseUrl env <> maybe "/success" ("/success?code=" <>) mcode))
+                  (Url (aeBaseUrl env <> "/success?code=" <> code))
                   (Url (aeBaseUrl env <> "/cancel"))
-                  ([("sww_product", productName), ("sww_seats", seats)] <> [("sww_code", c) | Just c <- [mcode]])
-                  ( ( \code ->
-                        bcSiteName (aeBookingCtx env) <> " class ticket " <> code
-                          <> ": reserve your class at " <> aeBaseUrl env <> "/classes"
-                    )
-                      <$> mcode
-                  )
+                  ([("sww_product", productName)] <> fields)
+                  (Just description)
           res <- liftIO (stripeCreate (aeManager env) sk req)
           case res of
             Right session -> do
@@ -510,12 +518,23 @@ handleWebhook env = do
             -- unread, so no customer data is processed here.
             when (evType == "payment_intent.succeeded") $
               case webhookPaymentOf rawBytes of
-                Just info | piSucceeded info, Just code <- piCode info -> do
-                  et <- liftIO (issueTicket (aeBookings env) (piId info) code (fromMaybe "Class" (piProduct info)) (fromMaybe "1" (piSeats info)))
-                  liftIO $ case et of
-                    Right (t, True) -> putStrLn ("[booking] ticket " <> T.unpack (tkCode t) <> " issued for " <> T.unpack (tkProduct t))
-                    Right (_, False) -> pure ()
-                    Left err -> putStrLn ("[booking] ticket issuance refused: " <> T.unpack err)
+                Just info | piSucceeded info -> case piReference info of
+                  Just (ClassCode code) -> do
+                    et <- liftIO (issueTicket (aeBookings env) (piId info) code (fromMaybe "Class" (piProduct info)) (fromMaybe "1" (piSeats info)))
+                    liftIO $ case et of
+                      Right (t, True) -> putStrLn ("[booking] ticket " <> T.unpack (tkCode t) <> " issued for " <> T.unpack (tkProduct t))
+                      Right (_, False) -> pure ()
+                      Left err -> putStrLn ("[booking] ticket issuance refused: " <> T.unpack err)
+                  Just (PaymentOnlyCode code) -> do
+                    result <- liftIO (issuePaymentCode (aePaymentCodes env) (piId info) code (fromMaybe "Payment" (piProduct info)))
+                    case result of
+                      Right _ -> pure ()
+                      Left err -> do
+                        liftIO (putStrLn ("[payment code] issuance failed: " <> T.unpack err))
+                        status status503
+                        text "payment recording deferred; please retry"
+                        finish
+                  Nothing -> liftIO (putStrLn "[stripe webhook] no unambiguous recognised reference — skipped")
                 _ -> liftIO (putStrLn "[stripe webhook] payment without a ticket code — not ours, skipped")
             text "ok"
           else do
@@ -536,19 +555,21 @@ handleSuccess env = do
   let th = siteTheme site
   mcode <- queryParamMaybe "code"
   tickets <- liftIO (listTickets (aeBookings env))
+  payment <- maybe (pure Nothing) (liftIO . lookupPaymentCode (aePaymentCodes env)) mcode
   case mcode of
     Just code
+      | Just p <- payment -> htmlOf (paymentCodePage th (aeAnalytics env) p)
       | (t : _) <- [t | t <- tickets, tkCode t == code] -> htmlOf (ticketPage th (aeAnalytics env) t)
-      | looksLikeCode code -> htmlOf (pendingTicketPage th (aeAnalytics env) code)
+      | isPaymentCode code -> htmlOf (messagePage th (aeAnalytics env) "Your payment check is being confirmed" (para "Refresh this page in a moment. This payment-only code will be recognised once Stripe confirms payment; it cannot reserve a lesson." <> codeLine code))
+      | isTicketCode code -> htmlOf (pendingTicketPage th (aeAnalytics env) code)
     _ -> htmlOf (simplePage th (aeAnalytics env) "Thank you" "Your payment was received. Stripe's receipt is on its way.")
 
--- | The shape of a minted code (@XXXX-XXXX@ from the code alphabet) — only
--- such a value is ever echoed back onto a page.
-looksLikeCode :: Text -> Bool
-looksLikeCode c =
-  T.length c == 9
-    && T.index c 4 == '-'
-    && T.all (`elem` ("23456789ABCDEFGHJKMNPQRSTVWXYZ-" :: String)) c
+paymentCodePage :: Theme -> Maybe Analytics -> PaymentCode -> Html
+paymentCodePage th an p = messagePage th an "Payment recorded — payment-only code" $
+  para ("Your payment for \x201C" <> pcProduct p <> "\x201D is recorded. This code is for that payment only and is not eligible for a lesson:")
+    <> codeLine (pcCode p)
+    <> para "Try it on the Classes page to exercise the calendar download. The preview is marked [PAYMENT PENDING] and reserves no places."
+    <> elAttr "p" [] (elAttr "a" [("href", "/classes"), ("class", "sww-buy")] (esc "Try the calendar preview"))
 
 -- | The post-payment page: the ticket code, and where to cash it in.
 ticketPage :: Theme -> Maybe Analytics -> Ticket -> Html
@@ -588,11 +609,34 @@ scheduleButton =
 handleSchedule :: AppEnv -> ActionM ()
 handleSchedule env = do
   site <- currentSite env
-  let th = siteTheme site
   code <- fromMaybe "" <$> formParamMaybe "code"
   name <- fromMaybe "" <$> formParamMaybe "name"
   slotId <- fromMaybe "" <$> formParamMaybe "slot"
-  let slots = siteSlots site
+  payment <- liftIO (lookupPaymentCode (aePaymentCodes env) code)
+  case payment of
+    Just p -> case slotById (siteSlots site) slotId of
+      Nothing -> do
+        status status400
+        htmlOf (simplePage (siteTheme site) (aeAnalytics env) "Payment code recognised" (paymentOnlyMessage p <> " Pick a class date to try the calendar preview."))
+      Just _ -> do
+        saved <- liftIO (selectPaymentPreview (aePaymentCodes env) (pcCode p) slotId)
+        case saved of
+          Left err -> do
+            liftIO (putStrLn ("[payment preview] " <> T.unpack err))
+            status status503
+            htmlOf (simplePage (siteTheme site) (aeAnalytics env) "Preview unavailable" "Your payment is recorded, but the calendar preview could not be saved. No place was reserved. Please try again.")
+          Right _ -> do
+            status status303
+            setHeader "Location" (TL.fromStrict ("/booking/" <> pcCode p))
+    Nothing -> reserveLesson env site code name slotId
+
+paymentOnlyMessage :: PaymentCode -> Text
+paymentOnlyMessage p = "We found your code, but it is for \x201C" <> pcProduct p <> "\x201D only and isn't eligible for a lesson. No place has been reserved."
+
+reserveLesson :: AppEnv -> SiteSpec -> Text -> Text -> Text -> ActionM ()
+reserveLesson env site code name slotId = do
+  let th = siteTheme site
+      slots = siteSlots site
       oops msg = do
         status status400
         htmlOf (simplePage th (aeAnalytics env) "Could not reserve that" msg)
@@ -623,51 +667,65 @@ handleBookingPage :: AppEnv -> ActionM ()
 handleBookingPage env = do
   site <- currentSite env
   let th = siteTheme site
-      ctx = aeBookingCtx env
   found <- lookupBooking env
-  venues <- liftIO (bcVenues ctx)
   case found of
     Nothing -> do
       status status404
       htmlOf (simplePage th (aeAnalytics env) "No such booking" "That booking code was not recognised \x2014 check it against your Stripe receipt.")
-    Just (t, Nothing) -> htmlOf (ticketPage th (aeAnalytics env) t)
-    Just (t, Just s) -> do
-      let whereHtml = case venueForArea venues (slotArea s) of
-            Just v ->
-              para ("Where: " <> vnName v <> ", " <> vnAddress v)
-                <> (if T.null (vnMapUrl v) then mempty else elAttr "p" [("class", "sww-paragraph")] (elAttr "a" [("class", "sww-link"), ("href", vnMapUrl v)] (esc "Open the map")))
-            _ -> para ("Where: " <> slotArea s)
-      htmlOf . messagePage th (aeAnalytics env) "You're booked!" $
+    Just (LessonBooking t Nothing) -> htmlOf (ticketPage th (aeAnalytics env) t)
+    Just (PaymentPreview p Nothing) -> htmlOf (paymentCodePage th (aeAnalytics env) p)
+    Just (LessonBooking t (Just s)) -> renderDetails (tkCode t) (tkProduct t) s "You're booked!" mempty
+    Just (PaymentPreview p (Just s)) -> renderDetails (pcCode p) (pcProduct p) s "[PAYMENT PENDING] Calendar preview" (para (paymentOnlyMessage p))
+  where
+    renderDetails code productName s title notice = do
+      site <- currentSite env
+      venues <- liftIO (bcVenues (aeBookingCtx env))
+      let whereHtml = para ("Where: " <> venueLocation venues (slotArea s))
+            <> case venueForArea venues (slotArea s) of
+              Just v | not (T.null (vnMapUrl v)) -> elAttr "p" [("class", "sww-paragraph")] (elAttr "a" [("class", "sww-link"), ("href", vnMapUrl v)] (esc "Open the map"))
+              _ -> mempty
+      htmlOf . messagePage (siteTheme site) (aeAnalytics env) title $
         htmlConcat
-          [ para ("When: " <> slotLabel s)
-          , if T.null (T.strip (slotDescription s)) then mempty else para ("What: " <> tkProduct t <> " \x2014 " <> markdownPlain (slotDescription s))
+          [ notice
+          , para ("When: " <> slotLabel s)
+          , if T.null (T.strip (slotDescription s)) then mempty else para ("What: " <> productName <> " \x2014 " <> markdownPlain (slotDescription s))
           , whereHtml
-          , para ("Ticket: " <> tkCode t <> ". Keep it: this page lives at " <> aeBaseUrl env <> "/booking/" <> tkCode t <> ".")
-          , elAttr "p" [] (elAttr "a" [("href", "/booking/" <> tkCode t <> "/calendar.ics"), ("class", "sww-buy sww-schedsubmit"), ("style", "display:inline-block;text-decoration:none")] (esc "Add to my calendar"))
+          , para ("Code: " <> code <> ". Keep it: this page lives at " <> aeBaseUrl env <> "/booking/" <> code <> ".")
+          , elAttr "p" [] (elAttr "a" [("href", "/booking/" <> code <> "/calendar.ics"), ("class", "sww-buy sww-schedsubmit"), ("style", "display:inline-block;text-decoration:none")] (esc "Add to my calendar"))
           ]
 
 handleBookingIcs :: AppEnv -> ActionM ()
 handleBookingIcs env = do
   found <- lookupBooking env
-  case found of
-    Just (t, Just s) -> do
+  let entry = case found of
+        Just (LessonBooking t (Just s)) -> Just (CalendarTicket (tkCode t) (tkProduct t) ConfirmedClass, s)
+        Just (PaymentPreview p (Just s)) -> Just (CalendarTicket (pcCode p) (pcProduct p) PaymentPending, s)
+        _ -> Nothing
+  case entry of
+    Just (t, s) -> do
       let ctx = aeBookingCtx env
       now <- liftIO getCurrentTime
       venues <- liftIO (bcVenues ctx)
       setHeader "Content-Type" "text/calendar; charset=utf-8"
-      setHeader "Content-Disposition" ("attachment; filename=\"" <> TL.fromStrict (tkCode t) <> ".ics\"")
+      setHeader "Content-Disposition" ("attachment; filename=\"" <> TL.fromStrict (calendarCode t) <> ".ics\"")
       raw (BL.fromStrict (TE.encodeUtf8 (bookingIcs ctx venues now t s)))
     _ -> status status404 >> text "no such booking"
 
--- | The ticket a @:code@ path names, with its reserved slot (if any).
-lookupBooking :: AppEnv -> ActionM (Maybe (Ticket, Maybe SlotSpec))
+data BookingView = LessonBooking !Ticket !(Maybe SlotSpec) | PaymentPreview !PaymentCode !(Maybe SlotSpec)
+
+-- | Both code kinds reach the same page and calendar handler, while only
+-- LessonBooking can carry a reservation. Preview selection is separate state.
+lookupBooking :: AppEnv -> ActionM (Maybe BookingView)
 lookupBooking env = do
   code <- T.toUpper . T.strip <$> captureParam "code"
   site <- currentSite env
   tickets <- liftIO (listTickets (aeBookings env))
-  pure $ case [t | t <- tickets, tkCode t == code] of
-    (t : _) -> Just (t, tkRedemption t >>= (slotById (siteSlots site) . redSlotId))
-    [] -> Nothing
+  payment <- liftIO (lookupPaymentCode (aePaymentCodes env) code)
+  pure $ case payment of
+    Just p -> Just (PaymentPreview p (pcPreviewSlot p >>= slotById (siteSlots site)))
+    Nothing -> case [t | t <- tickets, tkCode t == code] of
+      (t : _) -> Just (LessonBooking t (tkRedemption t >>= (slotById (siteSlots site) . redSlotId)))
+      [] -> Nothing
 
 slotById :: [SlotSpec] -> Text -> Maybe SlotSpec
 slotById slots sid = listToMaybe [s | s <- slots, slotIdOf s == sid]
