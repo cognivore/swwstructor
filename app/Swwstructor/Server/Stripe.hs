@@ -7,10 +7,8 @@
 -- the reference live interpreter.
 module Swwstructor.Server.Stripe
   ( stripeCreate
-  , stripeGetSession
-  , SessionInfo (..)
-  , sessionInfoOf
-  , webhookSessionOf
+  , PaymentInfo (..)
+  , webhookPaymentOf
   , verifyStripeSig
   , peekEventType
   ) where
@@ -95,79 +93,41 @@ lbsToString :: BL.ByteString -> String
 lbsToString = T.unpack . TE.decodeUtf8 . BL.toStrict
 
 -- ---------------------------------------------------------------------------
--- Session lookup (post-payment verification on the success page)
+-- Payment confirmation (no customer data)
 -- ---------------------------------------------------------------------------
 
--- | What fulfilment needs to know about a Checkout session. The same shape is
--- parsed from a webhook event's @data.object@ ('sessionInfoOf').
-data SessionInfo = SessionInfo
-  { siId :: !Text
-  , siPaid :: !Bool
-  , siEmail :: !(Maybe Text)
-  , siProduct :: !(Maybe Text)
-  -- ^ our own @sww_product@ metadata, set at session creation
-  , siSeats :: !(Maybe Text)
-  -- ^ our own @sww_seats@ metadata (seat semantics of the bought product)
+-- | What fulfilment needs to know about a payment — and nothing else. It is
+-- read from a @payment_intent.succeeded@ event: an unexpanded PaymentIntent
+-- made by Checkout carries no customer details (the customer, the card and
+-- the billing details are only ids), so no personal data is ever parsed,
+-- kept or logged; the ticket itself rides in our own metadata.
+data PaymentInfo = PaymentInfo
+  { piId :: !Text
+  -- ^ the PaymentIntent id (@pi_…@) — the idempotency key for issuance
+  , piSucceeded :: !Bool
+  , piCode :: !(Maybe Text)
+  -- ^ our @sww_code@ metadata: the ticket code minted before checkout
+  , piProduct :: !(Maybe Text)
+  -- ^ our @sww_product@ metadata
+  , piSeats :: !(Maybe Text)
+  -- ^ our @sww_seats@ metadata (seat semantics of the bought product)
   }
   deriving (Show)
 
--- | Fetch a Checkout session by id. Only ids of our own shape are accepted
--- (defence against turning this into a proxy).
-stripeGetSession :: Manager -> SecretValue -> Text -> IO (Either Text SessionInfo)
-stripeGetSession mgr sk sessionId
-  | not (looksLikeSessionId sessionId) = pure (Left "not a checkout session id")
-  | otherwise = do
-      ereq <-
-        try (parseRequest ("https://api.stripe.com/v1/checkout/sessions/" <> T.unpack sessionId))
-          :: IO (Either SomeException Request)
-      case ereq of
-        Left e -> pure (Left (T.pack (show e)))
-        Right base -> do
-          let httpReq =
-                base
-                  { method = "GET"
-                  , requestHeaders = [("Authorization", TE.encodeUtf8 ("Bearer " <> secretText sk))]
-                  }
-          res <- try (httpLbs httpReq mgr) :: IO (Either SomeException (Response BL.ByteString))
-          pure $ case res of
-            Left (e :: SomeException) -> Left (T.pack (show e))
-            Right resp ->
-              let code = statusCode (responseStatus resp)
-                  bodyStr = lbsToString (responseBody resp)
-               in if code >= 200 && code < 300
-                    then do
-                      v <- either (Left . T.pack) Right (decode bodyStr)
-                      maybe (Left "unparseable session") Right (sessionInfoOf v)
-                    else Left ("HTTP " <> T.pack (show code) <> ": " <> T.pack (take 300 bodyStr))
-
--- | Read a session object (an API response, or a webhook's @data.object@).
-sessionInfoOf :: JSON -> Maybe SessionInfo
-sessionInfoOf v = do
-  sid <- case v .: "id" of
-    Right (JStr s) -> Just (T.pack s)
+paymentInfoOf :: JSON -> Maybe PaymentInfo
+paymentInfoOf v = do
+  pid <- case v .: "id" of
+    Right (JStr s) | "pi_" `T.isPrefixOf` T.pack s -> Just (T.pack s)
     _ -> Nothing
-  let paid = case v .:? "payment_status" of
-        Just (JStr "paid") -> True
+  let succeeded = case v .:? "status" of
+        Just (JStr "succeeded") -> True
         _ -> False
-      email = case v .:? "customer_details" of
-        Just cd@JObj{} -> case cd .:? "email" of
-          Just (JStr e) -> Just (T.pack e)
-          _ -> Nothing
-        _ -> Nothing
       meta k = case v .:? "metadata" of
         Just md@JObj{} -> case md .:? k of
           Just (JStr p) -> Just (T.pack p)
           _ -> Nothing
         _ -> Nothing
-      product' = meta "sww_product"
-      seats = meta "sww_seats"
-  pure (SessionInfo sid paid email product' seats)
-
-looksLikeSessionId :: Text -> Bool
-looksLikeSessionId t =
-  "cs_" `T.isPrefixOf` t
-    && T.length t <= 128
-    && T.all (\c -> c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) t
+  pure (PaymentInfo pid succeeded (meta "sww_code") (meta "sww_product") (meta "sww_seats"))
 
 -- ---------------------------------------------------------------------------
 -- Webhook signature verification
@@ -213,9 +173,9 @@ peekEventType raw =
       Left _ -> "unknown"
     Left _ -> "unknown"
 
--- | The Checkout session inside a (verified!) webhook event body.
-webhookSessionOf :: ByteString -> Maybe SessionInfo
-webhookSessionOf raw = do
+-- | The PaymentIntent inside a (verified!) webhook event body.
+webhookPaymentOf :: ByteString -> Maybe PaymentInfo
+webhookPaymentOf raw = do
   v <- either (const Nothing) Just (decode (BC.unpack raw))
   d <- case v .:? "data" of
     Just o@JObj{} -> Just o
@@ -223,4 +183,4 @@ webhookSessionOf raw = do
   obj <- case d .:? "object" of
     Just o@JObj{} -> Just o
     _ -> Nothing
-  sessionInfoOf obj
+  paymentInfoOf obj

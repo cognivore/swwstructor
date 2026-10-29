@@ -6,12 +6,17 @@
 -- "Swwstructor.Server.Store" — one JSON file under the data dir, held in an
 -- 'MVar', written atomically on every change, surviving restarts.
 --
--- A 'Ticket' is issued (idempotently, keyed by the Stripe Checkout session id)
--- when a payment lands — by the webhook, by the success page, whichever runs
--- first. Cashing it in ('redeemTicket') attaches a 'Redemption': the slot, the
--- student's name, and — filled in as the side effects complete — the Google
--- Calendar event id and the ledger of notifications already sent (what makes
--- the reminder loop idempotent, NLCC-style).
+-- No personal data lives here: a ticket is a reference code, what was
+-- bought, and — once reserved — a slot and the name the student chose to be
+-- called. Everything that identifies a person (email, card, billing details)
+-- stays with Stripe; the Stripe receipt is what carries the code to them.
+--
+-- A 'Ticket' is issued (idempotently, keyed by the Stripe PaymentIntent id)
+-- when the payment-succeeded webhook lands; its code was minted before
+-- checkout ('newTicketCode') and rode through Stripe as metadata. Cashing it
+-- in ('redeemTicket') attaches a 'Redemption': the slot, the preferred name,
+-- and — filled in as the side effects complete — the staff calendar event id
+-- and the ledger of what has been done (what keeps the loop idempotent).
 module Swwstructor.Server.Booking
   ( Ticket (..)
   , Redemption (..)
@@ -19,6 +24,7 @@ module Swwstructor.Server.Booking
   , BookingStore
   , newBookingStore
   , listTickets
+  , newTicketCode
   , issueTicket
   , redeemTicket
   , setEventId
@@ -47,25 +53,24 @@ import System.IO (hPutStrLn, stderr)
 data Redemption = Redemption
   { redSlotId :: !Text
   , redName :: !Text
-  -- ^ the student's name, as they entered it
+  -- ^ the name the student asked to be called — nothing more
   , redCreatedAt :: !Text
   -- ^ ISO-8601 UTC
   , redEventId :: !(Maybe Text)
-  -- ^ the Google Calendar event id, once created (retried by the reminder
-  -- loop while 'Nothing')
+  -- ^ the staff calendar event id, once created (retried by the loop while
+  -- 'Nothing')
   }
   deriving (Eq, Show)
 
 -- | One paid class ticket.
 data Ticket = Ticket
   { tkCode :: !Text
-  -- ^ the human code the student types to redeem (unique — the ticket's key)
-  , tkEmail :: !Text
-  -- ^ buyer email from checkout, lower-cased
+  -- ^ the reference code the student types to redeem (unique — the
+  -- ticket's key); printed on their Stripe receipt
   , tkProduct :: !Text
   -- ^ display name of what was bought
-  , tkSessionId :: !Text
-  -- ^ Stripe Checkout session id (idempotency key for issuance)
+  , tkPaymentRef :: !Text
+  -- ^ Stripe PaymentIntent id (idempotency key for issuance)
   , tkCreatedAt :: !Text
   -- ^ ISO-8601 UTC
   , tkSeats :: !Text
@@ -74,15 +79,14 @@ data Ticket = Ticket
   -- Sourced from the Stripe product's @sww_seats@ metadata; default @\"1\"@.
   , tkRedemption :: !(Maybe Redemption)
   , tkNotesSent :: ![Text]
-  -- ^ notification ledger (@\"ticket\"@, @\"confirm\"@, @\"t7\"@, @\"day0\"@) —
-  -- claimed BEFORE sending, so a once-a-minute loop can never double-send
+  -- ^ ledger of one-off side effects done (@\"venue\"@: the week-ahead
+  -- venue announcement on the staff calendar event)
   }
   deriving (Eq, Show)
 
 -- | Why a redemption was refused (each gets its own user-facing message).
 data RedeemError
   = CodeNotFound
-  | EmailMismatch
   | AlreadyRedeemed !Redemption
   | SlotUnknown
   | SlotFull
@@ -153,23 +157,23 @@ weekSessions :: [Ticket] -> [SlotSpec] -> Text -> Int
 weekSessions ts slots wk =
   length [() | s <- slots, mondayOf (slotDate s) == wk, takenFor ts s > 0]
 
--- | Issue a ticket for a paid checkout session. Idempotent on the session id:
--- the webhook and the success page can both call this and exactly one ticket
--- exists afterwards. Returns the ticket and whether this call created it.
+-- | Issue the ticket for a succeeded payment, under the code minted before
+-- checkout. Idempotent on the payment: a redelivered webhook finds the ticket
+-- it already made. Returns the ticket and whether this call created it; a
+-- code already held by a DIFFERENT payment is refused (never reassigned).
 issueTicket :: BookingStore -> Text -> Text -> Text -> Text -> IO (Either Text (Ticket, Bool))
-issueTicket store sessionId email product' seats = do
+issueTicket store paymentRef code product' seats = do
   now <- iso8601Now
-  code <- freshCode store
   modifyStore store $ \ts ->
-    case [t | t <- ts, tkSessionId t == sessionId] of
-      (t : _) -> (ts, Right (t, False))
-      [] ->
+    case ([t | t <- ts, tkPaymentRef t == paymentRef], [t | t <- ts, tkCode t == code]) of
+      (t : _, _) -> (ts, Right (t, False))
+      ([], _ : _) -> (ts, Left ("code " <> code <> " already belongs to another payment"))
+      ([], []) ->
         let t =
               Ticket
                 { tkCode = code
-                , tkEmail = T.toLower (T.strip email)
                 , tkProduct = product'
-                , tkSessionId = sessionId
+                , tkPaymentRef = paymentRef
                 , tkCreatedAt = now
                 , tkSeats = normSeats seats
                 , tkRedemption = Nothing
@@ -186,8 +190,8 @@ issueTicket store sessionId email product' seats = do
 -- A whole-class ticket needs the slot untouched; an n-seat ticket needs n
 -- free places; and a booking that would OPEN a new session is refused once
 -- the week already teaches @maxWeekly@ sessions (0 = no cap).
-redeemTicket :: BookingStore -> [SlotSpec] -> Int -> Text -> Text -> Text -> Text -> IO (Either RedeemError Ticket)
-redeemTicket store slots maxWeekly code email name slotId = do
+redeemTicket :: BookingStore -> [SlotSpec] -> Int -> Text -> Text -> Text -> IO (Either RedeemError Ticket)
+redeemTicket store slots maxWeekly code name slotId = do
   now <- iso8601Now
   modifyStore store $ \ts ->
     let norm = T.toUpper (T.filter (/= '-') (T.strip code))
@@ -195,7 +199,6 @@ redeemTicket store slots maxWeekly code email name slotId = do
      in case [t | t <- ts, matches t] of
           [] -> (ts, Left CodeNotFound)
           (t : _)
-            | T.toLower (T.strip email) /= tkEmail t -> (ts, Left EmailMismatch)
             | Just r <- tkRedemption t -> (ts, Left (AlreadyRedeemed r))
             | otherwise ->
                 case [s | s <- slots, slotIdOf s == slotId] of
@@ -253,9 +256,10 @@ replaceTicket t' = map (\t -> if tkCode t == tkCode t' then t' else t)
 
 -- | A fresh 8-character code (Crockford-ish alphabet, no confusable glyphs),
 -- shown as @XXXX-XXXX@. ~39 bits — unguessable at booking-form rates; still
--- checked for collision against existing tickets.
-freshCode :: BookingStore -> IO Text
-freshCode store = do
+-- checked for collision against existing tickets. Minted when checkout starts
+-- (an abandoned checkout simply never becomes a ticket).
+newTicketCode :: BookingStore -> IO Text
+newTicketCode store = do
   ts <- listTickets store
   let go = do
         bytes <- getRandomBytes 8 :: IO BS.ByteString
@@ -315,9 +319,8 @@ ticketToJSON :: Ticket -> JSON
 ticketToJSON t =
   JObj $
     [ ("code", JStr (T.unpack (tkCode t)))
-    , ("email", JStr (T.unpack (tkEmail t)))
     , ("product", JStr (T.unpack (tkProduct t)))
-    , ("sessionId", JStr (T.unpack (tkSessionId t)))
+    , ("paymentRef", JStr (T.unpack (tkPaymentRef t)))
     , ("createdAt", JStr (T.unpack (tkCreatedAt t)))
     , ("seats", JStr (T.unpack (tkSeats t)))
     , ("notesSent", JArr [JStr (T.unpack n) | n <- tkNotesSent t])
@@ -338,9 +341,11 @@ ticketToJSON t =
 ticketFromJSON :: JSON -> Either String Ticket
 ticketFromJSON v = do
   code <- txt v "code"
-  email <- txt v "email"
   product' <- txt v "product"
-  sess <- txt v "sessionId"
+  -- Files from before the PII-free redesign keyed tickets by Checkout
+  -- session and kept the buyer's email: the email is not read (and so is
+  -- gone at the next write); the session id still serves as the key.
+  ref <- either (const (txt v "sessionId")) Right (txt v "paymentRef")
   created <- txt v "createdAt"
   let seats = case v .:? "seats" of
         Just (JStr s) | not (null s) -> T.pack s
@@ -362,9 +367,8 @@ ticketFromJSON v = do
   pure
     Ticket
       { tkCode = code
-      , tkEmail = email
       , tkProduct = product'
-      , tkSessionId = sess
+      , tkPaymentRef = ref
       , tkCreatedAt = created
       , tkSeats = seats
       , tkRedemption = red

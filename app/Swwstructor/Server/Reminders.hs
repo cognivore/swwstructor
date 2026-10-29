@@ -1,15 +1,16 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
--- | The booking reminder loop: a one-minute in-process tick (the NLCC
+-- | The booking upkeep loop: a one-minute in-process tick (the NLCC
 -- pattern — no cron, no external queue; systemd restarts the process, the
 -- ticket ledger makes every tick idempotent). Each tick it
 --
---   1. retries unfinished side effects: tickets whose \"here is your code\"
---      mail hasn't gone out, reservations missing their calendar event or
---      confirmation mail (e.g. Google was down at booking time), and
---   2. sends the dated nags — one week before the class (from 09:00 local)
---      and on the day itself (from 07:00 local).
+--   1. retries unfinished side effects: reservations whose staff calendar
+--      event could not be created at booking time (e.g. Google was down),
+--   2. posts week-ahead venue announcements onto those events (from 09:00
+--      local, a week before each class).
+--
+-- Nothing here contacts a student: the site holds no way to.
 module Swwstructor.Server.Reminders
   ( startReminderLoop
   ) where
@@ -23,9 +24,9 @@ import Data.Time.Format (defaultTimeLocale, formatTime)
 import Swwstructor.Server.Booking (listTickets)
 import Swwstructor.Server.Notify
   ( BookingCtx (bcStore, bcTzOffset)
+  , announceVenues
   , ensureReservationSideEffects
-  , notifyTicketIssued
-  , sendDueReminders
+  , offsetSeconds
   )
 
 startReminderLoop :: BookingCtx -> IO ()
@@ -45,18 +46,5 @@ tick ctx = do
       hour = read (formatTime defaultTimeLocale "%H" local) :: Int
   tickets <- listTickets (bcStore ctx)
   -- Heal anything a handler could not finish at request time.
-  mapM_ (notifyTicketIssued ctx) tickets
   mapM_ (ensureReservationSideEffects ctx) tickets
-  -- The dated nags.
-  sendDueReminders ctx today hour
-
--- | @\"+01:00\"@ → 3600. Malformed offsets read as UTC.
-offsetSeconds :: T.Text -> Int
-offsetSeconds t = case T.unpack t of
-  (sign : rest)
-    | sign `elem` ("+-" :: String)
-    , (hh, ':' : mm) <- span (/= ':') rest
-    , [(h, "")] <- reads hh
-    , [(m, "")] <- reads mm ->
-        (if sign == '-' then negate else id) (h * 3600 + m * 60)
-  _ -> 0
+  announceVenues ctx today hour

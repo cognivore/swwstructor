@@ -493,7 +493,7 @@ sectionFields partials s = case s of
       <> ipt "text" "title" "Title above the grid (optional)" (orEmpty t)
       <> txtArea "intro" "Intro line (optional)" (orEmpty intro)
   ScheduleClass t intro maxWeekly slots ->
-    elAttr "p" [("class", "muted")] (esc "Students who bought a class cash their ticket in here: they pick a date on a calendar and the site handles the calendar invitations and reminder emails. Classes that fill up (or are claimed whole by a private ticket) disappear from the calendar by themselves.")
+    elAttr "p" [("class", "muted")] (esc "Students who bought a class cash their ticket in here: they pick a class card, enter their ticket code and the name they'd like to be called, and the class lands on the staff calendar. They get a booking page with a calendar file to save. Classes that fill up (or are claimed whole by a private ticket) disappear by themselves.")
       <> ipt "text" "title" "Title (optional)" (orEmpty t)
       <> txtArea "intro" "Intro (optional)" (orEmpty intro)
       <> ipt "number" "maxWeekly" "Most classes you'll teach in one week (0 = no limit)" (T.pack (show maxWeekly))
@@ -818,8 +818,10 @@ stripePage baseUrl site catalog bundle fl =
 -- Bookings tab
 -- ---------------------------------------------------------------------------
 
--- | Tickets sold, reservations made, and the Google connection that powers
--- calendar invites + booking mail.
+-- | Tickets sold, reservations made, and the Google connection that puts
+-- each reservation on the staff calendar. A ticket shows only its code, what
+-- was bought, and the name the student chose — the site holds nothing else
+-- about them (who paid lives in Stripe).
 bookingsPage :: [Ticket] -> [SlotSpec] -> SecretBundle -> Maybe Text -> Html
 bookingsPage tickets slots bundle fl =
   adminDoc "Bookings" $
@@ -861,12 +863,11 @@ bookingsPage tickets slots bundle fl =
             then elAttr "p" [("class", "muted")] (esc "No tickets yet. A ticket is issued automatically the moment a checkout is paid.")
             else
               elAttr "table" [("class", "plist")] $
-                elAttr "tr" [] (el "th" (esc "Code") <> el "th" (esc "Buyer") <> el "th" (esc "Class") <> el "th" (esc "Reservation") <> el "th" (esc "Calendar") <> el "th" (esc "Mails"))
+                elAttr "tr" [] (el "th" (esc "Code") <> el "th" (esc "Ticket") <> el "th" (esc "Reserved as") <> el "th" (esc "Calendar"))
                   <> htmlConcat (map ticketRow tickets)
     ticketRow t =
       elAttr "tr" [] $
         el "td" (elAttr "code" [] (esc (tkCode t)))
-          <> el "td" (esc (tkEmail t))
           <> el "td" (esc (tkProduct t))
           <> el "td" (case tkRedemption t of
                         Nothing -> elAttr "span" [("class", "pill off")] (esc "not scheduled")
@@ -876,12 +877,11 @@ bookingsPage tickets slots bundle fl =
                         Nothing
                           | Just _ <- tkRedemption t -> elAttr "span" [("class", "pill off")] (esc "pending")
                           | otherwise -> esc "\x2014")
-          <> el "td" (esc (if null (tkNotesSent t) then "\x2014" else T.intercalate ", " (tkNotesSent t)))
     googleCard =
       elAttr "div" [("class", "card")] $
         htmlConcat
-          [ el "h2" (esc "Google connection (calendar invites + booking mail)")
-          , elAttr "p" [("class", "muted")] (esc "Bookings create a Google Calendar event that invites the student and the school, and all booking emails (ticket, confirmation, reminders a week before and on the day) are sent through Gmail. Paste the OAuth client id + secret and a refresh token for the school's Google account. A blank field keeps its current value.")
+          [ el "h2" (esc "Google connection (the staff calendar)")
+          , elAttr "p" [("class", "muted")] (esc "Each reservation becomes a Google Calendar event that invites the school's staff (never the student \x2014 the site holds no student contact details). Paste the OAuth client id + secret and a refresh token for the school's Google account. A blank field keeps its current value.")
           , statusRow "Client id" (isSet' (sbGoogleClientId bundle))
           , statusRow "Client secret" (isSet' (sbGoogleClientSecret bundle))
           , statusRow "Refresh token" (isSet' (sbGoogleRefreshToken bundle))
@@ -916,7 +916,7 @@ venuesPage noun venues areas fl =
           htmlConcat
             [ flash fl
             , el "h1" (esc "Venues")
-            , elAttr "p" [("class", "muted")] (esc ("Your address book of the " <> nouns <> " classes can happen in. Addresses are never shown on the website \x2014 students see only the area when they book. A week before a class, if its area matches exactly one active " <> noun <> " here, the reminder email announces the address automatically (and the calendar invitation is updated); otherwise you announce it by hand, as before."))
+            , elAttr "p" [("class", "muted")] (esc ("Your address book of the " <> nouns <> " classes can happen in. Students see only the area when they book. From a week before a class, if its area matches exactly one active " <> noun <> " here, the address appears on each student's booking page and in their calendar file, and the staff calendar event is updated; otherwise you announce it yourself."))
             , areasCard
             , htmlConcat (map venueCard venues)
             , addCard

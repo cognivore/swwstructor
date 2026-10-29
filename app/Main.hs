@@ -23,10 +23,11 @@
 --
 -- Booking (the @scheduleClass@ section; all optional):
 --
---   * @SWW_BOOKING_STAFF@     — comma-separated addresses invited to every
---                               class event and copied on every booking mail
---   * @SWW_BOOKING_REPLY_TO@  — Reply-To on booking mail
---   * @SWW_BOOKING_NAME@      — short brand name for mail copy (default: site title)
+--   * @SWW_BOOKING_STAFF@     — comma-separated staff addresses invited to
+--                               every class event (no mail goes to students:
+--                               the site holds no student contact details)
+--   * @SWW_BOOKING_NAME@      — short brand name for event and calendar-file
+--                               copy (default: site title)
 --   * @SWW_BOOKING_TZ@        — IANA zone classes run in (default Europe\/London)
 --   * @SWW_BOOKING_TZ_OFFSET@ — that zone's UTC offset for the class dates
 --                               (default +01:00; no tz database in-process)
@@ -146,13 +147,11 @@ main = do
   catalogCache <- newCatalogCache
   spentPow <- newIORef M.empty
 
-  -- Bookings: the ticket store, and the notification context (who the school
-  -- is, mail-wise). Staff addresses are invited to every calendar event and
-  -- copied on every booking mail.
+  -- Bookings: the ticket store (codes + preferred names only), and the
+  -- side-effect context. Staff addresses are invited to every class event.
   bookings <- newBookingStore (dataDir </> "bookings.json")
   venues <- newVenueStore (dataDir </> "venues.json")
   staff <- splitCsv . fromMaybe "" <$> lookupEnv "SWW_BOOKING_STAFF"
-  replyTo <- fmap T.pack . nonEmptyEnv <$> lookupEnv "SWW_BOOKING_REPLY_TO"
   bookingName <- fromMaybe (T.unpack (siteTitle site0)) . nonEmptyEnv <$> lookupEnv "SWW_BOOKING_NAME"
   tzName <- fromMaybe "Europe/London" . nonEmptyEnv <$> lookupEnv "SWW_BOOKING_TZ"
   tzOffset <- fromMaybe "+01:00" . nonEmptyEnv <$> lookupEnv "SWW_BOOKING_TZ_OFFSET"
@@ -163,7 +162,6 @@ main = do
           , bcStore = bookings
           , bcCreds = googleCredsOf <$> loadBundle secretFile masterKey
           , bcStaff = staff
-          , bcReplyTo = replyTo
           , bcSiteName = T.pack bookingName
           , bcBaseUrl = T.pack baseUrl
           , bcTimeZone = T.pack tzName

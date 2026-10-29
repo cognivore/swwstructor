@@ -288,9 +288,9 @@ class BlockSym repr where
   -- harvesters reading the page (or the content JSON routes) get nothing.
   emailReveal :: repr
 
-  -- | The ticket-redemption form: a month-grid calendar of slots (live
-  -- \"spots free\" on each date; full or week-capped slots disappear), then
-  -- ticket code + checkout email + name, POSTing to @\/schedule@. Plain
+  -- | The ticket-redemption form: one card per bookable class (live
+  -- \"spots free\"; full or week-capped classes disappear), then ticket code
+  -- + preferred name — nothing personal — POSTing to @\/schedule@. Plain
   -- HTML — no client JS, so it survives the relayout stage swap by
   -- construction (form-post-and-navigate, like 'buyButton'). The 'Int' is
   -- the per-week session cap (0 = none).
@@ -438,11 +438,10 @@ instance BlockSym HtmlBlock where
       elAttr "form" [("class", "sww-sched"), ("method", "post"), ("action", "/schedule")] $
         cards
           <> (if null offered then elAttr "p" [("class", "sww-schednote sww-schedsoldout")] (esc "Every class is now fully booked \x2014 get in touch and we'll find you a date.") else mempty)
-          <> elAttr "p" [("class", "sww-schednote")] (esc "Pick your class, then enter your ticket below. A calendar invitation arrives the moment you reserve, and the exact address is emailed about a week before.")
+          <> elAttr "p" [("class", "sww-schednote")] (esc "Pick your class, then enter your ticket code and the name you'd like to be called. Your booking page has a calendar file to save, and shows the exact address about a week before.")
           <> elAttr "div" [("class", "sww-schedfields")] (
-               field "Ticket code (from your booking email)" [("name", "code"), ("required", "required"), ("placeholder", "e.g. K7Q2-M4XW"), ("autocomplete", "off")]
-                 <> field "Email used at checkout" [("type", "email"), ("name", "email"), ("required", "required"), ("autocomplete", "email")]
-                 <> field "Your name" [("name", "name"), ("required", "required"), ("autocomplete", "name")]
+               field "Ticket code (on your Stripe receipt)" [("name", "code"), ("required", "required"), ("placeholder", "e.g. K7Q2-M4XW"), ("autocomplete", "off")]
+                 <> field "Your preferred name" [("name", "name"), ("required", "required"), ("autocomplete", "off")]
              )
           <> elAttr "button" [("class", "sww-buy sww-schedsubmit"), ("type", "submit")] (esc "Reserve my place")
     where

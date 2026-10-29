@@ -399,7 +399,8 @@ checkoutTests = do
           (ItemAdHoc (lineItem "Demo Widget" (price Money.EUR 85)) :| [])
           (Url "https://x.test/success")
           (Url "https://x.test/cancel")
-          [("sww_product", "Demo Widget")]
+          [("sww_product", "Demo Widget"), ("sww_code", "K7Q2-M4XW")]
+          (Just "Okashi School class ticket K7Q2-M4XW")
       params = stripeFormParams req
       look k = lookup k params
       reqP =
@@ -408,6 +409,7 @@ checkoutTests = do
           (Url "https://x.test/success")
           (Url "https://x.test/cancel")
           []
+          Nothing
       paramsP = stripeFormParams reqP
       lookP k = lookup k paramsP
       body = encodeForm [("a b", "c&d")]
@@ -417,6 +419,9 @@ checkoutTests = do
     , check "currency is eur" (look "line_items[0][price_data][currency]" == Just "eur")
     , check "quantity is 1" (look "line_items[0][quantity]" == Just "1")
     , check "session metadata is encoded" (look "metadata[sww_product]" == Just "Demo Widget")
+    , check "the ticket code rides on the PaymentIntent" (look "payment_intent_data[metadata][sww_code]" == Just "K7Q2-M4XW")
+    , check "the receipt description carries the code" (look "payment_intent_data[description]" == Just "Okashi School class ticket K7Q2-M4XW")
+    , check "no description param when none given" (lookP "payment_intent_data[description]" == Nothing)
     , check "a price-id item encodes line_items[0][price]" (lookP "line_items[0][price]" == Just "price_1ABCdef")
     , check "a price-id item sends no price_data" (lookP "line_items[0][price_data][unit_amount]" == Nothing)
     , check "no metadata params when none given" (all (\(k, _) -> not ("metadata[" `T.isPrefixOf` k)) paramsP)
@@ -633,7 +638,7 @@ scheduleTests = do
     , check "week at cap keeps its started session joinable" ("2026-09-01-1400" `T.isInfixOf` capHtml)
     , check "other weeks are unaffected by the cap" ("2026-09-08-1400" `T.isInfixOf` capHtml)
     , check "the venue-announcement note is present" ("about a week before" `T.isInfixOf` html)
-    , check "ticket code + email + name fields present" (all (`T.isInfixOf` html) ["name=\"code\"", "name=\"email\"", "name=\"name\""])
+    , check "the form asks only for a ticket code and a preferred name" (all (`T.isInfixOf` html) ["name=\"code\"", "name=\"name\"", "preferred name"] && not ("name=\"email\"" `T.isInfixOf` html) && not ("type=\"email\"" `T.isInfixOf` html))
     , check "no client JS in the widget (form-post-and-navigate)" (not ("<script" `T.isInfixOf` html))
     , check "day formatting (Sakamoto)" (fmtSlotDay "2026-09-01" == "Tue 1 Sep" && fmtSlotDay "2026-09-13" == "Sun 13 Sep")
     , check "week keys are Monday-based" (mondayOf "2026-09-01" == "2026-08-31" && mondayOf "2026-08-31" == "2026-08-31" && mondayOf "2026-09-06" == "2026-08-31" && mondayOf "2026-09-07" == "2026-09-07")

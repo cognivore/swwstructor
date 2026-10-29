@@ -67,14 +67,17 @@ data CheckoutItem
   deriving (Eq, Show)
 
 -- | A request to create a Checkout session. 'crMetadata' rides on the session
--- and comes back verbatim in webhook events / session lookups — the
--- correlation channel for post-payment fulfilment (e.g. which product a
--- ticket is for).
+-- AND on its PaymentIntent, and comes back verbatim in the PaymentIntent's
+-- webhook event — the correlation channel for post-payment fulfilment (which
+-- ticket, which product), read without ever fetching the session and its
+-- customer details. 'crPaymentDescription' is the PaymentIntent description,
+-- which Stripe prints on the customer's receipt.
 data CheckoutRequest = CheckoutRequest
   { crItems :: !(NonEmpty CheckoutItem)
   , crSuccessUrl :: !Url
   , crCancelUrl :: !Url
   , crMetadata :: ![(Text, Text)]
+  , crPaymentDescription :: !(Maybe Text)
   }
   deriving (Eq, Show)
 
@@ -107,6 +110,8 @@ stripeFormParams req =
   , ("cancel_url", urlText (crCancelUrl req))
   ]
     <> [("metadata[" <> k <> "]", v) | (k, v) <- crMetadata req]
+    <> [("payment_intent_data[metadata][" <> k <> "]", v) | (k, v) <- crMetadata req]
+    <> [("payment_intent_data[description]", d) | Just d <- [crPaymentDescription req]]
     <> concat (zipWith itemParams [0 :: Int ..] (toList (crItems req)))
   where
     urlText (Url u) = u
