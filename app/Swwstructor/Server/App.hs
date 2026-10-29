@@ -13,7 +13,7 @@ module Swwstructor.Server.App
   ) where
 
 import Control.Exception (SomeException, try)
-import Control.Monad (void, when)
+import Control.Monad (when)
 import Control.Monad.IO.Class (liftIO)
 import Crypto.Hash (Digest, SHA256, hash)
 import qualified Data.ByteArray as BA
@@ -454,17 +454,23 @@ handleBuy env = do
               pure $ case [i | i <- items, ciPriceId i == priceId] of
                 (i : _) -> (ciName i, ciSeats i)
                 [] -> (priceId, "1")
-          code <- liftIO (newTicketCode (aeBookings env))
+          -- Only a catalogue product is a class ticket. A product written
+          -- into the site content (a one-off payment check, say) is a plain
+          -- payment: no code, so its payment can never become a seat.
+          mcode <- case item of
+            ItemPrice _ _ -> Just <$> liftIO (newTicketCode (aeBookings env))
+            ItemAdHoc _ -> pure Nothing
           let req =
                 CheckoutRequest
                   (item :| [])
-                  (Url (aeBaseUrl env <> "/success?code=" <> code))
+                  (Url (aeBaseUrl env <> maybe "/success" ("/success?code=" <>) mcode))
                   (Url (aeBaseUrl env <> "/cancel"))
-                  [("sww_product", productName), ("sww_seats", seats), ("sww_code", code)]
-                  ( Just
-                      ( bcSiteName (aeBookingCtx env) <> " class ticket " <> code
+                  ([("sww_product", productName), ("sww_seats", seats)] <> [("sww_code", c) | Just c <- [mcode]])
+                  ( ( \code ->
+                        bcSiteName (aeBookingCtx env) <> " class ticket " <> code
                           <> ": reserve your class at " <> aeBaseUrl env <> "/classes"
-                      )
+                    )
+                      <$> mcode
                   )
           res <- liftIO (stripeCreate (aeManager env) sk req)
           case res of
