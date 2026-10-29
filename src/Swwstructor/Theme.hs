@@ -250,6 +250,10 @@ themeCss th =
         , "  border-radius:calc(var(--sww-radius) + 4px);padding:11px 18px;width:100%;"
         , "  transition:transform .12s ease,opacity .12s ease;}"
         , ".sww-buy:hover{transform:translateY(-1px);opacity:.92;}"
+        -- a product that is not currently offered: greyed out, button inert
+        , ".sww-muted{height:100%;opacity:.45;filter:grayscale(1);}"
+        , ".sww-buy-off,.sww-buy-off:hover{cursor:not-allowed;transform:none;opacity:1;"
+        , "  color:var(--sww-muted);background:var(--sww-border);}"
         -- the email-reveal widget: an inline-sized button, not a full-width one
         , ".sww-reveal{margin:2px 0;}"
         , ".sww-reveal .sww-buy{width:auto;padding:11px 22px;}"

@@ -84,6 +84,8 @@ export interface Product {
   image?: ImageRef;
   /** Stable buy-target id the buy button posts to. */
   buy: string;
+  /** Shown greyed out and not buyable. (Haskell `NotOffered`.) */
+  notOffered?: boolean;
 }
 
 /**

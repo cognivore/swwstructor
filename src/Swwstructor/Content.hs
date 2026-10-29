@@ -16,6 +16,7 @@ module Swwstructor.Content
     ImageRef (..)
   , imageRef
   , Cta (..)
+  , Availability (..)
   , Product (..)
   , Story (..)
   , story
@@ -88,6 +89,12 @@ data Cta = Cta
   }
   deriving (Eq, Show)
 
+-- | Whether a product can be bought right now. A 'NotOffered' product stays
+-- on show — greyed out, its buy button disabled — and checkout refuses it, so
+-- the owner can pause a format without it vanishing from the page.
+data Availability = OnSale | NotOffered
+  deriving (Eq, Show)
+
 -- | A sellable item. 'prodBuy' is the stable id a buy button posts to; the
 -- server resolves it to this priced line item (the amount is never client-set).
 data Product = Product
@@ -96,6 +103,7 @@ data Product = Product
   , prodPrice :: !Price
   , prodImage :: !(Maybe ImageRef)
   , prodBuy :: !BuyTarget
+  , prodAvailability :: !Availability
   }
   deriving (Eq, Show)
 
@@ -212,12 +220,14 @@ data SiteSpec = SiteSpec
 
 -- | Every priced, buyable item across the whole site, as
 -- @(buy-target, display-name, price)@. The server folds this into the buy
--- registry so a checkout amount is always server-resolved.
+-- registry so a checkout amount is always server-resolved; a 'NotOffered'
+-- product is shown but never enters it, so it cannot be bought.
 pricedItems :: SiteSpec -> [(BuyTarget, Text, Price)]
 pricedItems site =
   [ (prodBuy p, prodName p, prodPrice p)
   | sec <- allSectionsOf site
   , p <- productsOf sec
+  , prodAvailability p == OnSale
   ]
   where
     productsOf (ProductGrid _ _ ps) = ps
@@ -332,13 +342,14 @@ imageRefFromJSON v = do
   pure (ImageRef src cap a c)
 
 productToJSON :: Product -> JSON
-productToJSON (Product name blurb pr img (BuyTarget tgt)) =
+productToJSON (Product name blurb pr img (BuyTarget tgt) avail) =
   obj
     [ req "name" (jS name)
     , req "blurb" (jS blurb)
     , req "price" (priceJSON pr)
     , optF "image" img imageRefToJSON
     , req "buy" (jS tgt)
+    , if avail == NotOffered then req "notOffered" (JBool True) else []
     ]
 
 productFromJSON :: JSON -> Either String Product
@@ -348,7 +359,8 @@ productFromJSON v = do
   pr <- priceOf =<< v .: "price"
   img <- optImage v "image"
   tgt <- reqText v "buy"
-  pure (Product name blurb pr img (BuyTarget tgt))
+  let avail = if optBool v "notOffered" then NotOffered else OnSale
+  pure (Product name blurb pr img (BuyTarget tgt) avail)
 
 optImage :: JSON -> String -> Either String (Maybe ImageRef)
 optImage v k = case v .:? k of

@@ -58,7 +58,8 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Swwstructor.Block (BuyTarget (BuyTarget), NavLink (NavLink), addDaysIso, mondayOf)
 import Swwstructor.Content
-  ( Cta (Cta)
+  ( Availability (OnSale)
+  , Cta (Cta)
   , HeroContent (HeroContent)
   , PageSpec (PageSpec, pagePath, pageSections, pageTitle)
   , Partial (Partial, partialName, partialSections)
@@ -149,7 +150,7 @@ blankStory = story "New story headline"
 
 blankProduct :: Int -> Product
 blankProduct n =
-  Product "New item" "What it is." (Price (Cents 1000) EUR) Nothing (BuyTarget ("item-" <> T.pack (show n)))
+  Product "New item" "What it is." (Price (Cents 1000) EUR) Nothing (BuyTarget ("item-" <> T.pack (show n))) OnSale
 
 blankSlot :: SlotSpec
 blankSlot = SlotSpec "2026-09-01" "14:00" "16:00" "Area to be announced" 6 0

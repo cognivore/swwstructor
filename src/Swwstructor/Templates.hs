@@ -46,7 +46,9 @@ import Swwstructor.Block
   , kicker
   , linkText
   , mondayOf
+  , muted
   , navBar
+  , notOfferedButton
   , paragraph
   , priceTag
   , scheduleForm
@@ -54,7 +56,8 @@ import Swwstructor.Block
   , timestamp
   )
 import Swwstructor.Content
-  ( Cta (Cta)
+  ( Availability (..)
+  , Cta (Cta)
   , HeroContent (..)
   , ImageRef (..)
   , PageSpec (pageSections)
@@ -326,20 +329,26 @@ productGridSection pfx title intro products =
       blocks = M.fromList (map snd introParts) `M.union` cardBlocks
    in Section {secLayout = layout, secBlocks = blocks}
 
+-- | One product as a column of windows. A 'NotOffered' product keeps the
+-- same windows (so the grid stays even) but greyed out, with a disabled
+-- button in place of the buy form.
 productCard :: String -> Product -> [Part]
 productCard pfx p =
   catMaybes
-    [ (\ir -> leafWith (figure (pfx <> "-fig") (imgAspect ir) (imgCap ir)) (figureBox (imgCaption ir) (imgSrc ir)))
+    [ (\ir -> leafWith (figure (pfx <> "-fig") (imgAspect ir) (imgCap ir)) (look (figureBox (imgCaption ir) (imgSrc ir))))
         <$> imgOrDefault
-    , Just (leafWith (headline (pfx <> "-name") (chars (prodName p))) (heading (prodName p)))
-    , Just (leafWith (chrome (Custom "price") (pfx <> "-price") 34) (priceTag (prodPrice p)))
-    , Just (leafWith (prose (pfx <> "-blurb") (chars (prodBlurb p))) (paragraph (prodBlurb p)))
-    , Just (leafWith (chrome (Custom "cta") (pfx <> "-buy") 56) (buyButton (prodBuy p) ("Buy " <> prodName p)))
+    , Just (leafWith (headline (pfx <> "-name") (chars (prodName p))) (look (heading (prodName p))))
+    , Just (leafWith (chrome (Custom "price") (pfx <> "-price") 34) (look (priceTag (prodPrice p))))
+    , Just (leafWith (prose (pfx <> "-blurb") (chars (prodBlurb p))) (look (paragraph (prodBlurb p))))
+    , Just (leafWith (chrome (Custom "cta") (pfx <> "-buy") 56) cta)
     ]
   where
     imgOrDefault = case prodImage p of
       Just ir -> Just ir
       Nothing -> Just (ImageRef Nothing (prodName p) 1.2 220)
+    (look, cta) = case prodAvailability p of
+      OnSale -> (id, buyButton (prodBuy p) ("Buy " <> prodName p))
+      NotOffered -> (muted, notOfferedButton "Not currently offered")
 
 -- | The reservation calendar is ONE window (a plain HTML form block): the
 -- engine places it, the browser's second layout pass measures its true

@@ -38,6 +38,7 @@ import Swwstructor.Checkout
   , lineItem
   , stripeFormParams
   )
+import Swwstructor.Plugins.Stripe (siteBuyRegistry)
 import Swwstructor.Plugins.StripeCatalog
   ( CatalogItem (..)
   , catalogSection
@@ -213,7 +214,7 @@ sinkSite =
             , Hero (HeroContent (Just "KICK") "Hero headline" (Just "dek") (Just "body") (Just (img "hero" 1.5 360)) (Just (Cta "Go" "/go")))
             , FeatureSplit 0.6 24 [leadStory] [story "rail"]
             , StoryRow [story "one", story "two", story "three"]
-            , ProductGrid (Just "Shop") (Just "intro") [demoProduct]
+            , ProductGrid (Just "Shop") (Just "intro") [demoProduct, demoProduct {prodBuy = BuyTarget "paused", prodAvailability = NotOffered}]
             , RichColumns (Just "About") ["left column text", "right column text"]
             , Gallery (Just "Gallery") [img "g1" 1.5 240, img "g2" 1.2 240]
             , CtaBand "Subscribe" (Just "for 50p a week") (Just (Cta "Subscribe" "/sub"))
@@ -236,7 +237,7 @@ demoSlots =
   ]
 
 demoProduct :: Product
-demoProduct = Product "Demo Widget" "A demo product." (price Money.EUR 85) (Just (img "a product photo" 1.4 220)) (BuyTarget "demo-widget")
+demoProduct = Product "Demo Widget" "A demo product." (price Money.EUR 85) (Just (img "a product photo" 1.4 220)) (BuyTarget "demo-widget") OnSale
 
 -- ---------------------------------------------------------------------------
 -- Predicates over the layout
@@ -352,6 +353,8 @@ blockRoundTrip = do
         , BFigureBox "cap" Nothing
         , BPriceTag (price Money.EUR 85)
         , BBuyButton (BuyTarget "x") "Buy"
+        , BNotOfferedButton "Not currently offered"
+        , BMuted (BHeading "h")
         , BLinkText "l" "/l"
         , BEmailReveal
         , BScheduleForm 3 [SlotSpec "2026-09-01" "11:00" "13:00" "Islington" 6 3]
@@ -425,7 +428,7 @@ catalogTests = do
   let body =
         "{\"object\":\"list\",\"data\":[\
         \{\"id\":\"prod_A\",\"name\":\"Individual Lesson\",\"description\":\"One-to-one class.\",\
-        \\"images\":[\"https://files.stripe.com/links/abc\"],\
+        \\"images\":[\"https://files.stripe.com/links/abc\"],\"metadata\":{\"sww_seats\":\"all\",\"sww_available\":\" False \"},\
         \\"default_price\":{\"id\":\"price_indiv\",\"type\":\"one_time\",\"unit_amount\":24000,\"currency\":\"gbp\"}},\
         \{\"id\":\"prod_B\",\"name\":\"Group Class: Single Ticket\",\"images\":[],\
         \\"default_price\":{\"id\":\"price_single\",\"type\":\"one_time\",\"unit_amount\":8000,\"currency\":\"gbp\"}},\
@@ -442,12 +445,21 @@ catalogTests = do
       let sec = catalogSection (Just "Book a class") Nothing items
           d = secLayout (renderSection 0 sec)
           uniqueIds doc = let i = leafIds doc in length i == length (nub i)
+          html = renderHtml (renderStage nytTheme (renderSection 0 sec) (Viewport 1180 900))
+          shop = nytSite {sitePages = [PageSpec "/" "Home" [sec]]}
       sequence
         [ check "unpriced + recurring products are skipped (2 of 4)" (length items == 2)
         , check "sorted cheapest first" (map ciPriceId items == ["price_single", "price_indiv"])
         , check "amount + currency parsed" (fmap ciPrice (listToMaybe' items) == Just (Money.cents Money.GBP 8000))
         , check "image url survives" (ciImage (last items) == Just "https://files.stripe.com/links/abc")
         , check "buy targets are price ids" (all (isPriceId . ciPriceId) items)
+        , check "sww_available=false (any case/space) pauses a product" (map ciAvailability items == [OnSale, NotOffered])
+        , check "seats metadata still read alongside" (map ciSeats items == ["1", "all"])
+        , check "a paused product is still on the page" ("Individual Lesson" `T.isInfixOf` html)
+        , check "a paused product has no buy form, only a disabled button" (not ("/buy/price_indiv" `T.isInfixOf` html) && "sww-buy-off" `T.isInfixOf` html && "disabled" `T.isInfixOf` html)
+        , check "a paused product is greyed out" ("sww-muted" `T.isInfixOf` html)
+        , check "an on-sale product keeps its buy form" ("/buy/price_single" `T.isInfixOf` html)
+        , check "a paused product never enters the buy registry" (M.keys (siteBuyRegistry shop) == ["price_single"])
         , check "catalogue section is a wf grid @1180/390 + unique ids" (wf d wide 1116 && wf d phone 326 && uniqueIds d)
         , check "stripeCatalog codec round-trips" (siteSpecFromJSON (siteSpecToJSON withCat) == Right withCat)
         ]
@@ -503,7 +515,7 @@ tplSite =
     { sitePartials =
         [ Partial "header" [Masthead "The Times" Nothing, NavStrip [NavLink "U.S." "/us"] True]
         , Partial "footer" [FooterBand "\xA9 2026"]
-        , Partial "shop" [ProductGrid (Just "Shop") Nothing [Product "Widget" "A widget." (price Money.EUR 9) Nothing (BuyTarget "widget")]]
+        , Partial "shop" [ProductGrid (Just "Shop") Nothing [Product "Widget" "A widget." (price Money.EUR 9) Nothing (BuyTarget "widget") OnSale]]
         , Partial "loopA" [IncludePartial "loopB"]
         , Partial "loopB" [IncludePartial "loopA"]
         ]

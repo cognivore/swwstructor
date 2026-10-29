@@ -256,6 +256,13 @@ class BlockSym repr where
   -- | A commerce call to action: a POST form to @\/buy\/<target>@.
   buyButton :: BuyTarget -> Text -> repr
 
+  -- | The stand-in for 'buyButton' on a product that is not currently
+  -- offered: a disabled button carrying the label, with no form behind it.
+  notOfferedButton :: Text -> repr
+
+  -- | Grey a block out (the other parts of a not-offered product's card).
+  muted :: repr -> repr
+
   -- | A standalone inline link (label, href).
   linkText :: Text -> Text -> repr
 
@@ -295,6 +302,8 @@ data Block
   | BFigureBox !Text !(Maybe Text)
   | BPriceTag !Price
   | BBuyButton !BuyTarget !Text
+  | BNotOfferedButton !Text
+  | BMuted !Block
   | BLinkText !Text !Text
   | BEmailReveal
   | BScheduleForm !Int ![SlotSpec]
@@ -314,6 +323,8 @@ instance BlockSym Block where
   figureBox = BFigureBox
   priceTag = BPriceTag
   buyButton = BBuyButton
+  notOfferedButton = BNotOfferedButton
+  muted = BMuted
   linkText = BLinkText
   emailReveal = BEmailReveal
   scheduleForm = BScheduleForm
@@ -334,6 +345,8 @@ buildBlock (BBrandMark t) = brandMark t
 buildBlock (BFigureBox c s) = figureBox c s
 buildBlock (BPriceTag p) = priceTag p
 buildBlock (BBuyButton tgt l) = buyButton tgt l
+buildBlock (BNotOfferedButton l) = notOfferedButton l
+buildBlock (BMuted b) = muted (buildBlock b)
 buildBlock (BLinkText l h) = linkText l h
 buildBlock BEmailReveal = emailReveal
 buildBlock (BScheduleForm mw slots) = scheduleForm mw slots
@@ -391,6 +404,10 @@ instance BlockSym HtmlBlock where
         , ("action", "/buy/" <> tgt)
         ]
         (elAttr "button" [("class", "sww-buy"), ("type", "submit")] (esc lbl))
+  notOfferedButton lbl =
+    HtmlBlock $
+      elAttr "button" [("class", "sww-buy sww-buy-off"), ("type", "button"), ("disabled", "disabled")] (esc lbl)
+  muted (HtmlBlock h) = HtmlBlock $ elAttr "div" [("class", "sww-muted")] h
   linkText lbl h =
     HtmlBlock $ elAttr "a" [("class", "sww-link"), ("href", safeHref h)] (esc lbl)
   emailReveal =
@@ -623,6 +640,8 @@ instance BlockSym PlainBlock where
   figureBox cap _ = PlainBlock ("(image: " <> cap <> ")")
   priceTag p = PlainBlock (formatPrice p)
   buyButton _ lbl = PlainBlock ("[" <> lbl <> "]")
+  notOfferedButton lbl = PlainBlock ("(" <> lbl <> ")")
+  muted = id
   linkText lbl _ = PlainBlock lbl
   emailReveal = PlainBlock "(email address \x2014 revealed on the website)"
   scheduleForm _ slots =
@@ -648,6 +667,8 @@ blockToJSON b = case b of
   BFigureBox c s -> tagged "figureBox" (("caption", JStr (T.unpack c)) : maybe [] (\u -> [("src", JStr (T.unpack u))]) s)
   BPriceTag p -> tagged "priceTag" [("price", priceToJSON p)]
   BBuyButton (BuyTarget tgt) l -> tagged "buyButton" [("target", JStr (T.unpack tgt)), ("label", JStr (T.unpack l))]
+  BNotOfferedButton l -> tagged "notOfferedButton" [("label", JStr (T.unpack l))]
+  BMuted inner -> tagged "muted" [("block", blockToJSON inner)]
   BLinkText l h -> tagged "linkText" [("label", JStr (T.unpack l)), ("href", JStr (T.unpack h))]
   BEmailReveal -> tagged "emailReveal" []
   BScheduleForm mw slots -> tagged "scheduleForm" [("maxWeekly", JNum (fromIntegral mw)), ("slots", JArr (map slotJSON slots))]
@@ -690,6 +711,8 @@ blockFromJSON v = do
       pure (BFigureBox c s)
     "priceTag" -> BPriceTag <$> (priceFromJSON =<< v .: "price")
     "buyButton" -> BBuyButton . BuyTarget <$> txt "target" <*> txt "label"
+    "notOfferedButton" -> BNotOfferedButton <$> txt "label"
+    "muted" -> BMuted <$> (blockFromJSON =<< v .: "block")
     "linkText" -> BLinkText <$> txt "label" <*> txt "href"
     "emailReveal" -> Right BEmailReveal
     "scheduleForm" -> do

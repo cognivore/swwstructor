@@ -20,7 +20,7 @@ import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Swwstructor.Block (BuyTarget (BuyTarget))
-import Swwstructor.Content (ImageRef (ImageRef), Product (..), SectionSpec (ProductGrid))
+import Swwstructor.Content (Availability (OnSale), ImageRef (ImageRef), Product (..), SectionSpec (ProductGrid))
 import Swwstructor.Money (Cents (Cents), Currency (USD), Price (Price), currencyOfCode)
 
 -- | Storefront @minVariantPrice@: a decimal amount string + an ISO code.
@@ -72,6 +72,7 @@ shopifyToProduct sp =
     , prodPrice = Price (Cents (parseMinorUnits (smAmount (spPrice sp)))) cur
     , prodImage = imgOf <$> spImage sp
     , prodBuy = BuyTarget (spHandle sp)
+    , prodAvailability = OnSale
     }
   where
     cur :: Currency

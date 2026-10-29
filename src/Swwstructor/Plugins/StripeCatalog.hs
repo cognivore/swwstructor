@@ -19,7 +19,7 @@ import Data.Maybe (fromMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Swwstructor.Block (BuyTarget (BuyTarget))
-import Swwstructor.Content (ImageRef (ImageRef), Product (Product), SectionSpec (ProductGrid))
+import Swwstructor.Content (Availability (NotOffered, OnSale), ImageRef (ImageRef), Product (Product), SectionSpec (ProductGrid))
 import Swwstructor.Money (Cents (Cents), Price (Price), currencyOfCode)
 import StickyWM (JSON (JArr, JNum, JObj, JStr), decode, (.:), (.:?))
 
@@ -37,6 +37,10 @@ data CatalogItem = CatalogItem
   -- ^ the product's @sww_seats@ metadata: how many class places one purchase
   -- occupies at scheduling time — @\"1\"@, @\"2\"@…, or @\"all\"@ (a private
   -- whole-class ticket). Defaults to @\"1\"@ when unset.
+  , ciAvailability :: !Availability
+  -- ^ the product's @sww_available@ metadata: @\"false\"@ keeps the product
+  -- on the page, greyed out and not buyable. Anything else (or unset) is on
+  -- sale; retiring a product for good is archiving it in Stripe.
   }
   deriving (Eq, Show)
 
@@ -69,11 +73,15 @@ itemOf v = do
       img = case v .:? "images" of
         Just (JArr (JStr u : _)) -> Just (T.pack u)
         _ -> Nothing
-      seats = case v .:? "metadata" of
-        Just md@JObj{} -> case md .:? "sww_seats" of
-          Just (JStr s) | not (null s) -> T.pack s
-          _ -> "1"
-        _ -> "1"
+      meta k = case v .:? "metadata" of
+        Just md@JObj{} -> case md .:? k of
+          Just (JStr s) | not (null s) -> Just (T.pack s)
+          _ -> Nothing
+        _ -> Nothing
+      seats = fromMaybe "1" (meta "sww_seats")
+      availability = case T.toLower . T.strip <$> meta "sww_available" of
+        Just "false" -> NotOffered
+        _ -> OnSale
   pure
     CatalogItem
       { ciName = T.pack name
@@ -82,6 +90,7 @@ itemOf v = do
       , ciPriceId = T.pack pid
       , ciPrice = Price (Cents (max 0 (round amount))) cur
       , ciSeats = seats
+      , ciAvailability = availability
       }
 
 -- | The catalogue as an engine section: a 'ProductGrid' whose buy targets are
@@ -98,6 +107,7 @@ catalogSection title intro items =
         (ciPrice i)
         (Just (ImageRef (ciImage i) (ciName i) 1.25 300))
         (BuyTarget (ciPriceId i))
+        (ciAvailability i)
 
 -- | Does a buy target name a Stripe price (a catalogue purchase) rather than
 -- a content-defined product?

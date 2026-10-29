@@ -75,7 +75,8 @@ import Swwstructor.Checkout
   , Url (Url)
   )
 import Swwstructor.Content
-  ( PageSpec (PageSpec, pagePath, pageSections, pageTitle)
+  ( Availability (OnSale)
+  , PageSpec (PageSpec, pagePath, pageSections, pageTitle)
   , Partial (partialSections)
   , SectionSpec (Contact, ScheduleClass, StripeCatalog)
   , SiteSpec (siteFooter, sitePages, sitePartials, siteTheme)
@@ -107,7 +108,7 @@ import Swwstructor.Html (Html, el, elAttr, esc, htmlConcat, renderHtml)
 import Swwstructor.Media (contentTypeFor, isSafeMediaName)
 import Swwstructor.Money (Quantity (Quantity))
 import Swwstructor.Plugins.Stripe (siteBuyRegistry)
-import Swwstructor.Plugins.StripeCatalog (CatalogItem (ciName, ciPriceId, ciSeats), catalogSection, isPriceId)
+import Swwstructor.Plugins.StripeCatalog (CatalogItem (ciAvailability, ciName, ciPriceId, ciSeats), catalogSection, isPriceId)
 import Swwstructor.Server.Catalog (CatalogCache, getCatalog)
 import Swwstructor.Server.Admin
   ( adminLoginPage
@@ -414,14 +415,14 @@ handleBuy env = do
   site <- currentSite env
   -- Resolve the target server-side: a content-defined product (inline
   -- price_data) or a Stripe catalogue price id — but only one that actually
-  -- appears in the owner's own catalogue.
+  -- appears in the owner's own catalogue and is currently offered.
   mItem <- case M.lookup pid (siteBuyRegistry site) of
     Just li -> pure (Just (ItemAdHoc li))
     Nothing
       | isPriceId pid -> do
           items <- liftIO (fetchCatalogFor env)
           pure $
-            if pid `elem` map ciPriceId items
+            if pid `elem` [ciPriceId i | i <- items, ciAvailability i == OnSale]
               then Just (ItemPrice pid (Quantity 1))
               else Nothing
       | otherwise -> pure Nothing

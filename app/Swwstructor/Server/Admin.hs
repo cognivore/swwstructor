@@ -31,7 +31,8 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Swwstructor.Block (BuyTarget (BuyTarget), NavLink (NavLink), fmtSlotDay, navHref, navLabel)
 import Swwstructor.Content
-  ( Cta (Cta)
+  ( Availability (..)
+  , Cta (Cta)
   , HeroContent (..)
   , ImageRef (..)
   , PageSpec (pagePath, pageSections, pageTitle)
@@ -557,6 +558,7 @@ productFields ln i p =
           <> txtArea (ix ln i "blurb") "Blurb" (prodBlurb p)
           <> elAttr "div" [("class", "row")] (ipt "text" (ix ln i "price") "Price (e.g. 85 or 12.50)" amt <> selField (ix ln i "currency") "Currency" currencyOptions cur)
           <> ipt "text" (ix ln i "buy") "Buy id (unique, for checkout)" tgt
+          <> chk (ix ln i "onsale") "On sale (untick to show it greyed out, not buyable)" (prodAvailability p == OnSale)
           <> imgFields (ln <> "-" <> T.pack (show i) <> "-img") (prodImage p)
           <> btn "danger" ("del-" <> ln <> "-" <> T.pack (show i)) "Remove product"
 
@@ -726,6 +728,9 @@ stripePage baseUrl site catalog bundle fl =
                    elAttr "b" [] (esc "The website downloads and displays them.")
                      <> esc "Any page with a \x201CStripe catalogue\x201D section shows the live catalogue as a grid (three products = three columns), photos included, refreshed every few minutes."
                , elAttr "li" [] $
+                   elAttr "b" [] (esc "Pausing a product without hiding it.")
+                     <> esc "In Stripe, open the product and add the metadata key sww_available with the value false: the site keeps showing it, greyed out, with a \x201CNot currently offered\x201D button, and nobody can buy it. Delete the key (or set it to true) to put it back on sale. To remove a product from the site entirely, archive it in Stripe."
+               , elAttr "li" [] $
                    elAttr "b" [] (esc "Buy buttons charge the catalogue price.")
                      <> esc "Each button opens Stripe's secure checkout for that exact catalogue item \x2014 the amount is Stripe's own price, so it can never be altered. Sales, receipts and payouts all live in your Stripe dashboard."
                ])
@@ -740,12 +745,13 @@ stripePage baseUrl site catalog bundle fl =
                        else esc "Connect your Secret key below and your Stripe products will appear here automatically."
                  items ->
                    elAttr "table" [("class", "plist")] $
-                     elAttr "tr" [] (el "th" (esc "Product") <> el "th" (esc "Price") <> el "th" (esc "Photo") <> el "th" (esc "Price id"))
+                     elAttr "tr" [] (el "th" (esc "Product") <> el "th" (esc "Price") <> el "th" (esc "Photo") <> el "th" (esc "On sale") <> el "th" (esc "Price id"))
                        <> htmlConcat
                          [ elAttr "tr" [] $
                              el "td" (esc (ciName i))
                                <> el "td" (esc (fmtPrice (ciPrice i)))
                                <> el "td" (esc (maybe "\x2014" (const "from Stripe") (ciImage i)))
+                               <> el "td" (esc (case ciAvailability i of OnSale -> "yes"; NotOffered -> "no \x2014 shown greyed out"))
                                <> el "td" (elAttr "code" [] (esc (T.take 22 (ciPriceId i) <> "\x2026")))
                          | i <- items
                          ]
@@ -1183,6 +1189,7 @@ parseSection old ps = case old of
         , prodPrice = parsePrice (fromMaybe "0" (g (ix ln j "price"))) (fromMaybe "eur" (g (ix ln j "currency")))
         , prodImage = Just (pImage (\f -> ix ln j ("img-" <> f)))
         , prodBuy = BuyTarget (let t = T.strip (fromMaybe "" (g (ix ln j "buy"))) in if T.null t then "item-" <> T.pack (show j) else t)
+        , prodAvailability = if bool (ix ln j "onsale") then OnSale else NotOffered
         }
     pImage key =
       ImageRef
