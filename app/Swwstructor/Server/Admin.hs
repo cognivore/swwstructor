@@ -604,12 +604,15 @@ slotList ln ss =
 slotFields :: Text -> Int -> SlotSpec -> Html
 slotFields ln i s =
   elAttr "div" [("class", "sec"), ("style", "align-items:flex-end;gap:8px")] $
-    elAttr "div" [("class", "row"), ("style", "flex:1")] (
-      ipt "text" (ix ln i "date") ("Date \x2014 " <> fmtSlotDay (slotDate s)) (slotDate s)
-        <> ipt "text" (ix ln i "start") "Starts" (slotStart s)
-        <> ipt "text" (ix ln i "end") "Ends" (slotEnd s)
-        <> ipt "text" (ix ln i "area") "Area" (slotArea s)
-        <> ipt "number" (ix ln i "cap") "Places" (T.pack (show (slotCap s)))
+    elAttr "div" [("style", "flex:1")] (
+      elAttr "div" [("class", "row")] (
+        ipt "text" (ix ln i "date") ("Date \x2014 " <> fmtSlotDay (slotDate s)) (slotDate s)
+          <> ipt "text" (ix ln i "start") "Starts" (slotStart s)
+          <> ipt "text" (ix ln i "end") "Ends" (slotEnd s)
+          <> ipt "text" (ix ln i "area") "Area" (slotArea s)
+          <> ipt "number" (ix ln i "cap") "Places" (T.pack (show (slotCap s)))
+      )
+        <> ipt "text" (ix ln i "description") "What this class is (optional, shown on its card \x2014 **bold** and [links](https://\x2026) work)" (slotDescription s)
     )
       <> btn "danger" ("del-" <> ln <> "-" <> T.pack (show i)) "\x2715"
 
@@ -1161,6 +1164,7 @@ parseSection old ps = case old of
         , slotArea = T.strip (fromMaybe "" (g (ix ln j "area")))
         , slotCap = max 1 (maybe 6 round (g (ix ln j "cap") >>= readD))
         , slotTaken = 0
+        , slotDescription = T.strip (fromMaybe "" (g (ix ln j "description")))
         }
     texts ln = [fromMaybe "" (g (ix ln j "text")) | j <- [0 .. count ln - 1]]
     images ln = [pImage (\f -> ix ln j f) | j <- [0 .. count ln - 1]]

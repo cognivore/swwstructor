@@ -32,6 +32,7 @@ module Swwstructor.Block
   , weekSessionCount
   , weekIsClosed
   , slotVisible
+  , markdownPlain
 
     -- * The algebra
   , BlockSym (..)
@@ -50,7 +51,7 @@ module Swwstructor.Block
   ) where
 
 import Data.Char (isDigit)
-import Data.List (intersperse)
+import Data.List (intersperse, sortOn)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Swwstructor.Html
@@ -118,6 +119,9 @@ data SlotSpec = SlotSpec
   -- ^ places in the class
   , slotTaken :: !Int
   -- ^ live reservations (server-injected; never persisted)
+  , slotDescription :: !Text
+  -- ^ what this particular class is (markdown, inline marks only), shown on
+  -- its card — e.g. a partner evening; @\"\"@ for an ordinary class
   }
   deriving (Eq, Show)
 
@@ -150,6 +154,18 @@ fmtSlotDay iso = case isoParts iso of
 
 monthName :: Int -> Text
 monthName m = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] !! max 0 (min 11 (m - 1))
+
+-- | A slot card's date, spelled out: @\"2026-11-18\"@ →
+-- @(\"Wednesday\", \"18\", \"November 2026\")@. Malformed dates show verbatim.
+slotCardDate :: Text -> (Text, Text, Text)
+slotCardDate iso = case isoParts iso of
+  Just (y, m, d) ->
+    ( ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"] !! max 0 (min 6 (sakamoto y m d))
+    , T.pack (show d)
+    , ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"] !! (m - 1)
+        <> " " <> T.pack (show y)
+    )
+  _ -> ("", iso, "")
 
 isoParts :: Text -> Maybe (Int, Int, Int)
 isoParts iso = case mapM readIntT (T.splitOn "-" iso) of
@@ -420,9 +436,9 @@ instance BlockSym HtmlBlock where
   scheduleForm maxWeekly slots =
     HtmlBlock $
       elAttr "form" [("class", "sww-sched"), ("method", "post"), ("action", "/schedule")] $
-        calendar
-          <> (if anyVisible then mempty else elAttr "p" [("class", "sww-schednote sww-schedsoldout")] (esc "Every class is now fully booked \x2014 get in touch and we'll find you a date."))
-          <> elAttr "p" [("class", "sww-schednote")] (esc "The exact address is emailed about a week before each class \x2014 for now, pick the week and area that suit you.")
+        cards
+          <> (if null offered then elAttr "p" [("class", "sww-schednote sww-schedsoldout")] (esc "Every class is now fully booked \x2014 get in touch and we'll find you a date.") else mempty)
+          <> elAttr "p" [("class", "sww-schednote")] (esc "Pick your class, then enter your ticket below. A calendar invitation arrives the moment you reserve, and the exact address is emailed about a week before.")
           <> elAttr "div" [("class", "sww-schedfields")] (
                field "Ticket code (from your booking email)" [("name", "code"), ("required", "required"), ("placeholder", "e.g. K7Q2-M4XW"), ("autocomplete", "off")]
                  <> field "Email used at checkout" [("type", "email"), ("name", "email"), ("required", "required"), ("autocomplete", "email")]
@@ -432,47 +448,28 @@ instance BlockSym HtmlBlock where
     where
       field lbl attrs =
         elAttr "label" [("class", "sww-schedfield")] (elAttr "span" [] (esc lbl) <> voidElAttr "input" attrs)
-      visible = slotVisible maxWeekly slots
-      anyVisible = any visible slots
-      -- One grid row per calendar week (Monday-based), in date order.
-      mondays = dedupe (map (mondayOf . slotDate) slots)
-      dedupe = foldr (\x acc -> if x `elem` acc then acc else x : acc) []
-      calendar =
-        elAttr "div" [("class", "sww-cal")] $
-          dowHeader <> htmlConcat (map weekBlock mondays)
-      dowHeader =
-        elAttr "div" [("class", "sww-caldows")] $
-          htmlConcat [elAttr "span" [] (esc d) | d <- ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]]
-      weekSlots wk = [s | s <- slots, mondayOf (slotDate s) == wk]
-      weekBlock wk =
-        let ss = weekSlots wk
-            areas = T.intercalate " \xB7 " (dedupe (map slotArea ss))
-            range = case map slotDate ss of
-              [] -> ""
-              ds -> fmtSlotDay (minimum ds) <> " \x2013 " <> fmtSlotDay (maximum ds)
-            closedNote
-              | weekIsClosed maxWeekly slots wk && not (any visible ss) = " \xB7 fully booked"
-              | weekIsClosed maxWeekly slots wk = " \xB7 last places"
-              | otherwise = ""
-         in elAttr "div" [("class", "sww-calweekhead")] (esc (areas <> " \xB7 " <> range) <> elAttr "em" [] (esc closedNote))
-              <> elAttr "div" [("class", "sww-calgrid")] (htmlConcat [dayCell (addDaysIso i wk) | i <- [0 .. 6]])
-      dayCell d =
-        let ss = [s | s <- slots, slotDate s == d]
-            offered = filter visible ss
-            dayNum = T.dropWhile (== '0') (T.takeWhileEnd (/= '-') d)
-            cellClass = if null offered then "sww-calday sww-calday-off" else "sww-calday"
-         in elAttr "div" [("class", cellClass)] $
-              elAttr "span" [("class", "sww-caldate")] (esc dayNum)
-                <> htmlConcat (map slotChip offered)
-      slotChip s =
+      -- Only bookable classes get a card, in date order; full (or
+      -- week-capped) ones are simply absent.
+      offered = sortOn (\s -> (slotDate s, slotStart s)) (filter (slotVisible maxWeekly slots) slots)
+      cards
+        | null offered = mempty
+        | otherwise = elAttr "div" [("class", "sww-slots")] (htmlConcat (map slotCard offered))
+      slotCard s =
         let left = slotsLeft s
             freeLabel
               | left == 1 = "1 spot free"
               | otherwise = T.pack (show left) <> " spots free"
-         in elAttr "label" [("class", "sww-calslot")] $
+            (dow, dayNum, monthYear) = slotCardDate (slotDate s)
+            descLines = filter (not . T.null) (map T.strip (T.lines (slotDescription s)))
+         in elAttr "label" [("class", "sww-slotcard")] $
               voidElAttr "input" [("type", "radio"), ("name", "slot"), ("value", slotIdOf s), ("required", "required")]
-                <> elAttr "span" [("class", "sww-calslottime")] (esc (slotStart s <> "\x2013" <> slotEnd s))
-                <> elAttr "em" [("class", "sww-calslotfree")] (esc freeLabel)
+                <> elAttr "span" [("class", "sww-slotcard-dow")] (esc dow)
+                <> elAttr "span" [("class", "sww-slotcard-day")] (esc dayNum)
+                <> elAttr "span" [("class", "sww-slotcard-month")] (esc monthYear)
+                <> elAttr "span" [("class", "sww-slotcard-time")] (esc (slotStart s <> " \x2013 " <> slotEnd s))
+                <> htmlConcat [elAttr "span" [("class", "sww-slotcard-desc")] (mdInline l) | l <- descLines]
+                <> (if T.null (slotArea s) then mempty else elAttr "span" [("class", "sww-slotcard-area")] (esc (slotArea s)))
+                <> elAttr "em" [("class", "sww-slotcard-free")] (esc freeLabel)
   ruleLine = HtmlBlock $ elAttr "hr" [("class", "sww-rule")] mempty
 
 -- | The proof-of-work reveal client — a fixed literal (never owner content),
@@ -619,6 +616,38 @@ mdLink t = do
         elAttr "a" [("class", "sww-link"), ("href", safeHref (T.strip href))] (mdInline label)
           <> mdInline (T.drop 1 afterHref)
 
+-- | The inline marks spelled out as plain text, for mail and calendar
+-- invites: @[label](href)@ reads @label (href)@ and emphasis marks drop —
+-- the same reading as 'mdInline', so a literal @2 * 3@ stays literal.
+markdownPlain :: Text -> Text
+markdownPlain t =
+  let (plain, rest) = T.break (`T.elem` "\\[*") t
+   in plain <> case T.uncons rest of
+        Nothing -> ""
+        Just ('\\', more) -> case T.uncons more of
+          Just (c, more') | c `T.elem` "\\[]*-" -> T.singleton c <> markdownPlain more'
+          _ -> "\\" <> markdownPlain more
+        Just ('[', _) -> case link rest of
+          Just p -> p
+          Nothing -> "[" <> markdownPlain (T.drop 1 rest)
+        Just ('*', _)
+          | "**" `T.isPrefixOf` rest -> emph "**" (T.drop 2 rest)
+          | otherwise -> emph "*" (T.drop 1 rest)
+        Just (c, more) -> T.singleton c <> markdownPlain more
+  where
+    emph close body = case T.breakOn close body of
+      (inner, r)
+        | not (T.null inner) && not (T.null r) ->
+            markdownPlain inner <> markdownPlain (T.drop (T.length close) r)
+      _ -> close <> markdownPlain body
+    link l = do
+      let (label, afterLabel) = T.breakOn "]" (T.drop 1 l)
+      afterOpen <- T.stripPrefix "](" afterLabel
+      let (href, afterHref) = T.breakOn ")" afterOpen
+      if T.null label || T.null afterHref
+        then Nothing
+        else Just (markdownPlain label <> " (" <> T.strip href <> ")" <> markdownPlain (T.drop 1 afterHref))
+
 -- ---------------------------------------------------------------------------
 -- Plain interpreter (text / accessibility / tests)
 -- ---------------------------------------------------------------------------
@@ -685,6 +714,7 @@ blockToJSON b = case b of
         , ("area", JStr (T.unpack (slotArea s)))
         , ("cap", JNum (fromIntegral (slotCap s)))
         , ("taken", JNum (fromIntegral (slotTaken s)))
+        , ("description", JStr (T.unpack (slotDescription s)))
         ]
 
 -- | Decode a 'Block' from wire JSON.
@@ -736,7 +766,10 @@ blockFromJSON v = do
       let taken = case sv .:? "taken" of
             Just (JNum n) -> round n
             _ -> 0
-      pure (SlotSpec d st en area (round cap) taken)
+          desc = case sv .:? "description" of
+            Just (JStr t) -> T.pack t
+            _ -> ""
+      pure (SlotSpec d st en area (round cap) taken desc)
 
 navLinkToJSON :: NavLink -> JSON
 navLinkToJSON (NavLink l h) = JObj [("label", JStr (T.unpack l)), ("href", JStr (T.unpack h))]

@@ -23,7 +23,7 @@ module Swwstructor.Server.Notify
 import Data.Text (Text)
 import qualified Data.Text as T
 import Network.HTTP.Client (Manager)
-import Swwstructor.Block (fmtSlotDay)
+import Swwstructor.Block (fmtSlotDay, markdownPlain)
 import Swwstructor.Content
   ( SectionSpec (ScheduleClass)
   , SiteSpec
@@ -155,11 +155,13 @@ ensureEvent ctx t r s = case redEventId r of
                 , ceDescription =
                     T.intercalate
                       "\n"
-                      [ "Student: " <> redName r <> " <" <> tkEmail t <> ">"
-                      , "Ticket:  " <> tkCode t
-                      , ""
-                      , "The exact " <> bcVenueNoun ctx <> " address is emailed about a week before class."
-                      ]
+                      ( classLine "" s
+                          <> [ "Student: " <> redName r <> " <" <> tkEmail t <> ">"
+                             , "Ticket:  " <> tkCode t
+                             , ""
+                             , "The exact " <> bcVenueNoun ctx <> " address is emailed about a week before class."
+                             ]
+                      )
                 , ceLocation = slotArea s <> " (exact address announced a week ahead)"
                 , ceStart = slotDate s <> "T" <> slotStart s <> ":00" <> bcTzOffset ctx
                 , ceEnd = slotDate s <> "T" <> slotEnd s <> ":00" <> bcTzOffset ctx
@@ -180,24 +182,27 @@ ensureConfirmMail ctx t r s
           ( "You're booked: " <> tkProduct t <> ", " <> fmtSlotDay (slotDate s) <> " " <> slotStart s
           , T.intercalate
               "\n"
-              [ "Hello " <> redName r <> ","
-              , ""
-              , "Your class is confirmed:"
-              , ""
-              , "    What:   " <> tkProduct t
-              , "    When:   " <> fmtSlotDay (slotDate s) <> ", " <> slotStart s <> "-" <> slotEnd s
-              , "    Where:  " <> slotArea s
-              , "            (the exact " <> bcVenueNoun ctx <> " address is emailed about a week before class)"
-              , "    Ticket: " <> tkCode t
-              , ""
-              , "A Google Calendar invitation is on its way to this address too."
-              , ""
-              , "Everything is provided - ingredients, tools and printed recipes - and"
-              , "you'll take the sweets you make home, so a small box or bag helps."
-              , ""
-              , "See you soon,"
-              , bcSiteName ctx
-              ]
+              ( [ "Hello " <> redName r <> ","
+                , ""
+                , "Your class is confirmed:"
+                , ""
+                , "    What:   " <> tkProduct t
+                ]
+                  <> classLine "    Class:  " s
+                  <> [ "    When:   " <> fmtSlotDay (slotDate s) <> ", " <> slotStart s <> "-" <> slotEnd s
+                     , "    Where:  " <> slotArea s
+                     , "            (the exact " <> bcVenueNoun ctx <> " address is emailed about a week before class)"
+                     , "    Ticket: " <> tkCode t
+                     , ""
+                     , "A Google Calendar invitation is on its way to this address too."
+                     , ""
+                     , "Everything is provided - ingredients, tools and printed recipes - and"
+                     , "you'll take the sweets you make home, so a small box or bag helps."
+                     , ""
+                     , "See you soon,"
+                     , bcSiteName ctx
+                     ]
+              )
           )
       markIf ctx sent (tkCode t) "confirm"
 
@@ -243,8 +248,9 @@ remindOne ctx slots venues today hourOfDay t = case tkRedemption t of
                         , "A quick reminder that your class is one week away:"
                         , ""
                         , "    What:  " <> tkProduct t
-                        , "    When:  " <> fmtSlotDay (slotDate s) <> ", " <> slotStart s <> "-" <> slotEnd s
                         ]
+                          <> classLine "    Class: " s
+                          <> [ "    When:  " <> fmtSlotDay (slotDate s) <> ", " <> slotStart s <> "-" <> slotEnd s ]
                           <> whereLines "    Where: "
                           <> [""]
                           <> ( case mvenue of
@@ -293,8 +299,9 @@ remindOne ctx slots venues today hourOfDay t = case tkRedemption t of
                         , "It's today!"
                         , ""
                         , "    What:  " <> tkProduct t
-                        , "    When:  today, " <> slotStart s <> "-" <> slotEnd s
                         ]
+                          <> classLine "    Class: " s
+                          <> [ "    When:  today, " <> slotStart s <> "-" <> slotEnd s ]
                           <> ( case mvenue of
                                  Just v ->
                                    [ "    Where: " <> vnName v <> ", " <> vnAddress v ]
@@ -320,6 +327,14 @@ remindOne ctx slots venues today hourOfDay t = case tkRedemption t of
 
 -- | Send one mail to the student + the staff circle. 'False' (creds missing /
 -- API error) leaves the ledger untouched so the loop retries.
+-- | The slot's own description as a mail / invite line (none when the class
+-- has no description), its markdown spelled out as plain text.
+classLine :: Text -> SlotSpec -> [Text]
+classLine lead s =
+  [ lead <> markdownPlain (T.unwords (T.words (slotDescription s)))
+  | not (T.null (T.strip (slotDescription s)))
+  ]
+
 trySend :: BookingCtx -> Text -> (Text, Text) -> IO Bool
 trySend ctx student (subject, body) = do
   mcreds <- bcCreds ctx

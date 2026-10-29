@@ -26,6 +26,7 @@ import Swwstructor.Block
   , blockToJSON
   , buildBlock
   , fmtSlotDay
+  , markdownPlain
   , mondayOf
   )
 import Swwstructor.Html (renderHtml)
@@ -231,9 +232,9 @@ sinkSite =
 -- break the round-trip test.
 demoSlots :: [SlotSpec]
 demoSlots =
-  [ SlotSpec "2026-09-01" "11:00" "13:00" "Islington / Finsbury Park" 6 0
-  , SlotSpec "2026-09-01" "18:00" "20:00" "Islington / Finsbury Park" 6 0
-  , SlotSpec "2026-09-08" "11:00" "13:00" "Marylebone / Clerkenwell" 6 0
+  [ SlotSpec "2026-09-01" "11:00" "13:00" "Islington / Finsbury Park" 6 0 ""
+  , SlotSpec "2026-09-01" "18:00" "20:00" "Islington / Finsbury Park" 6 0 ""
+  , SlotSpec "2026-09-08" "11:00" "13:00" "Marylebone / Clerkenwell" 6 0 ""
   ]
 
 demoProduct :: Product
@@ -357,7 +358,7 @@ blockRoundTrip = do
         , BMuted (BHeading "h")
         , BLinkText "l" "/l"
         , BEmailReveal
-        , BScheduleForm 3 [SlotSpec "2026-09-01" "11:00" "13:00" "Islington" 6 3]
+        , BScheduleForm 3 [SlotSpec "2026-09-01" "11:00" "13:00" "Islington" 6 3 "", SlotSpec "2026-11-18" "19:30" "21:30" "Ukiyo" 8 0 "Okashi School x [Ukiyo](https://ukiyohandrollbar.com/)"]
         , BRuleLine
         ]
       ok b = blockFromJSON (blockToJSON b) == Right b
@@ -601,24 +602,30 @@ scheduleTests :: IO [Bool]
 scheduleTests = do
   section "schedule a class (reservation calendar)"
   let slots =
-        [ SlotSpec "2026-09-01" "14:00" "16:00" "Islington / Finsbury Park" 6 0
-        , SlotSpec "2026-09-02" "18:00" "20:00" "Islington / Finsbury Park" 6 6 -- full (or claimed whole)
-        , SlotSpec "2026-09-08" "14:00" "16:00" "Marylebone / Clerkenwell" 6 5
+        [ SlotSpec "2026-09-01" "14:00" "16:00" "Islington / Finsbury Park" 6 0 ""
+        , SlotSpec "2026-09-02" "18:00" "20:00" "Islington / Finsbury Park" 6 6 "" -- full (or claimed whole)
+        , SlotSpec "2026-09-08" "14:00" "16:00" "Marylebone / Clerkenwell" 6 5 ""
+        , SlotSpec "2026-08-28" "19:30" "21:30" "Ukiyo, Covent Garden" 8 0 "Okashi School x [Ukiyo](https://ukiyohandrollbar.com/) **\"Mochi Daifuku with Tea and Sake\"**"
         ]
       render mw ss = renderHtml (renderStage nytTheme (renderSection 0 (ScheduleClass (Just "Schedule") Nothing mw ss)) (Viewport 1180 900))
       html = render 3 slots
       -- Week-cap scenario: cap 1, one session already started that week —
       -- the week's other empty slot must vanish, the started one stays.
       capSlots =
-        [ SlotSpec "2026-09-01" "14:00" "16:00" "A" 6 2 -- started session
-        , SlotSpec "2026-09-02" "14:00" "16:00" "A" 6 0 -- empty, same week
-        , SlotSpec "2026-09-08" "14:00" "16:00" "A" 6 0 -- next week, unaffected
+        [ SlotSpec "2026-09-01" "14:00" "16:00" "A" 6 2 "" -- started session
+        , SlotSpec "2026-09-02" "14:00" "16:00" "A" 6 0 "" -- empty, same week
+        , SlotSpec "2026-09-08" "14:00" "16:00" "A" 6 0 "" -- next week, unaffected
         ]
       capHtml = render 1 capSlots
-      persisted = sectionSpecToJSON (ScheduleClass Nothing Nothing 3 [SlotSpec "2026-09-01" "14:00" "16:00" "A" 6 3])
+      persisted = sectionSpecToJSON (ScheduleClass Nothing Nothing 3 [SlotSpec "2026-09-01" "14:00" "16:00" "A" 6 3 "", SlotSpec "2026-09-02" "19:30" "21:30" "B" 8 0 "A *partner* evening"])
   sequence
     [ check "form posts to /schedule" ("action=\"/schedule\"" `T.isInfixOf` html)
-    , check "renders a week-per-row calendar grid" (T.count "sww-calgrid" html >= 2 && "sww-caldows" `T.isInfixOf` html)
+    , check "one card per bookable class (full ones absent)" (T.count "class=\"sww-slotcard\"" html == 3)
+    , check "cards run in date order" (let at v = T.length (fst (T.breakOn v html)) in at "2026-08-28-1930" < at "2026-09-01-1400" && at "2026-09-01-1400" < at "2026-09-08-1400")
+    , check "a card spells the date out boldly" (all (`T.isInfixOf` html) ["sww-slotcard-day\">28<", "Friday", "August 2026", "19:30 \x2013 21:30"])
+    , check "a card carries its description, links and bold intact" ("<a class=\"sww-link\" href=\"https://ukiyohandrollbar.com/\">Ukiyo</a>" `T.isInfixOf` html && "<strong>\"Mochi Daifuku with Tea and Sake\"</strong>" `T.isInfixOf` html)
+    , check "a card names its area" ("sww-slotcard-area\">Ukiyo, Covent Garden<" `T.isInfixOf` html)
+    , check "description markdown reads plainly in mail" (markdownPlain "Okashi School x [Ukiyo](https://ukiyohandrollbar.com/) **\"Tea\"** 2 * 3" == "Okashi School x Ukiyo (https://ukiyohandrollbar.com/) \"Tea\" 2 * 3")
     , check "slots become radios with stable ids" ("value=\"2026-09-01-1400\"" `T.isInfixOf` html)
     , check "spots-free overlay on each date" ("6 spots free" `T.isInfixOf` html && "1 spot free" `T.isInfixOf` html)
     , check "a full slot disappears entirely" (not ("2026-09-02-1800" `T.isInfixOf` html) && not ("disabled" `T.isInfixOf` html))
@@ -631,9 +638,10 @@ scheduleTests = do
     , check "day formatting (Sakamoto)" (fmtSlotDay "2026-09-01" == "Tue 1 Sep" && fmtSlotDay "2026-09-13" == "Sun 13 Sep")
     , check "week keys are Monday-based" (mondayOf "2026-09-01" == "2026-08-31" && mondayOf "2026-08-31" == "2026-08-31" && mondayOf "2026-09-06" == "2026-08-31" && mondayOf "2026-09-07" == "2026-09-07")
     , check "date arithmetic crosses months both ways" (addDaysIso 7 "2026-08-31" == "2026-09-07" && addDaysIso (-3) "2026-09-02" == "2026-08-30")
-    , check "slot ids strip the colon" (slotIdOf (SlotSpec "2026-09-01" "14:00" "16:00" "A" 6 0) == "2026-09-01-1400")
-    , check "grouping preserves first-appearance order" (map fst (groupSlotsByArea slots) == ["Islington / Finsbury Park", "Marylebone / Clerkenwell"])
-    , check "live counts are NOT persisted; maxWeekly IS" (sectionSpecFromJSON persisted == Right (ScheduleClass Nothing Nothing 3 [SlotSpec "2026-09-01" "14:00" "16:00" "A" 6 0]))
+    , check "slot ids strip the colon" (slotIdOf (SlotSpec "2026-09-01" "14:00" "16:00" "A" 6 0 "") == "2026-09-01-1400")
+    , check "grouping preserves first-appearance order" (map fst (groupSlotsByArea slots) == ["Islington / Finsbury Park", "Marylebone / Clerkenwell", "Ukiyo, Covent Garden"])
+    , check "live counts are NOT persisted; maxWeekly + descriptions ARE" (sectionSpecFromJSON persisted == Right (ScheduleClass Nothing Nothing 3 [SlotSpec "2026-09-01" "14:00" "16:00" "A" 6 0 "", SlotSpec "2026-09-02" "19:30" "21:30" "B" 8 0 "A *partner* evening"]))
+    , check "a class without a description persists no description key" (not ("description" `T.isInfixOf` T.pack (encode (sectionSpecToJSON (ScheduleClass Nothing Nothing 0 [SlotSpec "2026-09-01" "14:00" "16:00" "A" 6 0 ""])))))
     , check "generateSlots expands a fortnight plan" (let g = generateSlots "2026-09-01" "2026-09-13" [0 .. 6] [("14:00", "16:00"), ("18:00", "20:00")] "X" 6 in length g == 26 && all ((== "X") . slotArea) g)
     , check "generateSlots respects weekday selection" (let g = generateSlots "2026-09-01" "2026-09-13" [5, 6] [("14:00", "16:00")] "X" 6 in map slotDate g == ["2026-09-05", "2026-09-06", "2026-09-12", "2026-09-13"])
     ]

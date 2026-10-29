@@ -106,6 +106,10 @@
             pkgs.awscli2
             pkgs.openssh
             pkgs.jq
+            # C libraries the server's Hackage deps link against, so a plain
+            # `cabal build` works in this shell (the Nix build brings its own).
+            pkgs.zlib
+            pkgs.pkg-config
           ];
         };
       }

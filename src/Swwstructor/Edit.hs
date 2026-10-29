@@ -153,7 +153,7 @@ blankProduct n =
   Product "New item" "What it is." (Price (Cents 1000) EUR) Nothing (BuyTarget ("item-" <> T.pack (show n))) OnSale
 
 blankSlot :: SlotSpec
-blankSlot = SlotSpec "2026-09-01" "14:00" "16:00" "Area to be announced" 6 0
+blankSlot = SlotSpec "2026-09-01" "14:00" "16:00" "Area to be announced" 6 0 ""
 
 -- | Expand an availability plan into concrete slots: every selected weekday
 -- in @[from .. to]@ gets one slot per time window. The admin's \"generate\"
@@ -162,7 +162,7 @@ blankSlot = SlotSpec "2026-09-01" "14:00" "16:00" "Area to be announced" 6 0
 -- malformed dates yield nothing.
 generateSlots :: Text -> Text -> [Int] -> [(Text, Text)] -> Text -> Int -> [SlotSpec]
 generateSlots from to weekdays windows area cap =
-  [ SlotSpec d start end area (max 1 cap) 0
+  [ SlotSpec d start end area (max 1 cap) 0 ""
   | d <- days
   , dayOfWeekMon d `elem` weekdays
   , (start, end) <- windows

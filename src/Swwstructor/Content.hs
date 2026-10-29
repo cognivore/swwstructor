@@ -376,6 +376,7 @@ slotSpecToJSON s =
     , req "end" (jS (slotEnd s))
     , req "area" (jS (slotArea s))
     , req "cap" (JNum (fromIntegral (slotCap s)))
+    , if T.null (slotDescription s) then [] else req "description" (jS (slotDescription s))
     ]
 
 slotSpecFromJSON :: JSON -> Either String SlotSpec
@@ -385,7 +386,7 @@ slotSpecFromJSON v = do
   en <- reqText v "end"
   area <- reqText v "area"
   let cap = maybe 6 round (optDouble v "cap")
-  pure (SlotSpec d st en area (max 1 cap) 0)
+  pure (SlotSpec d st en area (max 1 cap) 0 (maybe "" id (optText v "description")))
 
 storyToJSON :: Story -> JSON
 storyToJSON s =

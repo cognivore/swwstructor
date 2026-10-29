@@ -45,13 +45,13 @@ import Swwstructor.Block
   , headingLink
   , kicker
   , linkText
-  , mondayOf
   , muted
   , navBar
   , notOfferedButton
   , paragraph
   , priceTag
   , scheduleForm
+  , slotVisible
   , subhead
   , timestamp
   )
@@ -65,7 +65,7 @@ import Swwstructor.Content
   , Product (..)
   , SectionSpec (..)
   , SiteSpec (sitePartials)
-  , SlotSpec (slotDate)
+  , SlotSpec
   , Story (..)
   )
 import StickyWM
@@ -366,11 +366,11 @@ scheduleClassSection pfx title intro maxWeekly slots =
             else leafWith (chrome (Custom "schedule") (pfx <> "-form") (formHeight slots)) (scheduleForm maxWeekly slots)
       ]
   where
-    -- One ~150px calendar row per distinct week + the fields; the relayout
+    -- One ~330px row of cards per three classes + the fields; the relayout
     -- pass measures reality.
     formHeight ss =
-      let weeks = length (foldr (\x acc -> if x `elem` acc then acc else x : acc) [] (map (mondayOf . slotDate) ss))
-       in 380 + 165 * fromIntegral weeks
+      let rows = (length (filter (slotVisible maxWeekly ss) ss) + 2) `div` 3
+       in 300 + 330 * fromIntegral rows
 
 richColumnsSection :: String -> Maybe Text -> [Text] -> Section
 richColumnsSection pfx title cols =
