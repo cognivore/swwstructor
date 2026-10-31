@@ -77,10 +77,15 @@ let
           description = "age file holding the Google refresh token for the account the site acts as (seed-only).";
         };
         booking = {
+          calendarEnabled = lib.mkOption {
+            type = lib.types.bool;
+            default = true;
+            description = "Create and update staff Google Calendar events. Independent of reservation email notifications and downloadable calendar files.";
+          };
           staff = lib.mkOption {
             type = lib.types.listOf lib.types.str;
             default = [ ];
-            description = "Addresses invited to every class-booking calendar event and copied on every booking mail.";
+            description = "Addresses invited to class-booking calendar events when calendarEnabled is true. Reservation email recipients are configured separately in the admin dashboard.";
           };
           replyTo = lib.mkOption {
             type = lib.types.nullOr lib.types.str;
@@ -186,6 +191,7 @@ in
           # CA bundle for the outbound Stripe/Google API TLS calls.
           SYSTEM_CERTIFICATE_PATH = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
           SWW_BOOKING_TZ = inst.booking.timeZone;
+          SWW_BOOKING_CALENDAR_ENABLED = lib.boolToString inst.booking.calendarEnabled;
           SWW_BOOKING_TZ_OFFSET = inst.booking.tzOffset;
           SWW_BOOKING_VENUE_NOUN = inst.booking.venueNoun;
         }

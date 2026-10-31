@@ -25,7 +25,7 @@ import Swwstructor.Content (PageSpec (..), SectionSpec (..), SiteSpec (..), Slot
 import Swwstructor.Server.App (AppEnv (..), Stage (Test), swwApp)
 import Swwstructor.Server.Booking
 import Swwstructor.Server.Catalog (newCatalogCache)
-import Swwstructor.Server.Notify (BookingCtx (..), drainReservationEmails)
+import Swwstructor.Server.Notify (BookingCtx (..), drainReservationEmails, ensureReservationSideEffects, announceVenues)
 import Swwstructor.Server.Admin (bookingsPage)
 import Swwstructor.Server.Google (GoogleCreds (gcRefreshToken, gcMailFrom), googleCredsOf, googleMailCredsOf, reservationMime, verifiedSendAs)
 import Swwstructor.Html (renderHtml)
@@ -75,7 +75,7 @@ exercise dir = do
   spent <- newIORef M.empty
   catalog <- newCatalogCache
   calendarAttempts <- newIORef (0 :: Int)
-  let ctx = BookingCtx manager lessons (modifyIORef' calendarAttempts (+ 1) >> pure Nothing) (pure Nothing) [] "Okashi School" "https://okashi-school.com" "Europe/London" "+00:00" (pure [slot]) (listVenues venues) "kitchen"
+  let ctx = BookingCtx manager lessons True (modifyIORef' calendarAttempts (+ 1) >> pure Nothing) (pure Nothing) [] "Okashi School" "https://okashi-school.com" "Europe/London" "+00:00" (pure [slot]) (listVenues venues) "kitchen"
       env = AppEnv site "https://okashi-school.com" Test secretFile master session "fixture-password" manager dir dir catalog spent lessons payments ctx venues Nothing
   app <- scottyApp (swwApp env)
   let requestTo target method path headers body = runSession (srequest (SRequest ((setPath defaultRequest path) {requestMethod = method, requestHeaders = headers}) body)) target
@@ -155,9 +155,24 @@ exercise dir = do
   check "header injection cannot configure recipients" (statusCode (simpleStatus invalid) == 400)
   savedEmails <- request methodPost "/admin/reservation-emails/save" adminHeaders (form "&enabled=yes&recipients=venue%40example.com%2Cschool%40example.com%2Cvenue%40example.com")
   check "admin can save deduplicated recipients" (statusCode (simpleStatus savedEmails) == 303)
+  let noCalendarCtx = ctx {bcCalendarEnabled = False}
+  noCalendarApp <- scottyApp (swwApp env {aeBookingCtx = noCalendarCtx})
+  calendarBefore <- readIORef calendarAttempts
+  check "enabled calendar integration is still attempted for ordinary bookings" (calendarBefore > 0)
   _ <- paid "pi_fixture_notify" [("sww_code", JStr "PQRS-6789"), ("sww_product", JStr "Group Double"), ("sww_seats", JStr "2")] "succeeded"
-  hooked <- schedule "PQRS-6789"
+  hooked <- requestTo noCalendarApp methodPost "/schedule" [(hContentType, "application/x-www-form-urlencoded")] (BL.fromStrict (TE.encodeUtf8 ("code=PQRS-6789&name=Fixture&slot=" <> slotIdOf slot)))
   check "paid ticket redemption invokes the hook" (statusCode (simpleStatus hooked) == 303)
+  -- Exercise both worker paths: a new booking needing an event and an old
+  -- event needing its venue update. Disabled calendars cannot reach credentials.
+  setEventId lessons "ABCD-2345" "existing-event-fixture"
+  calendarTickets <- listTickets lessons
+  mapM_ (ensureReservationSideEffects noCalendarCtx) calendarTickets
+  announceVenues noCalendarCtx "2026-10-31"
+  calendarAfter <- readIORef calendarAttempts
+  afterCalendar <- listTickets lessons
+  check "disabled calendar blocks handler creation, worker retry and venue updates" (calendarBefore == calendarAfter && afterCalendar == calendarTickets)
+  disabledIcs <- requestTo noCalendarApp methodGet "/booking/PQRS-6789/calendar.ics" [] ""
+  check "downloadable calendar files work without automatic invitations" (statusCode (simpleStatus disabledIcs) == 200 && "BEGIN:VCALENDAR" `T.isInfixOf` bodyText disabledIcs)
   queued <- readReservationEmails lessons
   check "one private message per recipient, with reservation details" (length (emailsDeliveries queued) == 2 && all (\d -> all (`T.isInfixOf` deliveryBody d) ["PQRS-6789", "2027-01-13", "Places reserved: 2", "Preferred name: Fixture"] && "2 places reserved" `T.isPrefixOf` deliverySubject d) (emailsDeliveries queued))
   currentTickets <- listTickets lessons

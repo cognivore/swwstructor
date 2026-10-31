@@ -67,6 +67,8 @@ import Swwstructor.Server.Venues (Venue, venueForArea, venueLocation)
 data BookingCtx = BookingCtx
   { bcManager :: !Manager
   , bcStore :: !BookingStore
+  , bcCalendarEnabled :: !Bool
+  -- ^ independent of reservation emails and student-downloaded calendar files
   , bcCreds :: !(IO (Maybe GoogleCreds))
   -- ^ loaded per use — the owner can paste keys into the admin at runtime
   , bcMailCreds :: !(IO (Maybe GoogleCreds))
@@ -109,6 +111,7 @@ siteMaxWeekly site = maximum (0 : [mw | ScheduleClass _ _ mw _ <- allSectionsOf 
 -- event id is recorded. The event names the student only by the name they
 -- chose and the ticket code; staff are the only attendees.
 ensureReservationSideEffects :: BookingCtx -> Ticket -> IO ()
+ensureReservationSideEffects ctx _ | not (bcCalendarEnabled ctx) = pure ()
 ensureReservationSideEffects ctx t = case tkRedemption t of
   Nothing -> pure ()
   Just r -> do
@@ -179,6 +182,7 @@ ensureEvent ctx t r s = case redEventId r of
 -- | Existing future events receive their matching venue address immediately.
 -- @today@ only excludes archived classes; there is no disclosure delay.
 announceVenues :: BookingCtx -> Text -> IO ()
+announceVenues ctx _ | not (bcCalendarEnabled ctx) = pure ()
 announceVenues ctx today = do
   tickets <- listTickets (bcStore ctx)
   slots <- bcSlots ctx

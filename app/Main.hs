@@ -23,6 +23,8 @@
 --
 -- Booking (the @scheduleClass@ section; all optional):
 --
+--   * @SWW_BOOKING_CALENDAR_ENABLED@ — true (default) or false; controls staff
+--                               Google Calendar events and updates, not email
 --   * @SWW_BOOKING_STAFF@     — comma-separated staff addresses invited to
 --                               every class event (no mail goes to students:
 --                               the site holds no student contact details)
@@ -154,6 +156,15 @@ main = do
   paymentCodes <- newPaymentCodeStore (dataDir </> "payment-codes.json")
   venues <- newVenueStore (dataDir </> "venues.json")
   staff <- splitCsv . fromMaybe "" <$> lookupEnv "SWW_BOOKING_STAFF"
+  calendarSetting <- lookupEnv "SWW_BOOKING_CALENDAR_ENABLED"
+  calendarEnabled <- case calendarSetting of
+    Nothing -> pure True
+    Just "true" -> pure True
+    Just "false" -> pure False
+    _ -> do
+      putStrLn "[swwstructor] FATAL: SWW_BOOKING_CALENDAR_ENABLED must be true or false."
+      exitFailure
+  when (not calendarEnabled) $ putStrLn "[booking] automatic staff calendar events and updates are disabled."
   bookingName <- fromMaybe (T.unpack (siteTitle site0)) . nonEmptyEnv <$> lookupEnv "SWW_BOOKING_NAME"
   tzName <- fromMaybe "Europe/London" . nonEmptyEnv <$> lookupEnv "SWW_BOOKING_TZ"
   tzOffset <- fromMaybe "+01:00" . nonEmptyEnv <$> lookupEnv "SWW_BOOKING_TZ_OFFSET"
@@ -162,6 +173,7 @@ main = do
         BookingCtx
           { bcManager = mgr
           , bcStore = bookings
+          , bcCalendarEnabled = calendarEnabled
           , bcCreds = googleCredsOf <$> loadBundle secretFile masterKey
           , bcMailCreds = googleMailCredsOf <$> loadBundle secretFile masterKey
           , bcStaff = staff
