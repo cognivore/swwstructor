@@ -190,6 +190,26 @@ never compiles (`nix.settings.max-jobs = 0`); closures are built on a builder an
 
 ---
 
+## Reservation notification emails
+
+Open **Admin → Bookings → Reservation notifications**. Add up to 20 bare
+email addresses and enable the hook. Each successful paid-ticket redemption
+queues a separate email for each recipient, normally sent within a minute via
+the configured Google account (which must grant Gmail send permission).
+Changes apply to future reservations; existing bookings are not emailed.
+
+**Send test notification** uses the same outbox and sender, labels the message
+`[TEST]`, and consumes no ticket or class capacity. Delivery history reports
+Gmail acceptance, rejection or an uncertain result. Retry failures from this
+screen; check the sender's Sent folder before retrying an uncertain delivery.
+Provider acceptance is not proof of inbox delivery.
+
+Reservations, recipient snapshots and the outbox share an atomic write in
+`bookings.json`. Missing configuration defaults to disabled. A send interrupted
+by restart becomes uncertain and is not automatically repeated. Keep a backup
+before rolling back to an engine predating this feature: that engine does not
+preserve the new outbox fields when it rewrites bookings.
+
 ## Invariants (inherited from the engine, enforced here)
 
 1. **Final tagless, strong newtypes.** New capabilities are typeclasses; new

@@ -34,7 +34,7 @@ import Data.Time.Clock (UTCTime, getCurrentTime)
 import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
 import Data.Word (Word8)
 import Network.HTTP.Client (Manager)
-import Network.HTTP.Types.Status (status303, status400, status404, status500, status503)
+import Network.HTTP.Types.Status (status303, status400, status403, status404, status500, status503)
 import Network.Wai (rawPathInfo)
 import Network.Wai.Middleware.Autohead (autohead)
 import Network.Wai.Middleware.RequestSizeLimit
@@ -138,7 +138,12 @@ import Swwstructor.Server.Booking
   , newTicketCode
   , redeemTicket
   , takenFor
+  , readReservationEmails
+  , configureReservationEmails
+  , queueTestEmail
+  , retryReservationEmail
   )
+import Swwstructor.Server.ReservationEmail (parseRecipients, parseMailbox)
 import Swwstructor.Server.Media (deleteMedia, listAssets, listMedia, resolveMedia, saveMedia)
 import Swwstructor.Server.Notify
   ( BookingCtx (bcSiteName, bcVenueNoun, bcVenues)
@@ -146,6 +151,7 @@ import Swwstructor.Server.Notify
   , CalendarStatus (..)
   , bookingIcs
   , ensureReservationSideEffects
+  , deliverReservationEmails
   , siteMaxWeekly
   , siteSlots
   )
@@ -377,6 +383,9 @@ swwApp env = do
   post "/admin/theme" (adminGate env (handleThemeSave env))
   get "/admin/stripe" (adminGate env (handleStripe env Nothing))
   get "/admin/bookings" (adminGate env (handleBookings env Nothing))
+  post "/admin/reservation-emails/save" (reservationEmailGate env (handleReservationEmailsSave env))
+  post "/admin/reservation-emails/test" (reservationEmailGate env (handleReservationEmailsTest env))
+  post "/admin/reservation-emails/retry" (reservationEmailGate env (handleReservationEmailsRetry env))
   get "/admin/venues" (adminGate env (handleVenues env Nothing))
   post "/admin/venues/save" (adminGate env (handleVenueSave env))
   post "/admin/venues/delete" (adminGate env (handleVenueDelete env))
@@ -1101,7 +1110,54 @@ handleBookings env mfl = do
   site <- currentSite env
   tickets <- liftIO (listTickets (aeBookings env))
   bundle <- liftIO (loadBundle (aeSecretFile env) (aeMasterKey env))
-  htmlOf (bookingsPage tickets (siteSlots site) bundle mfl)
+  emails <- liftIO (readReservationEmails (aeBookings env))
+  epoch <- liftIO (readIORef (aeSession env))
+  htmlOf (bookingsPage tickets (siteSlots site) bundle emails (reservationEmailCsrf env epoch) mfl)
+
+reservationEmailCsrf :: AppEnv -> Integer -> Text
+reservationEmailCsrf env epoch = T.pack (show (hash (TE.encodeUtf8 ("reservation-emails:" <> sessionToken env epoch)) :: Digest SHA256))
+
+reservationEmailGate :: AppEnv -> ActionM () -> ActionM ()
+reservationEmailGate env action = adminGate env $ do
+  supplied <- formParamMaybe "csrf"
+  epoch <- liftIO (readIORef (aeSession env))
+  if maybe False (ctEq (reservationEmailCsrf env epoch)) supplied
+    then action
+    else status status403 >> text "This form expired. Reload Bookings and try again. No email settings changed and no email was sent."
+
+handleReservationEmailsSave :: AppEnv -> ActionM ()
+handleReservationEmailsSave env = do
+  enabled <- (== Just ("yes" :: Text)) <$> formParamMaybe "enabled"
+  rawRecipients <- fromMaybe "" <$> formParamMaybe "recipients"
+  case parseRecipients rawRecipients of
+    Left why -> status status400 >> handleBookings env (Just why)
+    Right [] | enabled -> status status400 >> handleBookings env (Just "Add at least one recipient before enabling reservation notifications.")
+    Right recipients -> do
+      liftIO (configureReservationEmails (aeBookings env) enabled recipients)
+      reservationEmailsRedirect
+
+handleReservationEmailsTest :: AppEnv -> ActionM ()
+handleReservationEmailsTest env = do
+  recipient <- fromMaybe "" <$> formParamMaybe "testRecipient"
+  site <- currentSite env
+  case (parseMailbox recipient, siteSlots site) of
+    (Left why, _) -> status status400 >> handleBookings env (Just why)
+    (_, []) -> status status400 >> handleBookings env (Just "Add a class date before sending a sample reservation notification.")
+    (Right address, slot : _) -> do
+      _ <- liftIO (queueTestEmail (aeBookings env) slot address)
+      liftIO (deliverReservationEmails (aeBookingCtx env))
+      reservationEmailsRedirect
+
+handleReservationEmailsRetry :: AppEnv -> ActionM ()
+handleReservationEmailsRetry env = do
+  ident <- fromMaybe "" <$> formParamMaybe "delivery"
+  retried <- liftIO (retryReservationEmail (aeBookings env) ident)
+  if retried
+    then liftIO (deliverReservationEmails (aeBookingCtx env)) >> reservationEmailsRedirect
+    else status status400 >> handleBookings env (Just "That email is not eligible for retry. Reload to see its current status.")
+
+reservationEmailsRedirect :: ActionM ()
+reservationEmailsRedirect = status status303 >> setHeader "Location" "/admin/bookings#reservation-emails"
 
 handleVenues :: AppEnv -> Maybe Text -> ActionM ()
 handleVenues env mfl = do

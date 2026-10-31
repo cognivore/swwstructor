@@ -72,6 +72,7 @@ executable swwstructor-server
     Swwstructor.Server.Media
     Swwstructor.Server.Catalog
     Swwstructor.Server.Booking
+    Swwstructor.Server.ReservationEmail
     Swwstructor.Server.PaymentCodes
     Swwstructor.Server.Google
     Swwstructor.Server.Venues
@@ -127,6 +128,7 @@ test-suite booking-location-test
   default-language: GHC2021
   other-modules:
     Swwstructor.Server.Booking
+    Swwstructor.Server.ReservationEmail
     Swwstructor.Server.Google
     Swwstructor.Server.Notify
     Swwstructor.Server.SecretStore
@@ -159,6 +161,7 @@ test-suite payment-code-test
     Swwstructor.Server.Media
     Swwstructor.Server.Catalog
     Swwstructor.Server.Booking
+    Swwstructor.Server.ReservationEmail
     Swwstructor.Server.PaymentCodes
     Swwstructor.Server.Google
     Swwstructor.Server.Venues

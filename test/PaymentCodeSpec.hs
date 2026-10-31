@@ -3,6 +3,7 @@
 module Main (main) where
 
 import Control.Exception (IOException, bracket, try)
+import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
 import Control.Monad (unless)
 import Crypto.Hash (SHA256)
 import Crypto.MAC.HMAC (HMAC, hmac, hmacGetDigest)
@@ -10,7 +11,7 @@ import Data.ByteArray.Encoding (Base (Base16), convertToBase)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BC
 import Data.ByteString.Lazy qualified as BL
-import Data.IORef (modifyIORef', newIORef, readIORef)
+import Data.IORef (atomicModifyIORef', modifyIORef', newIORef, readIORef)
 import Data.Map.Strict qualified as M
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
@@ -22,9 +23,10 @@ import Network.Wai.Test (SRequest (..), runSession, setPath, simpleBody, simpleH
 import StickyWM (JSON (..), encode)
 import Swwstructor.Content (PageSpec (..), SectionSpec (..), SiteSpec (..), SlotSpec (..), slotIdOf)
 import Swwstructor.Server.App (AppEnv (..), Stage (Test), swwApp)
-import Swwstructor.Server.Booking (listTickets, newBookingStore, takenFor)
+import Swwstructor.Server.Booking
 import Swwstructor.Server.Catalog (newCatalogCache)
-import Swwstructor.Server.Notify (BookingCtx (..))
+import Swwstructor.Server.Notify (BookingCtx (..), drainReservationEmails)
+import Swwstructor.Server.ReservationEmail
 import Swwstructor.Server.PaymentCodes
 import Swwstructor.Server.SecretStore (SecretBundle (..), SecretValue (..), emptyBundle, genMasterKey, saveBundle)
 import Swwstructor.Server.Store (newSiteStore, saveSiteFile)
@@ -125,6 +127,73 @@ exercise dir = do
   _ <- schedule code
   after <- listTickets lessons
   check "repeating a payment preview cannot change lesson reservations" (after == tickets)
+  -- The reservation callback is configured by the authenticated UI and is
+  -- committed in the same store write as redemption. No network in this test.
+  initialEmails <- readReservationEmails lessons
+  check "hook starts disabled and does not backfill old bookings" (initialEmails == emptyReservationEmails)
+  denied <- request methodPost "/admin/reservation-emails/save" [(hContentType, "application/x-www-form-urlencoded")] "enabled=yes&recipients=venue%40example.com"
+  check "public requests cannot configure recipients" (lookup hLocation (simpleHeaders denied) == Just "/admin/login")
+  login <- request methodPost "/admin/login" [(hContentType, "application/x-www-form-urlencoded")] "password=fixture-password"
+  let cookie = maybe "" (BC.takeWhile (/= ';')) (lookup "Set-Cookie" (simpleHeaders login))
+      adminHeaders = [("Cookie", cookie), (hContentType, "application/x-www-form-urlencoded")]
+  admin <- request methodGet "/admin/bookings" [("Cookie", cookie)] ""
+  let marker = "name=\"csrf\" value=\""
+      csrf = T.takeWhile (/= '"') (T.drop (T.length marker) (snd (T.breakOn marker (bodyText admin))))
+      form suffix = BL.fromStrict (TE.encodeUtf8 ("csrf=" <> csrf <> suffix))
+  check "admin UI offers recipient configuration and test send" (not (T.null csrf) && "Send test notification" `T.isInfixOf` bodyText admin)
+  forged <- request methodPost "/admin/reservation-emails/save" adminHeaders "enabled=yes&recipients=venue%40example.com"
+  check "authenticated requests still require the email form CSRF token" (statusCode (simpleStatus forged) == 403)
+  invalid <- request methodPost "/admin/reservation-emails/save" adminHeaders (form "&enabled=yes&recipients=venue%40example.com%0D%0ABcc%3Aintruder%40example.com")
+  check "header injection cannot configure recipients" (statusCode (simpleStatus invalid) == 400)
+  savedEmails <- request methodPost "/admin/reservation-emails/save" adminHeaders (form "&enabled=yes&recipients=venue%40example.com%2Cschool%40example.com%2Cvenue%40example.com")
+  check "admin can save deduplicated recipients" (statusCode (simpleStatus savedEmails) == 303)
+  _ <- paid "pi_fixture_notify" [("sww_code", JStr "PQRS-6789"), ("sww_product", JStr "Group Double"), ("sww_seats", JStr "2")] "succeeded"
+  hooked <- schedule "PQRS-6789"
+  check "paid ticket redemption invokes the hook" (statusCode (simpleStatus hooked) == 303)
+  queued <- readReservationEmails lessons
+  check "one private message per recipient, with reservation details" (length (emailsDeliveries queued) == 2 && all (\d -> all (`T.isInfixOf` deliveryBody d) ["PQRS-6789", "2027-01-13", "Places: 2", "Preferred name: Fixture"]) (emailsDeliveries queued))
+  _ <- schedule "PQRS-6789"
+  _ <- schedule code
+  unchangedQueue <- readReservationEmails lessons
+  check "duplicate redemption and payment previews do not notify" (unchangedQueue == queued)
+  reloadedLessons <- newBookingStore (dir </> "bookings.json")
+  restored <- readReservationEmails reloadedLessons
+  check "reservation, configuration and queued emails survive restart together" (restored == queued)
+  sent <- newIORef ([] :: [T.Text])
+  let transport d = atomicModifyIORef' sent (\ids -> (deliveryId d : ids, Sent "provider-fixture"))
+  doneA <- newEmptyMVar
+  doneB <- newEmptyMVar
+  _ <- forkIO (drainReservationEmails lessons transport >> putMVar doneA ())
+  _ <- forkIO (drainReservationEmails lessons transport >> putMVar doneB ())
+  takeMVar doneA
+  takeMVar doneB
+  drainReservationEmails lessons transport
+  deliveredIds <- readIORef sent
+  check "concurrent workers and repeated ticks send each job once" (length deliveredIds == 2 && length (M.fromList [(ident, ()) | ident <- deliveredIds]) == 2)
+  let Right recipient = parseMailbox "test@example.com"
+  testId <- queueTestEmail lessons slot recipient
+  drainReservationEmails lessons (\_ -> pure (Failed "fixture rejected"))
+  _ <- retryReservationEmail lessons testId
+  drainReservationEmails lessons transport
+  delivered <- readReservationEmails lessons
+  check "failed test notification is retryable and visibly labelled" (any (\d -> deliveryId d == testId && deliveryState d == Sent "provider-fixture" && "[TEST]" `T.isPrefixOf` deliverySubject d) (emailsDeliveries delivered))
+  secondRetry <- retryReservationEmail lessons testId
+  check "accepted messages cannot be resent through retry" (not secondRetry)
+  _ <- queueTestEmail lessons slot recipient
+  _ <- claimReservationEmail lessons
+  interruptedStore <- newBookingStore (dir </> "bookings.json")
+  interrupted <- readReservationEmails interruptedStore
+  check "crash during send is marked uncertain instead of queued again" (any (\d -> case deliveryState d of Uncertain _ -> True; _ -> False) (emailsDeliveries interrupted))
+  beforeTest <- listTickets lessons
+  testResponse <- request methodPost "/admin/reservation-emails/test" adminHeaders (form "&testRecipient=ep%40memorici.de")
+  afterTest <- listTickets lessons
+  check "admin test send never consumes a ticket or creates a reservation" (statusCode (simpleStatus testResponse) == 303 && beforeTest == afterTest)
+  blankRecipients <- request methodPost "/admin/reservation-emails/save" adminHeaders (form "&enabled=yes&recipients=")
+  check "an enabled hook must have recipients" (statusCode (simpleStatus blankRecipients) == 400)
+  brokenBooking <- newBookingStore (dir </> "missing-booking" </> "bookings.json")
+  failedBooking <- try (issueTicket brokenBooking "pi_storage" "K7Q2-M4XW" "Class" "1") :: IO (Either IOException (Either T.Text (Ticket, Bool)))
+  invisibleBooking <- listTickets brokenBooking
+  check "failed booking persistence publishes neither ticket nor outbox" (either (const True) (const False) failedBooking && null invisibleBooking)
   broken <- newPaymentCodeStore (dir </> "missing" </> "codes.json")
   failed <- issuePaymentCode broken "pi_fixture_storage" code "Payment check"
   invisible <- lookupPaymentCode broken code

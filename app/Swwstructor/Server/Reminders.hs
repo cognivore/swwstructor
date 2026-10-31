@@ -26,6 +26,7 @@ import Swwstructor.Server.Notify
   , announceVenues
   , ensureReservationSideEffects
   , offsetSeconds
+  , deliverReservationEmails
   )
 
 startReminderLoop :: BookingCtx -> IO ()
@@ -38,6 +39,7 @@ startReminderLoop ctx = void . forkIO . forever $ do
 
 tick :: BookingCtx -> IO ()
 tick ctx = do
+  deliverReservationEmails ctx
   now <- getCurrentTime
   -- Class-timezone civil time from the configured offset (see 'bcTzOffset').
   let local = addUTCTime (fromIntegral (offsetSeconds (bcTzOffset ctx))) now

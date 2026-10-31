@@ -46,6 +46,7 @@ import Swwstructor.Content
   )
 import Swwstructor.Plugins.StripeCatalog (CatalogItem (..))
 import Swwstructor.Server.Booking (Redemption (..), Ticket (..))
+import Swwstructor.Server.ReservationEmail
 import Swwstructor.Server.Media (MediaEntry (..))
 import Swwstructor.Server.Venues (Venue (..))
 import Swwstructor.Edit (generateSlots, isPartialPath, sectionKinds, sectionLabelOf)
@@ -822,8 +823,8 @@ stripePage baseUrl site catalog bundle fl =
 -- each reservation on the staff calendar. A ticket shows only its code, what
 -- was bought, and the name the student chose — the site holds nothing else
 -- about them (who paid lives in Stripe).
-bookingsPage :: [Ticket] -> [SlotSpec] -> SecretBundle -> Maybe Text -> Html
-bookingsPage tickets slots bundle fl =
+bookingsPage :: [Ticket] -> [SlotSpec] -> SecretBundle -> ReservationEmails -> Text -> Maybe Text -> Html
+bookingsPage tickets slots bundle emails csrf fl =
   adminDoc "Bookings" $
     htmlConcat
       [ topbar
@@ -831,12 +832,43 @@ bookingsPage tickets slots bundle fl =
           htmlConcat
             [ flash fl
             , el "h1" (esc "Bookings")
+            , emailCard
             , slotsCard
             , ticketsCard
             , googleCard
             ]
       ]
   where
+    csrfField = hidden "csrf" csrf
+    emailCard = elAttr "section" [("class", "card"), ("id", "reservation-emails")] $ htmlConcat
+      [ el "h2" (esc "Reservation notifications")
+      , el "p" (esc "When a paid ticket is used to book a class, email these people the class, date, time, number of places, ticket code and preferred name. Emails are sent within a minute. Each person receives a separate email. Customer email addresses are not collected.")
+      , elAttr "form" [("method", "post"), ("action", "/admin/reservation-emails/save")] $
+          csrfField
+          <> el "label" (voidElAttr "input" ([("type", "checkbox"), ("name", "enabled"), ("value", "yes")] <> [("checked", "checked") | emailsEnabled emails]) <> esc " Email people when a class is reserved")
+          <> txtArea "recipients" "Recipients — one email address per line, or separated by commas (maximum 20)" (T.intercalate "\n" (map mailboxText (emailsRecipients emails)))
+          <> el "p" (esc "Changes apply to future reservations. Emails already queued keep their original recipients. Saving does not email past bookings.")
+          <> elAttr "button" [("type", "submit"), ("class", "primary")] (esc "Save notification settings")
+      , el "h3" (esc "Test the notification")
+      , el "p" (esc "Send a clearly marked sample using the same delivery flow. This does not redeem a ticket, reserve places, invite calendar guests or change the saved recipients.")
+      , elAttr "form" [("method", "post"), ("action", "/admin/reservation-emails/test")] $
+          csrfField <> ipt "text" "testRecipient" "Send test to" ""
+          <> elAttr "button" [("type", "submit")] (esc "Send test notification")
+      , el "h3" (esc "Recent notification deliveries")
+      , el "p" (esc "Accepted by Gmail means the email service accepted it, not that it reached the inbox. For uncertain deliveries, check the sender's Sent folder before retrying; a retry could send a duplicate.")
+      , if null (emailsDeliveries emails) then el "p" (esc "No notification emails yet.") else
+          elAttr "table" [("class", "plist")] $
+            el "tr" (htmlConcat [el "th" (esc label) | label <- ["Created", "Recipient", "Subject", "Status", "Action"]])
+            <> htmlConcat (map emailRow (take 30 (reverse (emailsDeliveries emails))))
+      ]
+    emailRow d = el "tr" $
+      htmlConcat [el "td" (esc value) | value <- [deliveryCreated d, mailboxText (deliveryTo d), deliverySubject d, emailStatus (deliveryState d)]]
+      <> el "td" (case deliveryState d of
+          Failed _ -> retryButton d
+          Uncertain _ -> retryButton d
+          _ -> mempty)
+    retryButton d = elAttr "form" [("method", "post"), ("action", "/admin/reservation-emails/retry")] $
+      csrfField <> hidden "delivery" (deliveryId d) <> elAttr "button" [("type", "submit")] (esc "Retry email")
     slotLabelOf sid = case [s | s <- slots, slotIdOf s == sid] of
       (s : _) -> fmtSlotDay (slotDate s) <> " " <> slotStart s <> "\x2013" <> slotEnd s <> " \xB7 " <> slotArea s
       [] -> sid <> " (slot no longer defined)"
@@ -880,9 +912,10 @@ bookingsPage tickets slots bundle fl =
     googleCard =
       elAttr "div" [("class", "card")] $
         htmlConcat
-          [ el "h2" (esc "Google connection (the staff calendar)")
+          [ el "h2" (esc "Google connection (calendar and notification email)")
           , elAttr "p" [("class", "muted")] (esc "Each reservation becomes a Google Calendar event that invites the school's staff (never the student \x2014 the site holds no student contact details). Paste the OAuth client id + secret and a refresh token for the school's Google account. A blank field keeps its current value.")
           , statusRow "Client id" (isSet' (sbGoogleClientId bundle))
+          , el "p" (esc "Reservation notifications also need Gmail send permission on this Google connection. Use the test button above to check it.")
           , statusRow "Client secret" (isSet' (sbGoogleClientSecret bundle))
           , statusRow "Refresh token" (isSet' (sbGoogleRefreshToken bundle))
           , elAttr "form" [("method", "post"), ("action", "/admin/secrets?from=bookings")] $

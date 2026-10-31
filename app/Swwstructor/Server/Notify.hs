@@ -24,6 +24,8 @@ module Swwstructor.Server.Notify
   , CalendarTicket (..)
   , CalendarStatus (..)
   , offsetSeconds
+  , deliverReservationEmails
+  , drainReservationEmails
   ) where
 
 import Data.Text (Text)
@@ -47,13 +49,17 @@ import Swwstructor.Server.Booking
   , claimNote
   , listTickets
   , setEventId
+  , claimReservationEmail
+  , finishReservationEmail
   )
 import Swwstructor.Server.Google
   ( CalendarEvent (..)
   , GoogleCreds
   , createCalendarEvent
   , patchEventLocation
+  , sendReservationEmail
   )
+import Swwstructor.Server.ReservationEmail (Delivery (..), EmailState (..))
 import Swwstructor.Server.Venues (Venue, venueForArea, venueLocation)
 
 -- | Everything the side-effect code needs — deliberately NOT 'AppEnv' (this
@@ -108,6 +114,29 @@ ensureReservationSideEffects ctx t = case tkRedemption t of
     case [s | s <- slots, slotIdOf s == redSlotId r] of
       [] -> pure () -- slot definition edited away; nothing sensible to do
       (s : _) -> ensureEvent ctx t r s
+
+-- | One bounded drain per worker tick. The store atomically claims each job;
+-- concurrent handlers/worker runs cannot both send it. Tests substitute only
+-- the transport and execute this same claim/send/record path.
+drainReservationEmails :: BookingStore -> (Delivery -> IO EmailState) -> IO ()
+drainReservationEmails store send = go (20 :: Int)
+  where
+    go 0 = pure ()
+    go n = do
+      next <- claimReservationEmail store
+      case next of
+        Nothing -> pure ()
+        Just delivery -> do
+          outcome <- send delivery
+          finishReservationEmail store (deliveryId delivery) outcome
+          go (n - 1)
+
+deliverReservationEmails :: BookingCtx -> IO ()
+deliverReservationEmails ctx = drainReservationEmails (bcStore ctx) $ \delivery -> do
+  creds <- bcCreds ctx
+  case creds of
+    Nothing -> pure (Failed "No Google connection is configured. Save Google credentials with Gmail send permission, then retry.")
+    Just c -> sendReservationEmail (bcManager ctx) c delivery {deliveryBody = deliveryBody delivery <> "Time zone: " <> bcTimeZone ctx <> "\n"}
 
 ensureEvent :: BookingCtx -> Ticket -> Redemption -> SlotSpec -> IO ()
 ensureEvent ctx t r s = case redEventId r of

@@ -31,10 +31,16 @@ module Swwstructor.Server.Booking
   , setEventId
   , claimNote
   , takenFor
+  , readReservationEmails
+  , configureReservationEmails
+  , queueTestEmail
+  , claimReservationEmail
+  , finishReservationEmail
+  , retryReservationEmail
   ) where
 
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar, readMVar)
-import Control.Exception (SomeException, try)
+import Control.Exception (IOException, throwIO, try)
 import Crypto.Random (getRandomBytes)
 import qualified Data.ByteString as BS
 import Data.Map.Strict (Map)
@@ -46,9 +52,9 @@ import Data.Time.Clock (getCurrentTime)
 import Data.Time.Format (defaultTimeLocale, formatTime)
 import Swwstructor.Block (mondayOf)
 import Swwstructor.Content (SlotSpec, slotCap, slotDate, slotIdOf)
+import Swwstructor.Server.ReservationEmail
 import StickyWM (JSON (JArr, JNull, JNum, JObj, JStr), decode, encode, jstr, (.:), (.:?))
 import System.Directory (doesFileExist, renameFile)
-import System.IO (hPutStrLn, stderr)
 
 -- | A reserved slot on a ticket.
 data Redemption = Redemption
@@ -95,35 +101,35 @@ data RedeemError
   deriving (Eq, Show)
 
 data BookingStore = BookingStore
-  { bsVar :: !(MVar [Ticket])
+  { bsVar :: !(MVar BookingData)
   , bsFile :: !FilePath
   }
 
+data BookingData = BookingData ![Ticket] !ReservationEmails deriving (Eq)
+
 -- | Open the store; an absent file means no tickets yet. A present-but-corrupt
--- file fails loud and starts empty (never silently drops paid tickets on a
--- write, though — the first change would persist the empty list, so we warn).
+-- file prevents startup: neither paid tickets nor the email outbox may be
+-- replaced by an empty store after a read/parse failure.
 newBookingStore :: FilePath -> IO BookingStore
 newBookingStore path = do
   exists <- doesFileExist path
   tickets <-
     if not exists
-      then pure []
+      then pure (BookingData [] emptyReservationEmails)
       else do
-        r <- try (BS.readFile path) :: IO (Either SomeException BS.ByteString)
+        r <- try (BS.readFile path) :: IO (Either IOException BS.ByteString)
         case r of
-          Left e -> do
-            hPutStrLn stderr ("[bookings] WARNING: cannot read " <> path <> ": " <> show e <> " — starting with no tickets.")
-            pure []
-          Right bs -> case decode (T.unpack (TE.decodeUtf8 bs)) >>= ticketsFromJSON of
-            Right ts -> pure ts
-            Left err -> do
-              hPutStrLn stderr ("[bookings] WARNING: " <> path <> " did not parse (" <> err <> ") — starting with no tickets. Inspect the file before the next booking overwrites it.")
-              pure []
+          Left e -> throwIO e
+          Right bs -> case TE.decodeUtf8' bs of
+            Left _ -> fail ("Booking store is not UTF-8: " <> path <> "; refusing to overwrite it.")
+            Right text -> case decode (T.unpack text) >>= bookingDataFromJSON of
+              Right state -> pure state
+              Left err -> fail ("Cannot load booking store " <> path <> ": " <> err <> "; refusing to overwrite it.")
   var <- newMVar tickets
   pure (BookingStore var path)
 
 listTickets :: BookingStore -> IO [Ticket]
-listTickets = readMVar . bsVar
+listTickets store = do BookingData ts _ <- readMVar (bsVar store); pure ts
 
 -- | Seat usage per slot id: total seats claimed, and whether a whole-class
 -- (@\"all\"@) ticket sits on it.
@@ -194,16 +200,17 @@ issueTicket store paymentRef code product' seats = do
 redeemTicket :: BookingStore -> [SlotSpec] -> Int -> Text -> Text -> Text -> IO (Either RedeemError Ticket)
 redeemTicket store slots maxWeekly code name slotId = do
   now <- iso8601Now
-  modifyStore store $ \ts ->
+  modifyData store $ \(BookingData ts emails) ->
     let norm = T.toUpper (T.filter (/= '-') (T.strip code))
         matches t = T.toUpper (T.filter (/= '-') (tkCode t)) == norm
+        unchanged result = (BookingData ts emails, result)
      in case [t | t <- ts, matches t] of
-          [] -> (ts, Left CodeNotFound)
+          [] -> unchanged (Left CodeNotFound)
           (t : _)
-            | Just r <- tkRedemption t -> (ts, Left (AlreadyRedeemed r))
+            | Just r <- tkRedemption t -> unchanged (Left (AlreadyRedeemed r))
             | otherwise ->
                 case [s | s <- slots, slotIdOf s == slotId] of
-                  [] -> (ts, Left SlotUnknown)
+                  [] -> unchanged (Left SlotUnknown)
                   (s : _) ->
                     let taken = takenFor ts s
                         free = slotCap s - taken
@@ -215,13 +222,18 @@ redeemTicket store slots maxWeekly code name slotId = do
                           maxWeekly > 0
                             && weekSessions ts slots (mondayOf (slotDate s)) >= maxWeekly
                      in if
-                          | tkSeats t == "all" && taken > 0 -> (ts, Left SlotFull)
-                          | need > free -> (ts, Left SlotFull)
-                          | opensSession && weekAtCap -> (ts, Left WeekFull)
+                          | tkSeats t == "all" && taken > 0 -> unchanged (Left SlotFull)
+                          | need > free -> unchanged (Left SlotFull)
+                          | opensSession && weekAtCap -> unchanged (Left WeekFull)
                           | otherwise ->
                               let red = Redemption slotId (T.strip name) now Nothing
                                   t' = t {tkRedemption = Just red}
-                               in (replaceTicket t' ts, Right t')
+                                  messages =
+                                    [ let d = reservationDelivery False (tkCode t <> ":" <> mailboxText recipient) now (tkCode t) (tkProduct t) (tkSeats t) s recipient
+                                       in d {deliveryBody = deliveryBody d <> "Preferred name: " <> T.take 200 (T.unwords (T.words name)) <> "\n"}
+                                    | emailsEnabled emails, recipient <- emailsRecipients emails ]
+                                  emails' = emails {emailsDeliveries = emailsDeliveries emails <> messages}
+                               in (BookingData (replaceTicket t' ts) emails', Right t')
 
 -- | Record the created calendar event id on a redeemed ticket.
 setEventId :: BookingStore -> Text -> Text -> IO ()
@@ -287,7 +299,11 @@ iso8601Now = do
 -- ---------------------------------------------------------------------------
 
 modifyStore :: BookingStore -> ([Ticket] -> ([Ticket], Either e a)) -> IO (Either e a)
-modifyStore store f =
+modifyStore store f = modifyData store $ \(BookingData ts emails) ->
+  let (ts', result) = f ts in (BookingData ts' emails, result)
+
+modifyData :: BookingStore -> (BookingData -> (BookingData, Either e a)) -> IO (Either e a)
+modifyData store f =
   modifyMVar (bsVar store) $ \old -> do
     let (new, result) = f old
     case result of
@@ -295,23 +311,63 @@ modifyStore store f =
         r <- saveTickets (bsFile store) new
         case r of
           Right () -> pure ()
-          Left e -> hPutStrLn stderr ("[bookings] WARNING: could not persist " <> bsFile store <> ": " <> T.unpack e)
+          Left e -> fail ("Could not save booking and email state to " <> bsFile store <> ": " <> T.unpack e <> "; no change published.")
       _ -> pure ()
     pure (new, result)
 
-saveTickets :: FilePath -> [Ticket] -> IO (Either Text ())
-saveTickets path ts = do
-  let bytes = TE.encodeUtf8 (T.pack (encode (ticketsToJSON ts)))
+saveTickets :: FilePath -> BookingData -> IO (Either Text ())
+saveTickets path state = do
+  let bytes = TE.encodeUtf8 (T.pack (encode (bookingDataToJSON state)))
       tmp = path <> ".tmp"
-  r <- try (BS.writeFile tmp bytes >> renameFile tmp path) :: IO (Either SomeException ())
+  r <- try (BS.writeFile tmp bytes >> renameFile tmp path) :: IO (Either IOException ())
   pure (either (Left . T.pack . show) Right r)
 
 -- ---------------------------------------------------------------------------
 -- JSON codec
 -- ---------------------------------------------------------------------------
 
-ticketsToJSON :: [Ticket] -> JSON
-ticketsToJSON ts = JObj [("tickets", JArr (map ticketToJSON ts))]
+bookingDataToJSON :: BookingData -> JSON
+bookingDataToJSON (BookingData ts emails) = JObj [("tickets", JArr (map ticketToJSON ts)), ("reservationEmails", emailsToJSON emails)]
+
+bookingDataFromJSON :: JSON -> Either String BookingData
+bookingDataFromJSON v = BookingData <$> ticketsFromJSON v <*> case v .:? "reservationEmails" of
+  Nothing -> Right emptyReservationEmails
+  Just settings -> emailsFromJSON settings
+
+readReservationEmails :: BookingStore -> IO ReservationEmails
+readReservationEmails store = do BookingData _ emails <- readMVar (bsVar store); pure emails
+
+modifyEmails :: BookingStore -> (ReservationEmails -> (ReservationEmails, a)) -> IO a
+modifyEmails store f = do
+  result <- modifyData store $ \(BookingData ts emails) -> let (next, value) = f emails in (BookingData ts next, Right value)
+  either (const (fail "Unexpected reservation email store rejection")) pure result
+
+configureReservationEmails :: BookingStore -> Bool -> [Mailbox] -> IO ()
+configureReservationEmails store enabled recipients = modifyEmails store $ \s -> (s {emailsEnabled = enabled, emailsRecipients = recipients}, ())
+
+queueTestEmail :: BookingStore -> SlotSpec -> Mailbox -> IO Text
+queueTestEmail store slot recipient = do
+  nonce <- newTicketCode store
+  now <- iso8601Now
+  let ident = "test-" <> nonce
+      d = reservationDelivery True ident now "TEST-ONLY" "Example double ticket" "2" slot recipient
+  modifyEmails store $ \s -> (s {emailsDeliveries = emailsDeliveries s <> [d]}, ident)
+
+-- Claim before network IO and commit the external receipt afterwards. A crash
+-- between these steps remains uncertain instead of automatically duplicating.
+claimReservationEmail :: BookingStore -> IO (Maybe Delivery)
+claimReservationEmail store = modifyEmails store $ \s -> case filter ((== Queued) . deliveryState) (emailsDeliveries s) of
+  [] -> (s, Nothing)
+  d : _ -> (s {emailsDeliveries = map (\x -> if deliveryId x == deliveryId d then x {deliveryState = Sending} else x) (emailsDeliveries s)}, Just d)
+
+finishReservationEmail :: BookingStore -> Text -> EmailState -> IO ()
+finishReservationEmail store ident result = modifyEmails store $ \s ->
+  (s {emailsDeliveries = map (\d -> if deliveryId d == ident && deliveryState d == Sending then d {deliveryState = result} else d) (emailsDeliveries s)}, ())
+
+retryReservationEmail :: BookingStore -> Text -> IO Bool
+retryReservationEmail store ident = modifyEmails store $ \s ->
+  let eligible d = deliveryId d == ident && case deliveryState d of Failed _ -> True; Uncertain _ -> True; _ -> False
+   in (s {emailsDeliveries = map (\d -> if eligible d then d {deliveryState = Queued} else d) (emailsDeliveries s)}, any eligible (emailsDeliveries s))
 
 ticketsFromJSON :: JSON -> Either String [Ticket]
 ticketsFromJSON v = do

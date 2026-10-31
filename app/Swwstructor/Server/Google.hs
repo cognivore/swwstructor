@@ -20,10 +20,11 @@ module Swwstructor.Server.Google
   , patchEventLocation
   , Mail (..)
   , sendMail
+  , sendReservationEmail
   ) where
 
 import Control.Exception (SomeException, try)
-import Data.ByteArray.Encoding (Base (Base64URLUnpadded), convertToBase)
+import Data.ByteArray.Encoding (Base (Base64, Base64URLUnpadded), convertToBase)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString.Lazy as BL
 import Data.Text (Text)
@@ -31,6 +32,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Network.HTTP.Client
   ( Manager
+  , HttpException
   , Request
   , RequestBody (RequestBodyBS)
   , Response
@@ -41,9 +43,12 @@ import Network.HTTP.Client
   , requestHeaders
   , responseBody
   , responseStatus
+  , responseTimeout
+  , responseTimeoutMicro
   )
 import Network.HTTP.Types.Status (statusCode)
 import Swwstructor.Checkout (encodeForm)
+import Swwstructor.Server.ReservationEmail
 import Swwstructor.Server.SecretStore
   ( SecretBundle (sbGoogleClientId, sbGoogleClientSecret, sbGoogleRefreshToken)
   , SecretValue
@@ -177,6 +182,45 @@ patchEventLocation mgr creds eventId location = do
 -- ---------------------------------------------------------------------------
 -- Gmail
 -- ---------------------------------------------------------------------------
+
+-- | Dedicated reservation delivery: distinguish an explicit rejection from an
+-- unknown send result; only a provider receipt is reported as accepted. Never
+-- retain an HTTP exception's request headers (which include the access token).
+sendReservationEmail :: Manager -> GoogleCreds -> Delivery -> IO EmailState
+sendReservationEmail mgr creds delivery = do
+  etok <- mintAccessToken mgr creds
+  case etok of
+    Left err -> pure (Failed ("Google authorisation failed before sending. Check the Google connection. " <> if "HTTP " `T.isPrefixOf` err then T.take 8 err else ""))
+    Right tok -> do
+      base <- parseRequest "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
+      let mime = T.intercalate "\r\n"
+            [ "To: " <> mailboxText (deliveryTo delivery)
+            , "Subject: =?UTF-8?B?" <> TE.decodeUtf8 (convertToBase Base64 (TE.encodeUtf8 (T.unwords (T.words (deliverySubject delivery)))) :: ByteString) <> "?="
+            , "MIME-Version: 1.0"
+            , "Content-Type: text/plain; charset=utf-8"
+            , "Content-Transfer-Encoding: base64"
+            , ""
+            , T.intercalate "\r\n" (chunks76 (TE.decodeUtf8 (convertToBase Base64 (TE.encodeUtf8 (deliveryBody delivery)) :: ByteString)))
+            ]
+          payload = JObj [("raw", JStr (T.unpack (TE.decodeUtf8 (convertToBase Base64URLUnpadded (TE.encodeUtf8 mime) :: ByteString))))]
+          req = base {method = "POST", requestHeaders = [("Authorization", TE.encodeUtf8 ("Bearer " <> tok)), ("Content-Type", "application/json")], requestBody = RequestBodyBS (TE.encodeUtf8 (T.pack (encode payload))), responseTimeout = responseTimeoutMicro 20_000_000}
+      result <- try (httpLbs req mgr) :: IO (Either HttpException (Response BL.ByteString))
+      pure $ case result of
+        Left _ -> Uncertain "Gmail did not return a response. Check the sender's Sent folder before retrying."
+        Right resp ->
+          let status = statusCode (responseStatus resp)
+           in if status >= 200 && status < 300
+                then case TE.decodeUtf8' (BL.toStrict (responseBody resp)) of
+                  Right bytes -> case decode (T.unpack bytes) >>= (\v -> jstr =<< v .: "id") of
+                    Right ident -> Sent (T.pack ident)
+                    Left _ -> Uncertain "Gmail accepted the request but returned no message identifier. Check Sent mail."
+                  Left _ -> Uncertain "Gmail accepted the request but its response was unreadable. Check Sent mail."
+                else if status >= 400 && status < 500
+                  then Failed ("Gmail rejected the send (HTTP " <> T.pack (show status) <> "). Check Gmail send permission and account limits before retrying.")
+                  else Uncertain ("Gmail returned HTTP " <> T.pack (show status) <> ". Check Sent mail before retrying.")
+  where
+    chunks76 value | T.null value = []
+                   | otherwise = T.take 76 value : chunks76 (T.drop 76 value)
 
 -- | Send a plain-text mail as the token owner. The Gmail API takes the whole
 -- RFC-822 message base64url-encoded in a JSON envelope.
