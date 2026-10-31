@@ -37,6 +37,7 @@ import qualified Data.Text as T
 import Swwstructor.Block
   ( Block
   , brandMark
+  , compactBrand
   , buyButton
   , byline
   , emailReveal
@@ -51,6 +52,7 @@ import Swwstructor.Block
   , paragraph
   , priceTag
   , scheduleForm
+  , upcomingClasses
   , slotVisible
   , subhead
   , timestamp
@@ -206,6 +208,8 @@ renderSection i spec = case spec of
     sectionOf $
       leafWith (chrome Mast (pfx <> "-mast") 90) (brandMark title)
         : maybe [] (\t -> [leafWith (chrome Strip (pfx <> "-tag") 22) (kicker t)]) tag
+  CompactMasthead title tag ->
+    sectionOf [leafWith (chrome (Custom "compactmast") (pfx <> "-mast") 58) (compactBrand title tag)]
   NavStrip links sticky ->
     let navWin0 = chrome Nav (pfx <> "-nav") 32
         navWin = if sticky then stickyTo 0 [] navWin0 else navWin0
@@ -240,6 +244,9 @@ renderSection i spec = case spec of
         , Just (leafWith (prose (pfx <> "-body") 120) (paragraph "Online booking is being set up — please get in touch to book a class."))
         ]
   ScheduleClass title intro maxWeekly slots -> scheduleClassSection pfx title intro maxWeekly slots
+  UpcomingClasses title intro _ offers ->
+    sectionOf [leafWith (chrome (Custom "upcoming") (pfx <> "-upcoming") 380)
+      (upcomingClasses (T.pack pfx) title intro offers)]
   RichColumns title cols -> richColumnsSection pfx title cols
   Gallery title imgs -> gallerySection pfx title imgs
   CtaBand h body cta -> ctaSection pfx h body cta

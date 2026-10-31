@@ -67,6 +67,8 @@ executable swwstructor-server
   other-modules:
     Swwstructor.Server.SecretStore
     Swwstructor.Server.Stripe
+    Swwstructor.Server.DirectStripe
+    Swwstructor.Server.DirectBooking
     Swwstructor.Server.Loader
     Swwstructor.Server.Store
     Swwstructor.Server.Media
@@ -156,6 +158,74 @@ test-suite payment-code-test
   other-modules:
     Swwstructor.Server.SecretStore
     Swwstructor.Server.Stripe
+    Swwstructor.Server.DirectStripe
+    Swwstructor.Server.DirectBooking
+    Swwstructor.Server.Loader
+    Swwstructor.Server.Store
+    Swwstructor.Server.Media
+    Swwstructor.Server.Catalog
+    Swwstructor.Server.Booking
+    Swwstructor.Server.ReservationEmail
+    Swwstructor.Server.PaymentCodes
+    Swwstructor.Server.Google
+    Swwstructor.Server.Venues
+    Swwstructor.Server.Notify
+    Swwstructor.Server.Admin
+    Swwstructor.Server.App
+  build-depends:
+      base
+    , HsYAML
+    , bytestring
+    , containers
+    , crypton
+    , directory
+    , filepath
+    , http-client
+    , http-types
+    , memory
+    , mtl
+    , process
+    , scotty
+    , stickywebwm
+    , swwstructor
+    , text
+    , time
+    , wai
+    , wai-extra
+    , warp
+
+test-suite direct-booking-test
+  import:           warnings
+  type:             exitcode-stdio-1.0
+  hs-source-dirs:   test, app
+  main-is:          DirectBookingSpec.hs
+  default-language: GHC2021
+  other-modules:
+    Swwstructor.Server.Booking
+    Swwstructor.Server.ReservationEmail
+  build-depends:
+      base
+    , bytestring
+    , containers
+    , crypton
+    , directory
+    , filepath
+    , stickywebwm
+    , swwstructor
+    , text
+    , time
+
+test-suite direct-checkout-test
+  import:           warnings
+  type:             exitcode-stdio-1.0
+  hs-source-dirs:   test, app
+  main-is:          DirectCheckoutSpec.hs
+  default-language: GHC2021
+  other-modules:
+    Swwstructor.Server.SecretStore
+    Swwstructor.Server.Stripe
+    Swwstructor.Server.DirectStripe
+    Swwstructor.Server.DirectBooking
     Swwstructor.Server.Loader
     Swwstructor.Server.Store
     Swwstructor.Server.Media

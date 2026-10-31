@@ -14,6 +14,11 @@ let
     { name, ... }:
     {
       options = {
+        package = lib.mkOption {
+          type = lib.types.package;
+          default = cfg.package;
+          description = "The server package for this instance; defaults to the shared package.";
+        };
         domain = lib.mkOption {
           type = lib.types.str;
           description = "Public domain for this site (Caddy serves it, ACME issues a cert).";
@@ -259,7 +264,7 @@ in
           export SWW_GOOGLE_REFRESH_TOKEN
         ''
         + ''
-          exec ${cfg.package}/bin/swwstructor-server
+          exec ${inst.package}/bin/swwstructor-server
         '';
       }
     ) cfg.instances;

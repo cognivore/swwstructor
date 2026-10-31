@@ -64,6 +64,8 @@ import Swwstructor.Server.Google (googleCredsOf, googleMailCredsOf)
 import Swwstructor.Server.Venues (listVenues, newVenueStore)
 import Swwstructor.Server.Notify (BookingCtx (..), siteSlots)
 import Swwstructor.Server.Reminders (startReminderLoop)
+import Swwstructor.Server.DirectBooking (DirectBooking (..), startCheckoutReconciler)
+import Swwstructor.Server.DirectStripe (liveDirectStripe)
 import Swwstructor.Server.SecretStore
   ( MasterKey
   , SecretBundle
@@ -82,7 +84,7 @@ import Swwstructor.Server.SecretStore
   , parseMasterKeyHex
   , saveBundle
   )
-import Swwstructor.Server.Catalog (newCatalogCache)
+import Swwstructor.Server.Catalog (newCatalogCache, fetchCatalog)
 import Swwstructor.Site (Analytics (Analytics))
 import Swwstructor.Server.Store (newSiteStore, readSite)
 
@@ -186,7 +188,12 @@ main = do
           , bcVenueNoun = T.pack venueNoun
           }
 
-  let env =
+  let loadStripe = sbStripeSk <$> loadBundle secretFile masterKey
+      directStripe = liveDirectStripe mgr loadStripe
+      freshCatalog = do
+        sk <- loadStripe
+        maybe (pure (Left "Stripe is not configured.")) (fetchCatalog mgr) sk
+      env =
         AppEnv
           { aeStore = store
           , aeBaseUrl = T.pack baseUrl
@@ -205,11 +212,14 @@ main = do
           , aeBookingCtx = bookingCtx
           , aeVenues = venues
           , aeAnalytics = analytics
+          , aeDirectStripe = directStripe
+          , aeDatedCatalog = freshCatalog
           }
 
   -- The reminder loop: retries unfinished booking side effects and sends the
   -- week-before / day-of nags. In-process, minute tick, ledger-idempotent.
   startReminderLoop bookingCtx
+  startCheckoutReconciler (DirectBooking bookings directStripe (T.pack baseUrl) (T.pack bookingName))
 
   when (T.null adminPw) (putStrLn "[swwstructor] note: admin is unconfigured (no password).")
   putStrLn ("[swwstructor] serving \"" <> T.unpack (siteTitle site0) <> "\" (editable) from " <> contentFile <> " on port " <> show port <> " (" <> show stage <> ")")

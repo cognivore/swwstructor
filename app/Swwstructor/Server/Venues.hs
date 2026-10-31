@@ -108,7 +108,15 @@ venueForArea vs area = case [v | v <- vs, vnActive v, T.strip (vnArea v) == T.st
 -- Ambiguous or absent venues retain the authored area, never a guessed address.
 venueLocation :: [Venue] -> Text -> Text
 venueLocation vs area = case venueForArea vs area of
-  Just v -> vnName v <> ", " <> vnAddress v
+  Just v ->
+    let name = T.strip (vnName v)
+        address = T.strip (vnAddress v)
+        foldedName = T.toCaseFold name
+        foldedAddress = T.toCaseFold address
+     in if T.null name || foldedAddress == foldedName ||
+           any (`T.isPrefixOf` foldedAddress) [foldedName <> ",", foldedName <> "\n"]
+          then address
+          else if T.null address then name else name <> ", " <> address
   Nothing -> area
 
 -- ---------------------------------------------------------------------------

@@ -120,6 +120,21 @@ export interface MastheadSection {
   tagline?: string;
 }
 
+/** Compact wordmark with a single-line tagline. */
+export interface CompactMastheadSection {
+  section: "compactMasthead";
+  title: string;
+  tagline?: string;
+}
+
+/** Dates and availability are resolved server-side from the shared schedule. */
+export interface UpcomingClassesSection {
+  section: "upcomingClasses";
+  title?: string;
+  intro?: string;
+  priceIds: string[];
+}
+
 /** A nav bar; `sticky` pins it to the top for the whole page. (Haskell `NavStrip`.) */
 export interface NavStripSection {
   section: "navStrip";
@@ -225,6 +240,8 @@ export interface FooterSection {
  */
 export type SectionSpec =
   | MastheadSection
+  | CompactMastheadSection
+  | UpcomingClassesSection
   | NavStripSection
   | RibbonSection
   | HeroSection

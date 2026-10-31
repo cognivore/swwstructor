@@ -161,6 +161,7 @@ topbar =
       , elAttr "a" [("href", "/admin/theme")] (esc "Theme")
       , elAttr "a" [("href", "/admin/stripe")] (esc "Shop & Stripe")
       , elAttr "a" [("href", "/admin/bookings")] (esc "Bookings")
+      , elAttr "a" [("href", "/admin/checkouts")] (esc "Checkouts")
       , elAttr "a" [("href", "/admin/venues")] (esc "Venues")
       , elAttr "span" [("class", "sp")] mempty
       , elAttr "a" [("href", "/"), ("target", "_blank")] (esc "View site \x2197")
@@ -400,6 +401,7 @@ templatePage site fl =
 sectionSummary :: SectionSpec -> Text
 sectionSummary s = case s of
   Masthead t _ -> t
+  CompactMasthead t _ -> t
   NavStrip ls _ -> T.intercalate ", " (map navLabel ls)
   Ribbon ls -> T.intercalate ", " (map navLabel ls)
   Hero h -> heroHeadline h
@@ -407,6 +409,7 @@ sectionSummary s = case s of
   StoryRow ss -> headlines ss
   ProductGrid t _ ps -> fromMaybe "Shop" t <> " (" <> T.pack (show (length ps)) <> " products)"
   StripeCatalog t _ -> fromMaybe "Book a class" t <> " (live from your Stripe catalogue)"
+  UpcomingClasses t _ prices _ -> fromMaybe "Book your next class" t <> " (" <> T.pack (show (length prices)) <> " ticket options)"
   ScheduleClass t _ mw slots ->
     fromMaybe "Schedule a class" t
       <> " (" <> T.pack (show (length slots)) <> " slots"
@@ -469,6 +472,8 @@ sectionFields :: [Text] -> SectionSpec -> Html
 sectionFields partials s = case s of
   Masthead t tag ->
     ipt "text" "title" "Wordmark / title" t <> ipt "text" "tagline" "Tagline (optional)" (orEmpty tag)
+  CompactMasthead t tag ->
+    ipt "text" "title" "Wordmark / title" t <> ipt "text" "tagline" "Tagline (optional)" (orEmpty tag)
   NavStrip ls sticky ->
     chk "sticky" "Pin to top for the whole page (always sticky)" sticky <> linkList "links" ls
   Ribbon ls -> linkList "links" ls
@@ -504,6 +509,11 @@ sectionFields partials s = case s of
       <> availabilityBuilder
       <> elAttr "h3" [("style", "margin-top:18px")] (esc ("Classes on offer (" <> T.pack (show (length slots)) <> ")"))
       <> slotList "slots" slots
+  UpcomingClasses t intro priceIds _ ->
+    elAttr "p" [("class", "muted")] (esc "Shows the upcoming dates from your Schedule a class section, with live availability and prices. Students choose a date and pay to confirm their place. Edit dates in the schedule; edit ticket prices in Stripe.")
+      <> ipt "text" "title" "Title (optional)" (orEmpty t)
+      <> txtArea "intro" "Intro (optional)" (orEmpty intro)
+      <> txtArea "priceIds" "Stripe price IDs offered for these classes (one per line)" (T.intercalate "\n" priceIds)
   RichColumns t cs ->
     ipt "text" "title" "Title (optional)" (orEmpty t) <> el "h3" (esc "Columns") <> textList "columns" cs
   Gallery t imgs ->
@@ -1175,6 +1185,7 @@ uploaderJs =
 parseSection :: SectionSpec -> [(Text, Text)] -> SectionSpec
 parseSection old ps = case old of
   Masthead{} -> Masthead (req "title") (opt "tagline")
+  CompactMasthead{} -> CompactMasthead (req "title") (opt "tagline")
   NavStrip{} -> NavStrip (links "links") (bool "sticky")
   Ribbon{} -> Ribbon (links "links")
   Hero{} -> Hero (HeroContent (opt "kicker") (req "headline") (opt "dek") (opt "body") (img "img") (cta "cta"))
@@ -1183,6 +1194,7 @@ parseSection old ps = case old of
   ProductGrid{} -> ProductGrid (opt "title") (opt "intro") (products "products")
   StripeCatalog{} -> StripeCatalog (opt "title") (opt "intro")
   ScheduleClass{} -> ScheduleClass (opt "title") (opt "intro") (max 0 (intF "maxWeekly" 0)) (slots "slots")
+  UpcomingClasses{} -> UpcomingClasses (opt "title") (opt "intro") (filter (not . T.null) (map T.strip (T.lines (req "priceIds")))) []
   RichColumns{} -> RichColumns (opt "title") (texts "columns")
   Gallery{} -> Gallery (opt "title") (images "images")
   CtaBand{} -> CtaBand (req "headline") (opt "body") (cta "cta")

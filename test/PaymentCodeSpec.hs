@@ -23,6 +23,7 @@ import Network.Wai.Test (SRequest (..), runSession, setPath, simpleBody, simpleH
 import StickyWM (JSON (..), encode)
 import Swwstructor.Content (PageSpec (..), SectionSpec (..), SiteSpec (..), SlotSpec (..), slotIdOf)
 import Swwstructor.Server.App (AppEnv (..), Stage (Test), swwApp)
+import Swwstructor.Server.DirectStripe (liveDirectStripe)
 import Swwstructor.Server.Booking
 import Swwstructor.Server.Catalog (newCatalogCache)
 import Swwstructor.Server.Notify (BookingCtx (..), drainReservationEmails, ensureReservationSideEffects, announceVenues)
@@ -76,7 +77,7 @@ exercise dir = do
   catalog <- newCatalogCache
   calendarAttempts <- newIORef (0 :: Int)
   let ctx = BookingCtx manager lessons True (modifyIORef' calendarAttempts (+ 1) >> pure Nothing) (pure Nothing) [] "Okashi School" "https://okashi-school.com" "Europe/London" "+00:00" (pure [slot]) (listVenues venues) "kitchen"
-      env = AppEnv site "https://okashi-school.com" Test secretFile master session "fixture-password" manager dir dir catalog spent lessons payments ctx venues Nothing
+      env = AppEnv site "https://okashi-school.com" Test secretFile master session "fixture-password" manager dir dir catalog spent lessons payments ctx venues Nothing (liveDirectStripe manager (pure Nothing)) (pure (Right []))
   app <- scottyApp (swwApp env)
   let requestTo target method path headers body = runSession (srequest (SRequest ((setPath defaultRequest path) {requestMethod = method, requestHeaders = headers}) body)) target
       request = requestTo app

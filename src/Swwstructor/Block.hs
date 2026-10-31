@@ -23,6 +23,8 @@ module Swwstructor.Block
   , navLink
   , BuyTarget (..)
   , SlotSpec (..)
+  , ClassOffer (..)
+  , ClassTicketOption (..)
   , slotIdOf
   , groupSlotsByArea
   , slotsLeft
@@ -99,6 +101,22 @@ navLink = NavLink
 -- 'Text'.
 newtype BuyTarget = BuyTarget Text
   deriving (Eq, Ord, Show)
+
+-- | A server-resolved ticket option for a dated class. These values are a
+-- display snapshot, not authority to charge: checkout rechecks the selected
+-- price and capacity against the live catalogue and booking state.
+data ClassTicketOption = ClassTicketOption
+  { ctoPriceId :: !Text
+  , ctoPrice :: !Price
+  , ctoSeats :: !Int
+  }
+  deriving (Eq, Show)
+
+data ClassOffer = ClassOffer
+  { coSlot :: !SlotSpec
+  , coOptions :: ![ClassTicketOption]
+  }
+  deriving (Eq, Show)
 
 -- | A bookable class slot: a calendar date, a time window, the area the class
 -- runs in (the precise venue is typically announced closer to the date), and
@@ -262,6 +280,8 @@ class BlockSym repr where
   -- | The site wordmark / masthead title.
   brandMark :: Text -> repr
 
+  compactBrand :: Text -> Maybe Text -> repr
+
   -- | An image placeholder carrying its caption (a real @\<img>@ when a source
   -- url is supplied, else a captioned gradient box).
   figureBox :: Text -> Maybe Text -> repr
@@ -296,6 +316,9 @@ class BlockSym repr where
   -- the per-week session cap (0 = none).
   scheduleForm :: Int -> [SlotSpec] -> repr
 
+  -- | Compact dated checkout. The key namespaces accessible date controls.
+  upcomingClasses :: Text -> Maybe Text -> Maybe Text -> [ClassOffer] -> repr
+
   -- | A hairline rule — a section divider.
   ruleLine :: repr
 
@@ -315,6 +338,7 @@ data Block
   | BTimestamp !Text
   | BNavBar ![NavLink]
   | BBrandMark !Text
+  | BCompactBrand !Text !(Maybe Text)
   | BFigureBox !Text !(Maybe Text)
   | BPriceTag !Price
   | BBuyButton !BuyTarget !Text
@@ -323,6 +347,7 @@ data Block
   | BLinkText !Text !Text
   | BEmailReveal
   | BScheduleForm !Int ![SlotSpec]
+  | BUpcomingClasses !Text !(Maybe Text) !(Maybe Text) ![ClassOffer]
   | BRuleLine
   deriving (Eq, Show)
 
@@ -336,6 +361,7 @@ instance BlockSym Block where
   timestamp = BTimestamp
   navBar = BNavBar
   brandMark = BBrandMark
+  compactBrand = BCompactBrand
   figureBox = BFigureBox
   priceTag = BPriceTag
   buyButton = BBuyButton
@@ -344,6 +370,7 @@ instance BlockSym Block where
   linkText = BLinkText
   emailReveal = BEmailReveal
   scheduleForm = BScheduleForm
+  upcomingClasses = BUpcomingClasses
   ruleLine = BRuleLine
 
 -- | The initial→final transform: interpret a stored 'Block' into any
@@ -358,6 +385,7 @@ buildBlock (BByline t) = byline t
 buildBlock (BTimestamp t) = timestamp t
 buildBlock (BNavBar ls) = navBar ls
 buildBlock (BBrandMark t) = brandMark t
+buildBlock (BCompactBrand t tag) = compactBrand t tag
 buildBlock (BFigureBox c s) = figureBox c s
 buildBlock (BPriceTag p) = priceTag p
 buildBlock (BBuyButton tgt l) = buyButton tgt l
@@ -366,6 +394,7 @@ buildBlock (BMuted b) = muted (buildBlock b)
 buildBlock (BLinkText l h) = linkText l h
 buildBlock BEmailReveal = emailReveal
 buildBlock (BScheduleForm mw slots) = scheduleForm mw slots
+buildBlock (BUpcomingClasses key title intro offers) = upcomingClasses key title intro offers
 buildBlock BRuleLine = ruleLine
 
 -- ---------------------------------------------------------------------------
@@ -377,6 +406,10 @@ buildBlock BRuleLine = ruleLine
 newtype HtmlBlock = HtmlBlock {runHtmlBlock :: Html}
 
 instance BlockSym HtmlBlock where
+  compactBrand t tag = HtmlBlock $
+    elAttr "div" [("class", "sww-compact-brand")] $
+      elAttr "a" [("class", "sww-brandlink"), ("href", "/")] (esc t)
+        <> maybe mempty (\txt -> elAttr "p" [("class", "sww-compact-tagline")] (esc txt)) tag
   heading t = HtmlBlock $ elAttr "h2" [("class", "sww-heading")] (esc t)
   headingLink t h =
     HtmlBlock $
@@ -435,7 +468,7 @@ instance BlockSym HtmlBlock where
         <> rawHtml powClientJs
   scheduleForm maxWeekly slots =
     HtmlBlock $
-      elAttr "form" [("class", "sww-sched"), ("method", "post"), ("action", "/schedule")] $
+      elAttr "form" [("class", "sww-sched"), ("id", "redeem"), ("method", "post"), ("action", "/schedule")] $
         cards
           <> (if null offered then elAttr "p" [("class", "sww-schednote sww-schedsoldout")] (esc "Every class is now fully booked \x2014 get in touch and we'll find you a date.") else mempty)
           <> elAttr "p" [("class", "sww-schednote")] (esc "Choose your class and enter your preferred name. Coming from your receipt? Your ticket code is already filled in. Your booking page includes the venue address and a calendar file to save.")
@@ -469,6 +502,80 @@ instance BlockSym HtmlBlock where
                 <> htmlConcat [elAttr "span" [("class", "sww-slotcard-desc")] (mdInline l) | l <- descLines]
                 <> (if T.null (slotArea s) then mempty else elAttr "span" [("class", "sww-slotcard-area")] (esc (slotArea s)))
                 <> elAttr "em" [("class", "sww-slotcard-free")] (esc freeLabel)
+  upcomingClasses key title intro offers = HtmlBlock $
+    elAttr "section" [("class", "sww-upcoming"), ("data-upcoming", key), ("aria-label", "Upcoming classes")] $
+      elAttr "div" [("class", "sww-upcoming-heading")] (
+        elAttr "h1" [] (esc (maybe "Book your next class" id title))
+          <> maybe mempty (\t -> elAttr "p" [] (mdInline t)) intro
+      )
+        <> if null offers
+          then elAttr "p" [("class", "sww-upcoming-empty")] (
+            esc "New class dates are on their way. "
+              <> elAttr "a" [("href", "/gifts"), ("class", "sww-link")] (esc "Buy a transferable ticket")
+              <> esc " or " <> elAttr "a" [("href", "/contact"), ("class", "sww-link")] (esc "get in touch") <> esc "."
+          )
+          else
+            elAttr "div" [("class", "sww-class-dates"), ("role", "tablist"), ("aria-label", "Choose a class date")] (htmlConcat (zipWith dateTab [0 :: Int ..] offers))
+              <> elAttr "div" [("class", "sww-class-cards")] (htmlConcat (zipWith offerCard [0 :: Int ..] offers))
+              <> elAttr "p" [("class", "sww-upcoming-links")] (
+                esc "Buying for someone else? " <> elAttr "a" [("href", "/gifts"), ("class", "sww-link")] (esc "Give a ticket")
+                  <> elAttr "span" [("aria-hidden", "true")] (esc " · ")
+                  <> elAttr "a" [("href", "/classes#redeem"), ("class", "sww-link")] (esc "Redeem a ticket")
+              )
+    where
+      cardId n = key <> "-class-" <> T.pack (show n)
+      dateLabel s = let (_, day, monthYear) = slotCardDate (slotDate s)
+                    in day <> " " <> T.takeWhile (/= ' ') monthYear
+      dateTab n offer = elAttr "button"
+        [("type", "button"), ("role", "tab"), ("class", "sww-class-date"),
+         ("id", cardId n <> "-tab"), ("aria-controls", cardId n),
+         ("aria-selected", if n == 0 then "true" else "false"),
+         ("tabindex", if n == 0 then "0" else "-1"), ("data-class-index", T.pack (show n))]
+        (esc (dateLabel (coSlot offer)))
+      offerCard n offer =
+        let s = coSlot offer
+            options = sortOn ctoSeats (filter (\o -> ctoSeats o > 0 && ctoSeats o <= slotsLeft s) (coOptions offer))
+            (dow, day, monthYear) = slotCardDate (slotDate s)
+            label = dateLabel s
+            free = T.pack (show (slotsLeft s)) <> if slotsLeft s == 1 then " place left" else " places left"
+         in elAttr "article" [("class", "sww-class-card"), ("id", cardId n), ("data-class-card", T.pack (show n)),
+              ("aria-labelledby", cardId n <> "-date")] $
+              elAttr "div" [("class", "sww-class-when")] (
+                elAttr "h2" [("id", cardId n <> "-date")] (esc (day <> " " <> monthYear))
+                  <> elAttr "p" [] (esc (dow <> " · " <> slotStart s <> "–" <> slotEnd s))
+              )
+                <> elAttr "div" [("class", "sww-class-description")] (mdInline (if T.null (slotDescription s) then "Japanese pastry workshop" else slotDescription s))
+                <> elAttr "p" [("class", "sww-class-venue")] (esc (slotArea s))
+                <> elAttr "form" [("class", "sww-class-book"), ("method", "post"), ("action", "/book"), ("data-book-date", label)] (
+                  voidElAttr "input" [("type", "hidden"), ("name", "slot"), ("value", slotIdOf s)]
+                    <> elAttr "fieldset" [("class", "sww-class-options")] (
+                      elAttr "legend" [] (esc "Places")
+                        <> htmlConcat (zipWith (ticketOption s) [0 :: Int ..] options)
+                    )
+                    <> case options of
+                      [] -> elAttr "p" [("class", "sww-upcoming-empty")] (esc "Please choose another class.")
+                      (first : _) ->
+                        let Price amount currency = ctoPrice first
+                         in voidElAttr "input" [("type", "hidden"), ("name", "expectedAmount"), ("value", T.pack (show (centsInt amount)))]
+                              <> voidElAttr "input" [("type", "hidden"), ("name", "expectedCurrency"), ("value", currencyCode currency)]
+                              <> elAttr "button" [("type", "submit"), ("class", "sww-buy sww-class-submit")]
+                                (esc ("Book " <> label <> " — " <> formatPrice (ctoPrice first)))
+                              <> elAttr "p" [("class", "sww-class-availability")] (esc (free <> " · Payment confirms your place"))
+                )
+      ticketOption _ n option =
+        let Price amount currency = ctoPrice option
+            seats = ctoSeats option
+         in elAttr "label" [("class", "sww-class-option")] (
+              voidElAttr "input" (
+                [("type", "radio"), ("name", "price"), ("value", ctoPriceId option),
+                 ("data-amount", T.pack (show (centsInt amount))), ("data-currency", currencyCode currency),
+                 ("data-price-label", formatPrice (ctoPrice option))]
+                  <> if n == 0 then [("checked", "checked")] else []
+              )
+                <> elAttr "span" [] (esc ((if seats == 1 then "1 person" else T.pack (show seats) <> " people") <> " · " <> formatPrice (ctoPrice option)))
+                <> voidElAttr "input" [("type", "hidden"), ("name", "expectedAmount_" <> ctoPriceId option), ("value", T.pack (show (centsInt amount)))]
+                <> voidElAttr "input" [("type", "hidden"), ("name", "expectedCurrency_" <> ctoPriceId option), ("value", currencyCode currency)]
+            )
   ruleLine = HtmlBlock $ elAttr "hr" [("class", "sww-rule")] mempty
 
 -- | The proof-of-work reveal client — a fixed literal (never owner content),
@@ -665,6 +772,7 @@ instance BlockSym PlainBlock where
   timestamp = PlainBlock
   navBar links = PlainBlock (T.intercalate " \xB7 " (map navLabel links))
   brandMark = PlainBlock
+  compactBrand t tag = PlainBlock (t <> maybe "" (" · " <>) tag)
   figureBox cap _ = PlainBlock ("(image: " <> cap <> ")")
   priceTag p = PlainBlock (formatPrice p)
   buyButton _ lbl = PlainBlock ("[" <> lbl <> "]")
@@ -674,6 +782,9 @@ instance BlockSym PlainBlock where
   emailReveal = PlainBlock "(email address \x2014 revealed on the website)"
   scheduleForm _ slots =
     PlainBlock ("(schedule a class \x2014 " <> T.pack (show (length slots)) <> " slots)")
+  upcomingClasses _ title _ offers = PlainBlock $
+    maybe "Book your next class" id title <> "\n" <> T.intercalate "\n"
+      [fmtSlotDay (slotDate (coSlot offer)) <> " · " <> T.intercalate ", " [formatPrice (ctoPrice o) | o <- coOptions offer] | offer <- offers]
   ruleLine = PlainBlock "\x2014"
 
 -- ---------------------------------------------------------------------------
@@ -692,6 +803,7 @@ blockToJSON b = case b of
   BTimestamp t -> tagged "timestamp" [("text", JStr (T.unpack t))]
   BNavBar ls -> tagged "navBar" [("links", JArr (map navLinkToJSON ls))]
   BBrandMark t -> tagged "brandMark" [("text", JStr (T.unpack t))]
+  BCompactBrand t tag -> tagged "compactBrand" ([("text", JStr (T.unpack t))] <> maybe [] (\x -> [("tagline", JStr (T.unpack x))]) tag)
   BFigureBox c s -> tagged "figureBox" (("caption", JStr (T.unpack c)) : maybe [] (\u -> [("src", JStr (T.unpack u))]) s)
   BPriceTag p -> tagged "priceTag" [("price", priceToJSON p)]
   BBuyButton (BuyTarget tgt) l -> tagged "buyButton" [("target", JStr (T.unpack tgt)), ("label", JStr (T.unpack l))]
@@ -700,9 +812,15 @@ blockToJSON b = case b of
   BLinkText l h -> tagged "linkText" [("label", JStr (T.unpack l)), ("href", JStr (T.unpack h))]
   BEmailReveal -> tagged "emailReveal" []
   BScheduleForm mw slots -> tagged "scheduleForm" [("maxWeekly", JNum (fromIntegral mw)), ("slots", JArr (map slotJSON slots))]
+  BUpcomingClasses key title intro offers -> tagged "upcomingClasses"
+    ([("key", JStr (T.unpack key)), ("offers", JArr (map offerJSON offers))]
+      <> maybe [] (\t -> [("title", JStr (T.unpack t))]) title
+      <> maybe [] (\t -> [("intro", JStr (T.unpack t))]) intro)
   BRuleLine -> tagged "ruleLine" []
   where
     tagged k extra = JObj (("b", JStr k) : extra)
+    offerJSON o = JObj [("slot", slotJSON (coSlot o)), ("options", JArr (map optionJSON (coOptions o)))]
+    optionJSON o = JObj [("priceId", JStr (T.unpack (ctoPriceId o))), ("price", priceToJSON (ctoPrice o)), ("seats", JNum (fromIntegral (ctoSeats o)))]
     -- The block codec is a render-state codec, so 'slotTaken' rides along
     -- (unlike the content codec, which never persists it).
     slotJSON s =
@@ -732,6 +850,7 @@ blockFromJSON v = do
       arr <- jarr' =<< v .: "links"
       BNavBar <$> mapM navLinkFromJSON arr
     "brandMark" -> BBrandMark <$> txt "text"
+    "compactBrand" -> BCompactBrand <$> txt "text" <*> pure (optTxt v "tagline")
     "figureBox" -> do
       c <- txt "caption"
       let s = case v .:? "src" of
@@ -750,10 +869,24 @@ blockFromJSON v = do
             Just (JNum n) -> round n
             _ -> 0
       BScheduleForm mw <$> mapM slotOf arr
+    "upcomingClasses" -> do
+      arr <- jarr' =<< v .: "offers"
+      BUpcomingClasses <$> txt "key" <*> pure (optTxt v "title") <*> pure (optTxt v "intro") <*> mapM offerOf arr
     "ruleLine" -> Right BRuleLine
     other -> Left ("unknown block kind: " ++ other)
   where
     txt key = T.pack <$> (jstr =<< v .: key)
+    optTxt o k = case o .:? k of
+      Just (JStr s) -> Just (T.pack s)
+      _ -> Nothing
+    offerOf o = ClassOffer <$> (slotOf =<< o .: "slot") <*> (mapM optionOf =<< (jarr' =<< o .: "options"))
+    optionOf o = do
+      pid <- T.pack <$> (jstr =<< o .: "priceId")
+      p <- priceFromJSON =<< o .: "price"
+      n <- jnum =<< o .: "seats"
+      if n < 1 || n /= fromIntegral (round n :: Int)
+        then Left "A class ticket must reserve a positive whole number of places."
+        else pure (ClassTicketOption pid p (round n))
     jarr' (JArr xs) = Right xs
     jarr' _ = Left "expected array"
     slotOf sv = do

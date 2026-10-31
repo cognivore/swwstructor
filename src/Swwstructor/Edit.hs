@@ -82,6 +82,7 @@ import Swwstructor.Theme (Theme)
 sectionKinds :: [(Text, Text)]
 sectionKinds =
   [ ("masthead", "Masthead (wordmark)")
+  , ("compactMasthead", "Compact masthead")
   , ("navStrip", "Navigation bar")
   , ("ribbon", "Ribbon (link strip)")
   , ("hero", "Hero (headline + figure)")
@@ -90,6 +91,7 @@ sectionKinds =
   , ("productGrid", "Product grid (shop)")
   , ("stripeCatalog", "Stripe catalogue (live from Stripe)")
   , ("scheduleClass", "Schedule a class (ticket booking)")
+  , ("upcomingClasses", "Upcoming classes (book and pay)")
   , ("richColumns", "Rich columns (prose)")
   , ("gallery", "Gallery (images)")
   , ("ctaBand", "Call to action")
@@ -103,6 +105,7 @@ sectionKinds =
 sectionTagOf :: SectionSpec -> Text
 sectionTagOf s = case s of
   Masthead{} -> "masthead"
+  CompactMasthead{} -> "compactMasthead"
   NavStrip{} -> "navStrip"
   Ribbon{} -> "ribbon"
   Hero{} -> "hero"
@@ -111,6 +114,7 @@ sectionTagOf s = case s of
   ProductGrid{} -> "productGrid"
   StripeCatalog{} -> "stripeCatalog"
   ScheduleClass{} -> "scheduleClass"
+  UpcomingClasses{} -> "upcomingClasses"
   RichColumns{} -> "richColumns"
   Gallery{} -> "gallery"
   CtaBand{} -> "ctaBand"
@@ -128,6 +132,7 @@ sectionLabelOf s = maybe (sectionTagOf s) id (lookup (sectionTagOf s) sectionKin
 blankSection :: Text -> Maybe SectionSpec
 blankSection tag = case tag of
   "masthead" -> Just (Masthead "New masthead" Nothing)
+  "compactMasthead" -> Just (CompactMasthead "New masthead" Nothing)
   "navStrip" -> Just (NavStrip [NavLink "Home" "/"] True)
   "ribbon" -> Just (Ribbon [NavLink "Latest" "/"])
   "hero" -> Just (Hero (HeroContent Nothing "New hero headline" (Just "A short standfirst.") Nothing Nothing Nothing))
@@ -136,6 +141,7 @@ blankSection tag = case tag of
   "productGrid" -> Just (ProductGrid (Just "Shop") Nothing [blankProduct 0])
   "stripeCatalog" -> Just (StripeCatalog (Just "Book a class") Nothing)
   "scheduleClass" -> Just (ScheduleClass (Just "Schedule your class") (Just "Bought a ticket? Pick your date below.") 0 [blankSlot])
+  "upcomingClasses" -> Just (UpcomingClasses (Just "Book your next class") Nothing [] [])
   "richColumns" -> Just (RichColumns (Just "Section title") ["First column.", "Second column."])
   "gallery" -> Just (Gallery (Just "Gallery") [imageRef "A picture"])
   "ctaBand" -> Just (CtaBand "Call to action" (Just "Supporting line.") (Just (Cta "Go" "/")))

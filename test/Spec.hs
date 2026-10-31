@@ -350,6 +350,7 @@ blockRoundTrip = do
         , BTimestamp "t"
         , BNavBar [NavLink "a" "/a"]
         , BBrandMark "m"
+        , BCompactBrand "Okashi" (Just "Japanese sweets · London")
         , BFigureBox "cap" (Just "/i.jpg")
         , BFigureBox "cap" Nothing
         , BPriceTag (price Money.EUR 85)
@@ -359,6 +360,9 @@ blockRoundTrip = do
         , BLinkText "l" "/l"
         , BEmailReveal
         , BScheduleForm 3 [SlotSpec "2026-09-01" "11:00" "13:00" "Islington" 6 3 "", SlotSpec "2026-11-18" "19:30" "21:30" "Ukiyo" 8 0 "Okashi School x [Ukiyo](https://ukiyohandrollbar.com/)"]
+        , BUpcomingClasses "s2" (Just "Book a class") Nothing
+            [ClassOffer (SlotSpec "2026-11-18" "19:00" "21:00" "Ukiyo" 8 2 "Mochi with tea")
+              [ClassTicketOption "price_single" (price Money.GBP 80) 1, ClassTicketOption "price_double" (price Money.GBP 150) 2]]
         , BRuleLine
         ]
       ok b = blockFromJSON (blockToJSON b) == Right b
@@ -651,6 +655,31 @@ scheduleTests = do
     , check "generateSlots respects weekday selection" (let g = generateSlots "2026-09-01" "2026-09-13" [5, 6] [("14:00", "16:00")] "X" 6 in map slotDate g == ["2026-09-05", "2026-09-06", "2026-09-12", "2026-09-13"])
     ]
 
+upcomingTests :: IO [Bool]
+upcomingTests = do
+  section "dated checkout presentation"
+  let s = SlotSpec "2026-11-18" "19:00" "21:00" "Ukiyo, London" 8 2 "Mochi with [tea](https://example.test)"
+      opts = [ClassTicketOption "price_double" (price Money.GBP 150) 2, ClassTicketOption "price_single" (price Money.GBP 80) 1]
+      offer = ClassOffer s opts
+      spec = UpcomingClasses (Just "Choose your evening") (Just "Make something beautiful.") ["price_single", "price_double"] [offer]
+      block = BUpcomingClasses "classes" (Just "Choose your evening") Nothing [offer]
+      html = renderHtml (runHtmlBlock (buildBlock block))
+      lastPlace = renderHtml (runHtmlBlock (buildBlock (BUpcomingClasses "last" Nothing Nothing [ClassOffer (s {slotTaken = 7}) opts])))
+      unsafe = renderHtml (runHtmlBlock (buildBlock (BUpcomingClasses "safe" (Just "<script>alert(1)</script>") Nothing [ClassOffer (s {slotDescription = "[click](javascript:alert)"}) opts])))
+  sequence
+    [ check "booking form binds a date and explicit Stripe price" (all (`T.isInfixOf` html) ["action=\"/book\"", "name=\"slot\" value=\"2026-11-18-1900\"", "name=\"price\" value=\"price_single\""])
+    , check "default is one person regardless of catalogue order" ("value=\"price_single\" data-amount=\"8000\" data-currency=\"gbp\" data-price-label=\"£80\" checked=\"checked\"" `T.isInfixOf` html)
+    , check "price expectations use integer minor units and currency" (all (`T.isInfixOf` html) ["name=\"expectedAmount\" value=\"8000\"", "name=\"expectedCurrency\" value=\"gbp\""])
+    , check "primary button carries the chosen date and total" ("Book 18 November — £80" `T.isInfixOf` html)
+    , check "last-place card offers no double ticket" ("price_single" `T.isInfixOf` lastPlace && not ("price_double" `T.isInfixOf` lastPlace))
+    , check "new buyers are not asked for a ticket code or a name" (not ("name=\"code\"" `T.isInfixOf` html) && not ("name=\"name\"" `T.isInfixOf` html))
+    , check "gift and existing-ticket routes remain explicit" (all (`T.isInfixOf` html) ["href=\"/gifts\"", "href=\"/classes#redeem\"", "Give a ticket", "Redeem a ticket"])
+    , check "date controls have namespaced accessible targets" (all (`T.isInfixOf` html) ["role=\"tablist\"", "aria-controls=\"classes-class-0\"", "id=\"classes-class-0\""])
+    , check "owner copy is escaped and unsafe links neutralised" ("&lt;script&gt;" `T.isInfixOf` unsafe && not ("<script>" `T.isInfixOf` unsafe) && "href=\"#\"" `T.isInfixOf` unsafe)
+    , check "content persists only permitted price IDs, never live offers" (sectionSpecFromJSON (sectionSpecToJSON spec) == Right (UpcomingClasses (Just "Choose your evening") (Just "Make something beautiful.") ["price_single", "price_double"] []))
+    , check "compact masthead round-trips" (sectionSpecFromJSON (sectionSpecToJSON (CompactMasthead "Okashi" (Just "London"))) == Right (CompactMasthead "Okashi" (Just "London")))
+    ]
+
 markdownTests :: IO [Bool]
 markdownTests = do
   section "markdown in prose boxes"
@@ -687,6 +716,7 @@ main = do
         , checkoutTests
         , catalogTests
         , scheduleTests
+        , upcomingTests
         , moneyTests
         , markdownTests
         ]

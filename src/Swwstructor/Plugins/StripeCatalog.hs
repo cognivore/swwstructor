@@ -10,6 +10,7 @@
 module Swwstructor.Plugins.StripeCatalog
   ( CatalogItem (..)
   , parseCatalogJSON
+  , parsePriceCatalogJSON
   , catalogSection
   , isPriceId
   ) where
@@ -21,7 +22,7 @@ import qualified Data.Text as T
 import Swwstructor.Block (BuyTarget (BuyTarget))
 import Swwstructor.Content (Availability (NotOffered, OnSale), ImageRef (ImageRef), Product (Product), SectionSpec (ProductGrid))
 import Swwstructor.Money (Cents (Cents), Price (Price), currencyOfCode)
-import StickyWM (JSON (JArr, JNum, JObj, JStr), decode, (.:), (.:?))
+import StickyWM (JSON (JArr, JBool, JNum, JObj, JStr), decode, (.:), (.:?))
 
 -- | One sellable item as Stripe's catalogue describes it.
 data CatalogItem = CatalogItem
@@ -50,21 +51,59 @@ data CatalogItem = CatalogItem
 parseCatalogJSON :: String -> Either String [CatalogItem]
 parseCatalogJSON body = do
   v <- decode body
-  items <- case v .: "data" of
+  items <- catalogData v
+  pure (sortItems (mapMaybe itemOf items))
+
+-- | Stripe's price list excludes inline checkout prices. Project only each
+-- active product's current default, preserving the owner-managed catalogue
+-- without allowing per-booking products to displace it. Refuse a partial
+-- response rather than silently treating an omitted ticket as unavailable.
+parsePriceCatalogJSON :: String -> Either String [CatalogItem]
+parsePriceCatalogJSON body = do
+  v <- decode body
+  case v .:? "has_more" of
+    Just (JBool False) -> pure ()
+    Just (JBool True) -> Left "catalog: price list is incomplete"
+    _ -> Left "catalog: price list has no completeness marker"
+  items <- catalogData v
+  pure (sortItems (mapMaybe priceItemOf items))
+
+catalogData :: JSON -> Either String [JSON]
+catalogData v = case v .: "data" of
     Right (JArr xs) -> Right xs
     Right _ -> Left "catalog: 'data' is not an array"
     Left e -> Left e
-  pure (sortOn (\i -> let Price (Cents n) _ = ciPrice i in n) (mapMaybe itemOf items))
+
+sortItems :: [CatalogItem] -> [CatalogItem]
+sortItems = sortOn (\i -> let Price (Cents n) _ = ciPrice i in n)
+
+priceItemOf :: JSON -> Maybe CatalogItem
+priceItemOf priceObj = do
+  JBool True <- priceObj .:? "active"
+  productObj <- priceObj .:? "product"
+  JBool True <- productObj .:? "active"
+  JStr pid <- priceObj .:? "id"
+  defaultPrice <- productObj .:? "default_price"
+  defaultId <- case defaultPrice of
+    JStr ident -> Just ident
+    obj@JObj{} -> case obj .:? "id" of Just (JStr ident) -> Just ident; _ -> Nothing
+    _ -> Nothing
+  if defaultId == pid then pricedItemOf productObj priceObj else Nothing
 
 itemOf :: JSON -> Maybe CatalogItem
 itemOf v = do
-  JStr name <- v .:? "name"
   priceObj <- v .:? "default_price"
+  pricedItemOf v priceObj
+
+pricedItemOf :: JSON -> JSON -> Maybe CatalogItem
+pricedItemOf v priceObj = do
+  JStr name <- v .:? "name"
   -- Only one-time prices belong in a payment-mode checkout; a recurring
   -- (subscription) price would be refused by Stripe at session creation.
   JStr "one_time" <- priceObj .:? "type"
   JStr pid <- priceObj .:? "id"
   JNum amount <- priceObj .:? "unit_amount"
+  minor <- checkedMinorUnits amount
   JStr code <- priceObj .:? "currency"
   cur <- currencyOfCode (T.pack code)
   let blurb = case v .:? "description" of
@@ -88,10 +127,17 @@ itemOf v = do
       , ciBlurb = blurb
       , ciImage = img
       , ciPriceId = T.pack pid
-      , ciPrice = Price (Cents (max 0 (round amount))) cur
+      , ciPrice = Price (Cents minor) cur
       , ciSeats = seats
       , ciAvailability = availability
       }
+
+checkedMinorUnits :: Double -> Maybe Int
+checkedMinorUnits amount
+  | isNaN amount || isInfinite amount || amount < 0 || amount > 9007199254740991 = Nothing
+  | amount > fromIntegral (maxBound :: Int) = Nothing
+  | fromInteger (round amount) /= amount = Nothing
+  | otherwise = Just (round amount)
 
 -- | The catalogue as an engine section: a 'ProductGrid' whose buy targets are
 -- the Stripe price ids and whose photos are the Stripe product images — the

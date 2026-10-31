@@ -21,6 +21,8 @@ module Swwstructor.Content
   , Story (..)
   , story
   , SlotSpec (..)
+  , ClassOffer (..)
+  , ClassTicketOption (..)
   , slotIdOf
   , groupSlotsByArea
 
@@ -54,6 +56,8 @@ import Swwstructor.Block
   ( BuyTarget (BuyTarget)
   , NavLink (NavLink)
   , SlotSpec (..)
+  , ClassOffer (..)
+  , ClassTicketOption (..)
   , groupSlotsByArea
   , navHref
   , navLabel
@@ -149,6 +153,8 @@ data HeroContent = HeroContent
 data SectionSpec
   = -- | centered wordmark + optional tagline (the masthead)
     Masthead !Text !(Maybe Text)
+  | -- | A smaller wordmark for pages whose primary task belongs above the fold.
+    CompactMasthead !Text !(Maybe Text)
   | -- | a nav bar; 'Bool' = pin it to the top for the whole page
     NavStrip ![NavLink] !Bool
   | -- | a thin link ribbon (the breaking-news strip)
@@ -171,6 +177,9 @@ data SectionSpec
     -- lets them cash it in for a concrete slot. The server injects live
     -- availability into 'slotTaken' at render time.
     ScheduleClass !(Maybe Text) !(Maybe Text) !Int ![SlotSpec]
+  | -- | Dated checkout. Prices are explicitly permitted owner configuration;
+    -- offers are a transient server projection of the schedule and catalogue.
+    UpcomingClasses !(Maybe Text) !(Maybe Text) ![Text] ![ClassOffer]
   | -- | N prose columns under an optional title
     RichColumns !(Maybe Text) ![Text]
   | -- | an image gallery under an optional title
@@ -427,6 +436,8 @@ sectionSpecToJSON :: SectionSpec -> JSON
 sectionSpecToJSON spec = case spec of
   Masthead title tag ->
     obj [tag' "masthead", req "title" (jS title), optF "tagline" tag jS]
+  CompactMasthead title tag ->
+    obj [tag' "compactMasthead", req "title" (jS title), optF "tagline" tag jS]
   NavStrip links sticky ->
     obj [tag' "navStrip", req "links" (arrOf navLinkJSON links), req "sticky" (JBool sticky)]
   Ribbon links ->
@@ -468,6 +479,9 @@ sectionSpecToJSON spec = case spec of
       , req "maxWeekly" (JNum (fromIntegral maxWeekly))
       , req "slots" (arrOf slotSpecToJSON slots)
       ]
+  UpcomingClasses title intro priceIds _ ->
+    obj [tag' "upcomingClasses", optF "title" title jS, optF "intro" intro jS,
+      req "priceIds" (arrOf jS priceIds)]
   RichColumns title cols ->
     obj [tag' "richColumns", optF "title" title jS, req "columns" (arrOf jS cols)]
   Gallery title imgs ->
@@ -490,6 +504,7 @@ sectionSpecFromJSON v = do
   k <- jstr =<< v .: "section"
   case k of
     "masthead" -> Masthead <$> reqText v "title" <*> pure (optText v "tagline")
+    "compactMasthead" -> CompactMasthead <$> reqText v "title" <*> pure (optText v "tagline")
     "navStrip" -> do
       links <- decArrAt navLinkOf v "links"
       pure (NavStrip links (optBool v "sticky"))
@@ -524,6 +539,9 @@ sectionSpecFromJSON v = do
       slots <- decArrAt slotSpecFromJSON v "slots"
       let maxWeekly = maybe 0 (max 0 . round) (optDouble v "maxWeekly")
       pure (ScheduleClass (optText v "title") (optText v "intro") maxWeekly slots)
+    "upcomingClasses" -> do
+      priceIds <- decArrAt jText v "priceIds"
+      pure (UpcomingClasses (optText v "title") (optText v "intro") priceIds [])
     "richColumns" -> do
       cols <- decArrAt jText v "columns"
       pure (RichColumns (optText v "title") cols)

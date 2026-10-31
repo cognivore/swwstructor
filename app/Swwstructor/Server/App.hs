@@ -1,4 +1,5 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 -- | The scotty host. Serves any page of the /live/ site (held in a writable
 -- store, edited through the admin), the two-pass @\/layout@ re-solve, Stripe
@@ -12,7 +13,7 @@ module Swwstructor.Server.App
   , swwApp
   ) where
 
-import Control.Exception (SomeException, try)
+import Control.Exception (IOException, SomeException, try)
 import Control.Monad (when)
 import Control.Monad.IO.Class (liftIO)
 import Crypto.Hash (Digest, SHA256, hash)
@@ -24,17 +25,21 @@ import Data.List.NonEmpty (NonEmpty ((:|)))
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
 import Data.Maybe (fromMaybe, listToMaybe)
+import Data.List (sortOn, nub)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Text.Encoding.Error (lenientDecode)
 import qualified Data.Text.Lazy as TL
 import qualified Data.Text.Lazy.Encoding as TLE
-import Data.Time.Clock (UTCTime, getCurrentTime)
+import Data.Time.Clock (UTCTime (..), getCurrentTime, addUTCTime)
+import Data.Time.Calendar (fromGregorian, toGregorian, addDays)
+import Data.Time.Calendar.WeekDate (toWeekDate)
+import Data.Time.Format (formatTime, defaultTimeLocale)
 import Data.Time.Clock.POSIX (utcTimeToPOSIXSeconds)
 import Data.Word (Word8)
 import Network.HTTP.Client (Manager)
-import Network.HTTP.Types.Status (status303, status400, status403, status404, status500, status503)
+import Network.HTTP.Types.Status (Status, status200, status303, status400, status403, status404, status409, status500, status503)
 import Network.Wai (rawPathInfo)
 import Network.Wai.Middleware.Autohead (autohead)
 import Network.Wai.Middleware.RequestSizeLimit
@@ -79,9 +84,9 @@ import Swwstructor.Content
   ( Availability (OnSale)
   , PageSpec (PageSpec, pagePath, pageSections, pageTitle)
   , Partial (partialSections)
-  , SectionSpec (Contact, ScheduleClass, StripeCatalog)
+  , SectionSpec (Contact, ScheduleClass, StripeCatalog, UpcomingClasses)
   , SiteSpec (siteFooter, sitePages, sitePartials, siteTheme)
-  , SlotSpec (slotArea, slotDate, slotDescription, slotEnd, slotStart, slotTaken)
+  , SlotSpec (slotArea, slotDate, slotDescription, slotEnd, slotStart, slotTaken, slotCap)
   , allSectionsOf
   , slotIdOf
   )
@@ -105,11 +110,11 @@ import Swwstructor.Edit
   , setSiteMeta
   , setTheme
   )
-import Swwstructor.Html (Html, el, elAttr, esc, htmlConcat, renderHtml)
+import Swwstructor.Html (Html, elAttr, esc, htmlConcat, renderHtml)
 import Swwstructor.Media (contentTypeFor, isSafeMediaName)
-import Swwstructor.Money (Quantity (Quantity))
+import Swwstructor.Money (Quantity (Quantity), Price (..), Cents (..), currencyCode)
 import Swwstructor.Plugins.Stripe (siteBuyRegistry)
-import Swwstructor.Plugins.StripeCatalog (CatalogItem (ciAvailability, ciName, ciPriceId, ciSeats), catalogSection, isPriceId)
+import Swwstructor.Plugins.StripeCatalog (CatalogItem (ciAvailability, ciName, ciPriceId, ciSeats, ciPrice), catalogSection, isPriceId)
 import Swwstructor.Server.Catalog (CatalogCache, getCatalog)
 import Swwstructor.Server.Admin
   ( adminLoginPage
@@ -126,28 +131,31 @@ import Swwstructor.Server.Admin
   , themeEditorPage
   , venuesPage
   )
-import Swwstructor.Block (fmtSlotDay, markdownPlain)
+import Swwstructor.Block (fmtSlotDay, markdownPlain, ClassOffer (..), ClassTicketOption (..))
 import Swwstructor.Server.Booking
   ( BookingStore
   , RedeemError (AlreadyRedeemed, CodeNotFound, SlotFull, SlotUnknown, WeekFull)
-  , Redemption (redSlotId)
+  , Redemption (redSlotId, redName)
   , Ticket (tkCode, tkProduct, tkRedemption)
   , issueTicket
   , isTicketCode
   , listTickets
   , newTicketCode
   , redeemTicket
-  , takenFor
   , readReservationEmails
   , configureReservationEmails
   , queueTestEmail
   , queueMissingReservationEmails
   , retryReservationEmail
+  , CheckoutHold, HoldState (..), chCode, chSlot, chPriceId, chState, chCreatedAt, chExpiresAt, chSeats
+  , beginCheckoutHold, lookupCheckoutHold, bookingAvailability, holdErrorMessage
+  , setPreferredName
+  , listPendingCheckoutHolds
   )
 import Swwstructor.Server.ReservationEmail (parseRecipients, parseMailbox)
 import Swwstructor.Server.Media (deleteMedia, listAssets, listMedia, resolveMedia, saveMedia)
 import Swwstructor.Server.Notify
-  ( BookingCtx (bcSiteName, bcVenueNoun, bcVenues)
+  ( BookingCtx (bcSiteName, bcVenueNoun, bcVenues, bcTimeZone, bcTzOffset)
   , CalendarTicket (..)
   , CalendarStatus (..)
   , bookingIcs
@@ -188,6 +196,12 @@ import Swwstructor.Server.Stripe
   , verifyStripeSig
   , webhookPaymentOf
   )
+import Swwstructor.Server.DirectStripe
+  ( DirectStripe (..), DirectSession (..), SessionState (..)
+  , isDatedPayment, directPaymentOf, directSessionOf
+  )
+import Swwstructor.Server.DirectBooking
+  ( DirectBooking (..), CheckoutProgress (..), resumeCheckout, confirmPayment, applySession )
 import Swwstructor.Site (Analytics, messagePage, renderFullPage, renderStageWith, renderStaticPage, simplePage)
 import Swwstructor.Templates (Section (secLayout), expandSection, renderSections, resolvedSection)
 import Swwstructor.Theme (Theme)
@@ -236,6 +250,10 @@ data AppEnv = AppEnv
   -- ^ the venue address book (admin-only; feeds venue announcements)
   , aeAnalytics :: !(Maybe Analytics)
   -- ^ the analytics tag public pages carry (deployment config, not content)
+  , aeDirectStripe :: !DirectStripe
+  , aeDatedCatalog :: !(IO (Either Text [CatalogItem]))
+  -- ^ A fresh catalogue read for admission; a stale display cache cannot
+  -- authorise a purchase. Replaceable in application tests.
   }
 
 currentSite :: AppEnv -> ActionM SiteSpec
@@ -249,30 +267,69 @@ currentSite env = liftIO (readSite (aeStore env))
 currentSiteResolved :: AppEnv -> ActionM SiteSpec
 currentSiteResolved env = do
   site0 <- currentSite env
-  site1 <-
-    if not (anySection isCatalogMarker site0)
-      then pure site0
-      else do
-        items <- liftIO (fetchCatalogFor env)
-        if null items
-          then pure site0 -- template renders the book-by-email fallback
-          else pure (mapAllSections (swapMarker items) site0)
-  if not (anySection isSchedule site1)
-    then pure site1
-    else do
-      tickets <- liftIO (listTickets (aeBookings env))
-      venues <- liftIO (bcVenues (aeBookingCtx env))
-      pure (mapAllSections (fillSchedule tickets venues) site1)
+  items <- if anySection needsCatalog site0 then liftIO (fetchCatalogFor env) else pure []
+  slots <- liftIO (bookingAvailability (aeBookings env) (siteSlots site0))
+  venues <- liftIO (bcVenues (aeBookingCtx env))
+  now <- liftIO getCurrentTime
+  let visible = filter (slotIsUpcoming (aeBookingCtx env) now) slots
+      decorate s = s {slotArea = venueLocation venues (slotArea s)}
+      fill (StripeCatalog title intro) | not (null items) = catalogSection title intro items
+      fill (ScheduleClass title intro weekly ss) =
+        ScheduleClass title intro weekly [decorate s | s <- visible, slotIdOf s `elem` map slotIdOf ss]
+      fill (UpcomingClasses title intro prices _) =
+        UpcomingClasses title intro prices
+          [ ClassOffer (decorate s) options
+          | s <- sortOn (\slot -> (slotDate slot, slotStart slot)) visible
+          , slotTaken s < slotCap s
+          , weeklyAllows (siteMaxWeekly site0) slots s
+          , let options = sortOn ctoSeats
+                  [ ClassTicketOption (ciPriceId item) (ciPrice item) seats
+                  | item <- items, ciPriceId item `elem` prices, ciAvailability item == OnSale
+                  , Just seats <- [ordinarySeats (ciSeats item)], seats <= slotCap s - slotTaken s
+                  ]
+          , not (null options)
+          ]
+      fill other = other
+  pure (mapAllSections fill site0)
   where
-    isCatalogMarker StripeCatalog{} = True
-    isCatalogMarker _ = False
-    swapMarker items (StripeCatalog t i) = catalogSection t i items
-    swapMarker _ s = s
-    isSchedule ScheduleClass{} = True
-    isSchedule _ = False
-    fillSchedule tickets venues (ScheduleClass t i mw slots) =
-      ScheduleClass t i mw [s {slotTaken = takenFor tickets s, slotArea = venueLocation venues (slotArea s)} | s <- slots]
-    fillSchedule _ _ s = s
+    needsCatalog StripeCatalog{} = True
+    needsCatalog UpcomingClasses{} = True
+    needsCatalog _ = False
+
+ordinarySeats :: Text -> Maybe Int
+ordinarySeats value = case reads (T.unpack value) of
+  [(n, "")] | n == 1 || n == 2 -> Just n
+  _ -> Nothing
+
+weeklyAllows :: Int -> [SlotSpec] -> SlotSpec -> Bool
+weeklyAllows maximumClasses slots chosen = maximumClasses <= 0 || slotTaken chosen > 0 ||
+  length [() | s <- slots, weekOf (slotDate s) == weekOf (slotDate chosen), slotTaken s > 0] < maximumClasses
+  where
+    weekOf date = case reads (T.unpack date) of
+      [(day, "")] -> let (year, week, _) = toWeekDate day in (year, week)
+      _ -> (0, 0)
+
+-- Current London civil time includes BST automatically. Other deployments
+-- retain their explicitly configured offset. All class times are local.
+slotIsUpcoming :: BookingCtx -> UTCTime -> SlotSpec -> Bool
+slotIsUpcoming ctx now slot =
+  slotDate slot <> " " <> slotStart slot > T.pack (formatTime defaultTimeLocale "%F %H:%M" local)
+  where
+    local = addUTCTime (fromIntegral (offsetMinutes * 60)) now
+    (year, _, _) = toGregorian (utctDay now)
+    lastSunday month = let end = addDays (-1) (fromGregorian year (month + 1) 1)
+                           (_, _, weekday) = toWeekDate end
+                       in addDays (negate (fromIntegral (weekday `mod` 7))) end
+    summerStart = UTCTime (lastSunday 3) 3600
+    summerEnd = UTCTime (lastSunday 10) 3600
+    offsetMinutes :: Int
+    offsetMinutes
+      | bcTimeZone ctx == "Europe/London" = if now >= summerStart && now < summerEnd then 60 else 0
+      | otherwise = case T.unpack (bcTzOffset ctx) of
+          sign : h1 : h2 : ':' : m1 : m2 : [] -> case (reads [h1,h2], reads [m1,m2]) of
+            ([(hours, "")], [(minutes, "")]) -> (if sign == '-' then negate else id) (hours * 60 + minutes)
+            _ -> 0
+          _ -> 0
 
 fetchCatalogFor :: AppEnv -> IO [CatalogItem]
 fetchCatalogFor env =
@@ -347,6 +404,9 @@ swwApp env = do
   post "/email-reveal" (handleEmailReveal env)
 
   post "/buy/:id" (handleBuy env)
+  post "/book" (handleBook env)
+  get "/checkout/:code" (handleCheckoutPage env)
+  post "/checkout/:code/cancel" (handleCheckoutCancel env)
   get "/success" (handleSuccess env)
   get "/cancel" $ do
     site <- currentSite env
@@ -354,6 +414,7 @@ swwApp env = do
 
   post "/schedule" (handleSchedule env)
   get "/booking/:code" (handleBookingPage env)
+  post "/booking/:code/name" (handlePreferredName env)
   get "/booking/:code/calendar.ics" (handleBookingIcs env)
 
   post "/stripe/webhook" (handleWebhook env)
@@ -370,6 +431,7 @@ swwApp env = do
 
   -- Admin: content editor (all gated)
   get "/admin" (adminGate env (dashboard env Nothing))
+  get "/admin/checkouts" (adminGate env (handleCheckouts env))
   post "/admin/site" (adminGate env (handleSiteMeta env))
   post "/admin/page/new" (adminGate env (handlePageNew env))
   post "/admin/page/delete" (adminGate env (handlePageDelete env))
@@ -414,6 +476,7 @@ swwApp env = do
 
 servePage :: AppEnv -> Text -> ActionM ()
 servePage env path = do
+  ensureBookingCookie env
   site <- currentSiteResolved env
   case pageByPath site path of
     -- resolvedSection applies the template engine: header + body (includes
@@ -436,6 +499,175 @@ defaultVp = Viewport 1180 900
 -- ---------------------------------------------------------------------------
 -- Checkout
 -- ---------------------------------------------------------------------------
+
+directBooking :: AppEnv -> DirectBooking
+directBooking env = DirectBooking (aeBookings env) (aeDirectStripe env) (aeBaseUrl env) (bcSiteName (aeBookingCtx env))
+
+tryStorage :: IO a -> IO (Either IOException a)
+tryStorage = try
+
+-- The signed browser attempt makes a double click/retry reuse one checkout.
+-- It is not an account: the resulting ordinary ticket remains transferable.
+bookingCookieCode :: AppEnv -> ActionM (Maybe Text)
+bookingCookieCode env = do
+  cookies <- maybe "" TL.toStrict <$> header "Cookie"
+  now <- floor . utcTimeToPOSIXSeconds <$> liftIO getCurrentTime
+  pure $ do
+    cookie <- listToMaybe [T.drop 12 (T.strip c) | c <- T.splitOn ";" cookies, "sww_booking=" `T.isPrefixOf` T.strip c]
+    case T.splitOn ":" cookie of
+      [code, timestamp, mac] | isTicketCode code -> case reads (T.unpack timestamp) of
+        [(issued, "")] | issued <= now, now - issued <= (7200 :: Integer), ctEq mac (bookingMac env code timestamp) -> Just code
+        _ -> Nothing
+      _ -> Nothing
+
+bookingMac :: AppEnv -> Text -> Text -> Text
+bookingMac env code timestamp = hmacTokenHex (aeMasterKey env) (TE.encodeUtf8 ("dated-attempt:" <> code <> ":" <> timestamp))
+
+setBookingCookie :: AppEnv -> Text -> ActionM ()
+setBookingCookie env code = do
+  timestamp <- T.pack . show . (floor :: Double -> Integer) . realToFrac . utcTimeToPOSIXSeconds <$> liftIO getCurrentTime
+  setHeader "Set-Cookie" (TL.fromStrict ("sww_booking=" <> code <> ":" <> timestamp <> ":" <> bookingMac env code timestamp <> "; Path=/; Max-Age=7200; HttpOnly; SameSite=Lax" <> secureFlag env))
+  setHeader "Cache-Control" "private, no-store"
+
+ensureBookingCookie :: AppEnv -> ActionM ()
+ensureBookingCookie env = do
+  code <- bookingCookieCode env
+  hold <- maybe (pure Nothing) (liftIO . lookupCheckoutHold (aeBookings env)) code
+  case (code, chState <$> hold) of
+    (Just _, Nothing) -> pure ()
+    (Just _, Just HoldCreating) -> pure ()
+    (Just _, Just HoldCheckout{}) -> pure ()
+    _ -> liftIO (newTicketCode (aeBookings env)) >>= setBookingCookie env
+
+sameOrigin :: AppEnv -> ActionM Bool
+sameOrigin env = do
+  origin <- header "Origin"
+  pure (maybe True ((== T.dropWhileEnd (== '/') (aeBaseUrl env)) . TL.toStrict) origin)
+
+handleBook :: AppEnv -> ActionM ()
+handleBook env = do
+  originOk <- sameOrigin env
+  code <- bookingCookieCode env
+  sid <- fromMaybe "" <$> formParamMaybe "slot"
+  pid <- fromMaybe "" <$> formParamMaybe "price"
+  quotedAmount <- formParamMaybe (TL.fromStrict ("expectedAmount_" <> pid))
+  quotedCurrency <- formParamMaybe (TL.fromStrict ("expectedCurrency_" <> pid))
+  fallbackAmount <- formParamMaybe "expectedAmount"
+  fallbackCurrency <- formParamMaybe "expectedCurrency"
+  let amount = fromMaybe (fromMaybe "" fallbackAmount) quotedAmount :: Text
+      currency = fromMaybe (fromMaybe "" fallbackCurrency) quotedCurrency :: Text
+  if not originOk then status status403 >> text "Please book from this website."
+  else case code of
+    Nothing -> checkoutMessage env status400 "Choose your class" "Please return to the class list and press Book again so we can keep your checkout safe to retry." Nothing
+    Just attempt -> do
+      previous <- liftIO (lookupCheckoutHold (aeBookings env) attempt)
+      case previous of
+        Just hold
+          | slotIdOf (chSlot hold) == sid && chPriceId hold == pid -> runCheckout env hold
+          | otherwise -> checkoutMessage env status409 "You already have a checkout open" "Finish or cancel your previous checkout before choosing another class. This prevents two purchases by accident." (Just attempt)
+        Nothing -> do
+          site <- currentSite env
+          now <- liftIO getCurrentTime
+          let allowed = nub (concat [prices | UpcomingClasses _ _ prices _ <- allSectionsOf site])
+              selected = slotById (siteSlots site) sid
+          if T.length sid > 64 || T.length pid > 255 || pid `notElem` allowed || maybe True (not . slotIsUpcoming (aeBookingCtx env) now) selected
+            then checkoutMessage env status400 "Choose another class" "That class or ticket option is no longer offered. Please choose an available date." Nothing
+            else do
+              catalog <- liftIO (aeDatedCatalog env)
+              case catalog of
+                Left _ -> checkoutMessage env status503 "Checkout is temporarily unavailable" "We couldn't check the current ticket price. No place has been reserved and no payment was started. Please try again shortly." Nothing
+                Right items -> case [item | item <- items, ciPriceId item == pid, ciAvailability item == OnSale, ordinarySeats (ciSeats item) /= Nothing] of
+                  [] -> checkoutMessage env status409 "Ticket option unavailable" "That ticket option is no longer on sale. Please return to the class list for the current options." Nothing
+                  item : _ -> do
+                    let Price (Cents priceAmount) priceCurrency = ciPrice item
+                    if amount /= T.pack (show priceAmount) || currency /= currencyCode priceCurrency
+                      then checkoutMessage env status409 "The ticket price has changed" "Please return to the class list to review the current price before paying. No checkout was started." Nothing
+                      else do
+                        venues <- liftIO (bcVenues (aeBookingCtx env))
+                        let expiry = floor (utcTimeToPOSIXSeconds now) + 1860
+                            promisedSlots = [s {slotArea = venueLocation venues (slotArea s)} | s <- siteSlots site]
+                        held <- liftIO (try (beginCheckoutHold (aeBookings env) promisedSlots (siteMaxWeekly site) attempt sid pid (ciName item) (ciSeats item) (ciPrice item) expiry))
+                        case held of
+                          Left (_ :: IOException) -> checkoutMessage env status503 "We couldn't save your checkout" "No payment was started. Please try again shortly." Nothing
+                          Right (Left err) -> checkoutMessage env status409 "Choose another class" (holdErrorMessage err) Nothing
+                          Right (Right hold) -> runCheckout env hold
+
+runCheckout :: AppEnv -> CheckoutHold -> ActionM ()
+runCheckout env hold = do
+  result <- liftIO (try (resumeCheckout (directBooking env) hold))
+  case result of
+    Left (_ :: IOException) -> checkoutMessage env status503 "Your checkout needs a moment" "We couldn't save the checkout result. Your places remain protected while we check it. Use the same checkout to continue." (Just (chCode hold))
+    Right (Left _) -> checkoutMessage env status503 "Your checkout needs a moment" "We couldn't confirm the payment service's response. Please return to this checkout shortly; you won't need to start another purchase." (Just (chCode hold))
+    Right (Right (ReadyToPay (Url url))) -> status status303 >> setHeader "Location" (TL.fromStrict url)
+    Right (Right (BookingPaid ticket)) -> status status303 >> setHeader "Location" (TL.fromStrict ("/booking/" <> tkCode ticket))
+    Right (Right CheckoutEnded) -> do
+      liftIO (newTicketCode (aeBookings env)) >>= setBookingCookie env
+      checkoutMessage env status409 "Checkout ended" "This checkout has expired without payment. Your places have been released; choose a class to start again." Nothing
+    Right (Right (CheckoutPending message)) -> checkoutMessage env status200 "Confirming your payment" message (Just (chCode hold))
+
+checkoutMessage :: AppEnv -> Status -> Text -> Text -> Maybe Text -> ActionM ()
+checkoutMessage env response title message code = do
+  site <- currentSite env
+  status response
+  setHeader "Cache-Control" "private, no-store"
+  htmlOf (messagePage (siteTheme site) (aeAnalytics env) title (para message <>
+    maybe mempty (\c -> elAttr "p" [] (elAttr "a" [("href", "/checkout/" <> c), ("class", "sww-buy")] (esc "Return to my checkout"))) code <>
+    elAttr "p" [] (elAttr "a" [("href", "/classes"), ("class", "sww-link")] (esc "See upcoming classes"))))
+
+handleCheckoutPage :: AppEnv -> ActionM ()
+handleCheckoutPage env = do
+  code <- captureParam "code"
+  found <- liftIO (lookupCheckoutHold (aeBookings env) code)
+  case found of
+    Nothing -> checkoutMessage env status404 "Checkout not found" "Please return to the class list to choose a date." Nothing
+    Just hold -> do
+      result <- liftIO (tryStorage (resumeCheckout (directBooking env) hold))
+      case result of
+        Right (Right (BookingPaid ticket)) -> status status303 >> setHeader "Location" (TL.fromStrict ("/booking/" <> tkCode ticket))
+        Right (Right CheckoutEnded) -> do
+          liftIO (newTicketCode (aeBookings env)) >>= setBookingCookie env
+          checkoutMessage env status200 "Checkout ended" "This checkout ended without payment. Choose an upcoming class whenever you're ready." Nothing
+        Right (Right (ReadyToPay (Url url))) -> do
+          site <- currentSite env
+          setHeader "Cache-Control" "private, no-store"
+          htmlOf (messagePage (siteTheme site) (aeAnalytics env) "Your class is held" $
+            para (slotLabel (chSlot hold) <> ". Finish checkout to confirm your place, or cancel to choose another date.") <>
+            elAttr "p" [] (elAttr "a" [("href", url), ("class", "sww-buy")] (esc "Continue to payment")) <>
+            elAttr "form" [("method", "post"), ("action", "/checkout/" <> code <> "/cancel")] (
+              elAttr "input" [("type", "hidden"), ("name", "csrf"), ("value", checkoutActionToken env "cancel" code)] mempty <>
+              elAttr "button" [("type", "submit"), ("class", "sww-buy sww-buy-off")] (esc "Cancel checkout and release my places")))
+        _ -> checkoutMessage env status503 "Checking your checkout" "Your places remain protected while we confirm the payment service's response. Refresh this page shortly." (Just code)
+
+checkoutActionToken :: AppEnv -> Text -> Text -> Text
+checkoutActionToken env purpose code = hmacTokenHex (aeMasterKey env) (TE.encodeUtf8 ("booking-action:" <> purpose <> ":" <> code))
+
+handleCheckoutCancel :: AppEnv -> ActionM ()
+handleCheckoutCancel env = do
+  code <- captureParam "code"
+  token <- fromMaybe "" <$> formParamMaybe "csrf"
+  originOk <- sameOrigin env
+  if not originOk || not (ctEq token (checkoutActionToken env "cancel" code))
+    then status status403 >> text "Please cancel from your checkout page."
+    else do
+      found <- liftIO (lookupCheckoutHold (aeBookings env) code)
+      case found of
+        Just hold | HoldCheckout sid _ <- chState hold -> do
+          ended <- liftIO (directExpire (aeDirectStripe env) sid)
+          checked <- case ended of
+            Right session -> pure (Right session)
+            Left _ -> liftIO (directRetrieve (aeDirectStripe env) sid)
+          result <- case checked of
+            Right session -> liftIO (applySession (directBooking env) hold session)
+            Left _ -> pure (Left "unresolved")
+          case result of
+            Right CheckoutEnded -> do
+              liftIO (newTicketCode (aeBookings env)) >>= setBookingCookie env
+              status status303
+              setHeader "Location" "/classes"
+            Right (BookingPaid ticket) -> status status303 >> setHeader "Location" (TL.fromStrict ("/booking/" <> tkCode ticket))
+            _ -> checkoutMessage env status503 "Cancellation is being checked" "We haven't confirmed cancellation yet. Your places remain held; return to this checkout shortly." (Just code)
+        Just hold -> runCheckout env hold
+        Nothing -> checkoutMessage env status404 "Checkout not found" "Please return to the class list." Nothing
 
 handleBuy :: AppEnv -> ActionM ()
 handleBuy env = do
@@ -507,8 +739,7 @@ handleWebhook env = do
   raw_ <- body
   msig <- header "Stripe-Signature"
   bundle <- liftIO (loadBundle (aeSecretFile env) (aeMasterKey env))
-  let rawStrict = TL.toStrict (TLE.decodeUtf8 raw_)
-      rawBytes = TE.encodeUtf8 rawStrict
+  let rawBytes = BL.toStrict raw_
       evType = peekEventType rawBytes
   case sbStripeWebhook bundle of
     Nothing -> do
@@ -529,14 +760,20 @@ handleWebhook env = do
             -- id, status and our metadata); everything else is acknowledged
             -- unread, so no customer data is processed here.
             when (evType == "payment_intent.succeeded") $
-              case webhookPaymentOf rawBytes of
+              if isDatedPayment rawBytes then case directPaymentOf rawBytes of
+                Nothing -> status status400 >> text "dated payment evidence is incomplete" >> finish
+                Just payment -> do
+                  recorded <- liftIO (tryStorage (confirmPayment (directBooking env) payment))
+                  case recorded of
+                    Right (Right _) -> pure ()
+                    _ -> status status503 >> text "booking recording deferred; please retry" >> finish
+              else case webhookPaymentOf rawBytes of
                 Just info | piSucceeded info -> case piReference info of
                   Just (ClassCode code) -> do
                     et <- liftIO (issueTicket (aeBookings env) (piId info) code (fromMaybe "Class" (piProduct info)) (fromMaybe "1" (piSeats info)))
-                    liftIO $ case et of
-                      Right (t, True) -> putStrLn ("[booking] ticket " <> T.unpack (tkCode t) <> " issued for " <> T.unpack (tkProduct t))
-                      Right (_, False) -> pure ()
-                      Left err -> putStrLn ("[booking] ticket issuance refused: " <> T.unpack err)
+                    case et of
+                      Right _ -> pure ()
+                      Left _ -> status status503 >> text "ticket recording deferred; please retry" >> finish
                   Just (PaymentOnlyCode code) -> do
                     result <- liftIO (issuePaymentCode (aePaymentCodes env) (piId info) code (fromMaybe "Payment" (piProduct info)))
                     case result of
@@ -548,6 +785,18 @@ handleWebhook env = do
                         finish
                   Nothing -> liftIO (putStrLn "[stripe webhook] no unambiguous recognised reference — skipped")
                 _ -> liftIO (putStrLn "[stripe webhook] payment without a ticket code — not ours, skipped")
+            when (evType == "checkout.session.expired" && isDatedPayment rawBytes) $
+              case directSessionOf rawBytes of
+                Just session | dsState session == SessionExpired -> do
+                  hold <- liftIO (lookupCheckoutHold (aeBookings env) (dsCode session))
+                  case hold of
+                    Just saved -> do
+                      result <- liftIO (tryStorage (applySession (directBooking env) saved session))
+                      case result of
+                        Right (Right _) -> pure ()
+                        _ -> status status503 >> text "checkout reconciliation deferred; please retry" >> finish
+                    Nothing -> status status503 >> text "checkout reference not yet available; please retry" >> finish
+                _ -> status status400 >> text "checkout expiry evidence is incomplete" >> finish
             text "ok"
           else do
             liftIO (putStrLn "[stripe webhook] REJECTED: bad signature")
@@ -650,12 +899,15 @@ paymentOnlyMessage p = "We found your code, but it is for \x201C" <> pcProduct p
 
 reserveLesson :: AppEnv -> SiteSpec -> Text -> Text -> Text -> ActionM ()
 reserveLesson env site code name slotId = do
+  now <- liftIO getCurrentTime
   let th = siteTheme site
       slots = siteSlots site
       oops msg = do
         status status400
         htmlOf (simplePage th (aeAnalytics env) "Could not reserve that" msg)
-  if T.null (T.strip code) || T.null (T.strip name) || T.null slotId
+  if maybe True (not . slotIsUpcoming (aeBookingCtx env) now) (slotById slots slotId)
+    then oops "That class is no longer available to book. Please choose an upcoming date; your ticket has not been redeemed."
+  else if T.null (T.strip code) || T.null (T.strip name) || T.null slotId
     then oops "Please pick a class and fill in your ticket code and the name you'd like to be called."
     else do
       res <- liftIO (redeemTicket (aeBookings env) slots (siteMaxWeekly site) code name slotId)
@@ -680,6 +932,21 @@ reserveLesson env site code name slotId = do
 -- the site has): the class, its venue address, and the calendar file to save.
 handleBookingPage :: AppEnv -> ActionM ()
 handleBookingPage env = do
+  setHeader "Cache-Control" "private, no-store"
+  code <- captureParam "code"
+  pending <- liftIO (lookupCheckoutHold (aeBookings env) code)
+  case pending of
+    Just hold | chState hold /= HoldReleased -> do
+      result <- liftIO (tryStorage (resumeCheckout (directBooking env) hold))
+      case result of
+        Right (Right BookingPaid{}) -> pure ()
+        Right (Right CheckoutEnded) -> checkoutMessage env status200 "Checkout ended" "Your checkout ended without payment. Please choose a class to start again." Nothing >> finish
+        _ -> do
+          setHeader "Refresh" "5"
+          checkoutMessage env status200 "Confirming your booking" "Your places are held while we confirm payment. This page updates automatically; you do not need to choose a date again." (Just code)
+          finish
+    Just _ -> checkoutMessage env status200 "Checkout ended" "Your checkout ended without payment. Please choose a class to start again." Nothing >> finish
+    Nothing -> pure ()
   site <- currentSite env
   let th = siteTheme site
   found <- lookupBooking env
@@ -689,7 +956,7 @@ handleBookingPage env = do
       htmlOf (simplePage th (aeAnalytics env) "No such booking" "That booking code was not recognised \x2014 check it against your Stripe receipt.")
     Just (LessonBooking t Nothing) -> htmlOf (ticketPage th (aeAnalytics env) t)
     Just (PaymentPreview p Nothing) -> htmlOf (paymentCodePage th (aeAnalytics env) p)
-    Just (LessonBooking t (Just s)) -> renderDetails (tkCode t) (tkProduct t) s "You're booked!" mempty
+    Just (LessonBooking t (Just s)) -> renderDetails (tkCode t) (tkProduct t) s "You're booked!" (preferredNameForm env t)
     Just (PaymentPreview p (Just s)) -> renderDetails (pcCode p) (pcProduct p) s "[PAYMENT PENDING] Calendar preview" (para (paymentOnlyMessage p))
   where
     renderDetails code productName s title notice = do
@@ -708,6 +975,30 @@ handleBookingPage env = do
           , para ("Code: " <> code <> ". Keep it: this page lives at " <> aeBaseUrl env <> "/booking/" <> code <> ".")
           , elAttr "p" [] (elAttr "a" [("href", "/booking/" <> code <> "/calendar.ics"), ("class", "sww-buy sww-schedsubmit"), ("style", "display:inline-block;text-decoration:none")] (esc "Add to my calendar"))
           ]
+
+preferredNameForm :: AppEnv -> Ticket -> Html
+preferredNameForm env ticket =
+  elAttr "form" [("method", "post"), ("action", "/booking/" <> tkCode ticket <> "/name"), ("style", "margin:1.5rem 0")] $
+    para "Your booking is confirmed. If you'd like, tell us the name to use in class. You can share this booking with someone else if it's a gift." <>
+    elAttr "input" [("type", "hidden"), ("name", "csrf"), ("value", checkoutActionToken env "name" (tkCode ticket))] mempty <>
+    elAttr "label" [] (esc "Name for class (optional) " <>
+      elAttr "input" [("type", "text"), ("name", "name"), ("maxlength", "100"), ("autocomplete", "given-name"), ("value", maybe "" redName (tkRedemption ticket))] mempty) <>
+    elAttr "button" [("type", "submit"), ("class", "sww-buy"), ("style", "margin-left:0.5rem")] (esc "Save name")
+
+handlePreferredName :: AppEnv -> ActionM ()
+handlePreferredName env = do
+  code <- captureParam "code"
+  name <- fromMaybe "" <$> formParamMaybe "name"
+  token <- fromMaybe "" <$> formParamMaybe "csrf"
+  originOk <- sameOrigin env
+  if not originOk || not (ctEq token (checkoutActionToken env "name" code))
+    then status status403 >> text "Please save the name from your booking page."
+    else do
+      result <- liftIO (try (setPreferredName (aeBookings env) code name))
+      case result of
+        Right (Right _) -> status status303 >> setHeader "Location" (TL.fromStrict ("/booking/" <> code))
+        Right (Left err) -> checkoutMessage env status400 "Name not saved" (holdErrorMessage err) Nothing
+        Left (_ :: IOException) -> checkoutMessage env status503 "Name not saved" "Your booking is still confirmed, but the name couldn't be saved. Please try again shortly." Nothing
 
 handleBookingIcs :: AppEnv -> ActionM ()
 handleBookingIcs env = do
@@ -736,10 +1027,13 @@ lookupBooking env = do
   site <- currentSite env
   tickets <- liftIO (listTickets (aeBookings env))
   payment <- liftIO (lookupPaymentCode (aePaymentCodes env) code)
+  hold <- liftIO (lookupCheckoutHold (aeBookings env) code)
   pure $ case payment of
     Just p -> Just (PaymentPreview p (pcPreviewSlot p >>= slotById (siteSlots site)))
     Nothing -> case [t | t <- tickets, tkCode t == code] of
-      (t : _) -> Just (LessonBooking t (tkRedemption t >>= (slotById (siteSlots site) . redSlotId)))
+      (t : _) -> Just (LessonBooking t (case hold of
+        Just saved | HoldConfirmed _ <- chState saved -> Just (chSlot saved)
+        _ -> tkRedemption t >>= (slotById (siteSlots site) . redSlotId)))
       [] -> Nothing
 
 slotById :: [SlotSpec] -> Text -> Maybe SlotSpec
@@ -1116,6 +1410,26 @@ handleBookings env mfl = do
   emails <- liftIO (readReservationEmails (aeBookings env))
   epoch <- liftIO (readIORef (aeSession env))
   htmlOf (bookingsPage tickets (siteSlots site) bundle emails (reservationEmailCsrf env epoch) mfl)
+
+handleCheckouts :: AppEnv -> ActionM ()
+handleCheckouts env = do
+  site <- currentSite env
+  holds <- liftIO (listPendingCheckoutHolds (aeBookings env))
+  now <- floor . utcTimeToPOSIXSeconds <$> liftIO getCurrentTime
+  setHeader "Cache-Control" "private, no-store"
+  htmlOf (messagePage (siteTheme site) Nothing "Checkouts holding places" $
+    para "These purchases have not been confirmed yet. Their places are held until Stripe confirms payment or expiry. The service checks them automatically every minute." <>
+    (if null holds then para "No pending checkouts." else htmlConcat (map (entry now) holds)) <>
+    elAttr "p" [] (elAttr "a" [("href", "/admin/bookings"), ("class", "sww-link")] (esc "Back to bookings")))
+  where
+    entry now hold = elAttr "div" [("style", "border-top:1px solid;padding:1rem 0")] $
+      para (chCode hold <> " · " <> slotLabel (chSlot hold) <> " · " <> chSeats hold <> " place(s)") <>
+      para ("Started: " <> chCreatedAt hold <> ". Stripe price: " <> chPriceId hold <> ".") <>
+      para (case chState hold of
+        HoldCreating | now > chExpiresAt hold + 22 * 3600 -> "Operator action required: checkout creation is unresolved beyond its safe retry window. Check Stripe using this ticket reference before releasing capacity; do not create a replacement purchase."
+        HoldCreating -> "Checkout creation is being reconciled. Its request identity is retained so retries cannot duplicate the purchase."
+        HoldCheckout sid _ -> "Awaiting payment or verified expiry. Stripe session: " <> sid
+        _ -> "Reconciliation completed; refresh this page.")
 
 reservationEmailCsrf :: AppEnv -> Integer -> Text
 reservationEmailCsrf env epoch = T.pack (show (hash (TE.encodeUtf8 ("reservation-emails:" <> sessionToken env epoch)) :: Digest SHA256))
