@@ -69,6 +69,8 @@ data BookingCtx = BookingCtx
   , bcStore :: !BookingStore
   , bcCreds :: !(IO (Maybe GoogleCreds))
   -- ^ loaded per use — the owner can paste keys into the admin at runtime
+  , bcMailCreds :: !(IO (Maybe GoogleCreds))
+  -- ^ notification sender may be a different account from the calendar owner
   , bcStaff :: ![Text]
   -- ^ school-side addresses invited to every class event
   , bcSiteName :: !Text
@@ -133,10 +135,10 @@ drainReservationEmails store send = go (20 :: Int)
 
 deliverReservationEmails :: BookingCtx -> IO ()
 deliverReservationEmails ctx = drainReservationEmails (bcStore ctx) $ \delivery -> do
-  creds <- bcCreds ctx
+  creds <- bcMailCreds ctx
   case creds of
     Nothing -> pure (Failed "No Google connection is configured. Save Google credentials with Gmail send permission, then retry.")
-    Just c -> sendReservationEmail (bcManager ctx) c delivery {deliveryBody = deliveryBody delivery <> "Time zone: " <> bcTimeZone ctx <> "\n"}
+    Just c -> sendReservationEmail (bcManager ctx) c (bcSiteName ctx) delivery {deliveryBody = deliveryBody delivery <> "Time zone: " <> bcTimeZone ctx <> "\n"}
 
 ensureEvent :: BookingCtx -> Ticket -> Redemption -> SlotSpec -> IO ()
 ensureEvent ctx t r s = case redEventId r of

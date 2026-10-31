@@ -34,6 +34,7 @@ module Swwstructor.Server.Booking
   , readReservationEmails
   , configureReservationEmails
   , queueTestEmail
+  , queueMissingReservationEmails
   , claimReservationEmail
   , finishReservationEmail
   , retryReservationEmail
@@ -53,7 +54,7 @@ import Data.Time.Format (defaultTimeLocale, formatTime)
 import Swwstructor.Block (mondayOf)
 import Swwstructor.Content (SlotSpec, slotCap, slotDate, slotIdOf)
 import Swwstructor.Server.ReservationEmail
-import StickyWM (JSON (JArr, JNull, JNum, JObj, JStr), decode, encode, jstr, (.:), (.:?))
+import StickyWM (JSON (JArr, JNull, JObj, JStr), decode, encode, jstr, (.:), (.:?))
 import System.Directory (doesFileExist, renameFile)
 
 -- | A reserved slot on a ticket.
@@ -229,8 +230,7 @@ redeemTicket store slots maxWeekly code name slotId = do
                               let red = Redemption slotId (T.strip name) now Nothing
                                   t' = t {tkRedemption = Just red}
                                   messages =
-                                    [ let d = reservationDelivery False (tkCode t <> ":" <> mailboxText recipient) now (tkCode t) (tkProduct t) (tkSeats t) s recipient
-                                       in d {deliveryBody = deliveryBody d <> "Preferred name: " <> T.take 200 (T.unwords (T.words name)) <> "\n"}
+                                    [ bookingDelivery now t' red s recipient
                                     | emailsEnabled emails, recipient <- emailsRecipients emails ]
                                   emails' = emails {emailsDeliveries = emailsDeliveries emails <> messages}
                                in (BookingData (replaceTicket t' ts) emails', Right t')
@@ -344,6 +344,29 @@ modifyEmails store f = do
 
 configureReservationEmails :: BookingStore -> Bool -> [Mailbox] -> IO ()
 configureReservationEmails store enabled recipients = modifyEmails store $ \s -> (s {emailsEnabled = enabled, emailsRecipients = recipients}, ())
+
+bookingDelivery :: Text -> Ticket -> Redemption -> SlotSpec -> Mailbox -> Delivery
+bookingDelivery now ticket red slot recipient =
+  let d = reservationDelivery False (tkCode ticket <> ":" <> mailboxText recipient) now (tkCode ticket) (tkProduct ticket) (tkSeats ticket) slot recipient
+   in d {deliveryBody = deliveryBody d <> "Preferred name: " <> T.take 200 (T.unwords (T.words (redName red))) <> "\n"}
+
+-- Explicit admin recovery for a booking made while notifications were off.
+-- Existing jobs, including failures/uncertain sends, are never duplicated.
+queueMissingReservationEmails :: BookingStore -> [SlotSpec] -> Text -> IO (Either Text Int)
+queueMissingReservationEmails store slots code = do
+  now <- iso8601Now
+  modifyData store $ \old@(BookingData tickets emails) ->
+    let reject why = (old, Left why)
+     in if not (emailsEnabled emails) || null (emailsRecipients emails)
+          then reject "Enable reservation notifications and save recipients first. No email was queued."
+          else case [t | t <- tickets, tkCode t == code] of
+            [t] | Just red <- tkRedemption t -> case [s | s <- slots, slotIdOf s == redSlotId red] of
+              s : _ ->
+                let existing = map deliveryId (emailsDeliveries emails)
+                    missing = [d | recipient <- emailsRecipients emails, let d = bookingDelivery now t red s recipient, deliveryId d `notElem` existing]
+                 in (BookingData tickets emails {emailsDeliveries = emailsDeliveries emails <> missing}, Right (length missing))
+              [] -> reject "The reserved class is no longer defined. Restore it before sending a notification."
+            _ -> reject "No redeemed ticket matches that code. No email was queued."
 
 queueTestEmail :: BookingStore -> SlotSpec -> Mailbox -> IO Text
 queueTestEmail store slot recipient = do

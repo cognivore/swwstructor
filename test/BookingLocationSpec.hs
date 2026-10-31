@@ -25,7 +25,7 @@ main = do
       venue = Venue "ukiyo" "UKIYO" "8 Slingsby Place, London WC2E 9AB" area "" "" True
       slot = SlotSpec "2027-01-13" "19:30" "21:30" area 8 0 "Mochi class"
       ticket = Ticket "ABCD-2345" "Group Single" "pi_fixture" "2026-10-29T12:00:00Z" "1" Nothing []
-      ctx = BookingCtx manager store (pure Nothing) [] "Okashi School" "https://okashi-school.com" "Europe/London" "+00:00" (pure [slot]) (pure [venue]) "kitchen"
+      ctx = BookingCtx manager store (pure Nothing) (pure Nothing) [] "Okashi School" "https://okashi-school.com" "Europe/London" "+00:00" (pure [slot]) (pure [venue]) "kitchen"
       -- A class months away must already contain its address. This is the
       -- actual calendar renderer, with no network, paid ticket or booking write.
       now = read "2026-10-29 12:00:00 UTC" :: UTCTime

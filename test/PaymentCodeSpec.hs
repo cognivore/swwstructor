@@ -7,7 +7,7 @@ import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
 import Control.Monad (unless)
 import Crypto.Hash (SHA256)
 import Crypto.MAC.HMAC (HMAC, hmac, hmacGetDigest)
-import Data.ByteArray.Encoding (Base (Base16), convertToBase)
+import Data.ByteArray.Encoding (Base (Base16, Base64), convertToBase, convertFromBase)
 import Data.ByteString qualified as BS
 import Data.ByteString.Char8 qualified as BC
 import Data.ByteString.Lazy qualified as BL
@@ -26,9 +26,12 @@ import Swwstructor.Server.App (AppEnv (..), Stage (Test), swwApp)
 import Swwstructor.Server.Booking
 import Swwstructor.Server.Catalog (newCatalogCache)
 import Swwstructor.Server.Notify (BookingCtx (..), drainReservationEmails)
+import Swwstructor.Server.Admin (bookingsPage)
+import Swwstructor.Server.Google (GoogleCreds (gcRefreshToken), googleCredsOf, googleMailCredsOf, reservationMime)
+import Swwstructor.Html (renderHtml)
 import Swwstructor.Server.ReservationEmail
 import Swwstructor.Server.PaymentCodes
-import Swwstructor.Server.SecretStore (SecretBundle (..), SecretValue (..), emptyBundle, genMasterKey, saveBundle)
+import Swwstructor.Server.SecretStore (SecretBundle (..), SecretValue (..), emptyBundle, genMasterKey, saveBundle, loadBundle, secretText)
 import Swwstructor.Server.Store (newSiteStore, saveSiteFile)
 import Swwstructor.Server.Venues (Venue (..), listVenues, newVenueStore, upsertVenue)
 import Swwstructor.Theme (nytTheme)
@@ -72,7 +75,7 @@ exercise dir = do
   spent <- newIORef M.empty
   catalog <- newCatalogCache
   calendarAttempts <- newIORef (0 :: Int)
-  let ctx = BookingCtx manager lessons (modifyIORef' calendarAttempts (+ 1) >> pure Nothing) [] "Okashi School" "https://okashi-school.com" "Europe/London" "+00:00" (pure [slot]) (listVenues venues) "kitchen"
+  let ctx = BookingCtx manager lessons (modifyIORef' calendarAttempts (+ 1) >> pure Nothing) (pure Nothing) [] "Okashi School" "https://okashi-school.com" "Europe/London" "+00:00" (pure [slot]) (listVenues venues) "kitchen"
       env = AppEnv site "https://okashi-school.com" Test secretFile master session "fixture-password" manager dir dir catalog spent lessons payments ctx venues Nothing
   app <- scottyApp (swwApp env)
   let requestTo target method path headers body = runSession (srequest (SRequest ((setPath defaultRequest path) {requestMethod = method, requestHeaders = headers}) body)) target
@@ -141,6 +144,11 @@ exercise dir = do
       csrf = T.takeWhile (/= '"') (T.drop (T.length marker) (snd (T.breakOn marker (bodyText admin))))
       form suffix = BL.fromStrict (TE.encodeUtf8 ("csrf=" <> csrf <> suffix))
   check "admin UI offers recipient configuration and test send" (not (T.null csrf) && "Send test notification" `T.isInfixOf` bodyText admin)
+  check "disabled notifications are explicit in the UI" ("OFF — no reservation emails will be sent" `T.isInfixOf` bodyText admin)
+  disabledRecovery <- request methodPost "/admin/reservation-emails/booking" adminHeaders (form "&ticket=ABCD-2345")
+  check "recovery respects disabled notifications" (statusCode (simpleStatus disabledRecovery) == 400)
+  forgedRecovery <- request methodPost "/admin/reservation-emails/booking" adminHeaders "ticket=ABCD-2345"
+  check "recovery needs CSRF even for an admin" (statusCode (simpleStatus forgedRecovery) == 403)
   forged <- request methodPost "/admin/reservation-emails/save" adminHeaders "enabled=yes&recipients=venue%40example.com"
   check "authenticated requests still require the email form CSRF token" (statusCode (simpleStatus forged) == 403)
   invalid <- request methodPost "/admin/reservation-emails/save" adminHeaders (form "&enabled=yes&recipients=venue%40example.com%0D%0ABcc%3Aintruder%40example.com")
@@ -151,7 +159,13 @@ exercise dir = do
   hooked <- schedule "PQRS-6789"
   check "paid ticket redemption invokes the hook" (statusCode (simpleStatus hooked) == 303)
   queued <- readReservationEmails lessons
-  check "one private message per recipient, with reservation details" (length (emailsDeliveries queued) == 2 && all (\d -> all (`T.isInfixOf` deliveryBody d) ["PQRS-6789", "2027-01-13", "Places: 2", "Preferred name: Fixture"]) (emailsDeliveries queued))
+  check "one private message per recipient, with reservation details" (length (emailsDeliveries queued) == 2 && all (\d -> all (`T.isInfixOf` deliveryBody d) ["PQRS-6789", "2027-01-13", "Places reserved: 2", "Preferred name: Fixture"] && "2 places reserved" `T.isPrefixOf` deliverySubject d) (emailsDeliveries queued))
+  currentTickets <- listTickets lessons
+  let doubleTickets = filter ((== "PQRS-6789") . tkCode) currentTickets
+      doublePage = renderHtml (bookingsPage doubleTickets [slot] emptyBundle queued csrf Nothing)
+  check "a double ticket occupies and displays two places" (takenFor doubleTickets slot == 2 && "2 booked / 8 places" `T.isInfixOf` doublePage)
+  combinedPage <- request methodGet "/admin/bookings" [("Cookie", cookie)] ""
+  check "admin sums places across different ticket sizes" ("3 booked / 8 places" `T.isInfixOf` bodyText combinedPage)
   _ <- schedule "PQRS-6789"
   _ <- schedule code
   unchangedQueue <- readReservationEmails lessons
@@ -170,7 +184,28 @@ exercise dir = do
   drainReservationEmails lessons transport
   deliveredIds <- readIORef sent
   check "concurrent workers and repeated ticks send each job once" (length deliveredIds == 2 && length (M.fromList [(ident, ()) | ident <- deliveredIds]) == 2)
+  beforeRecovery <- listTickets lessons
+  recovered <- request methodPost "/admin/reservation-emails/booking" adminHeaders (form "&ticket=ABCD-2345")
+  recoveryQueue <- readReservationEmails lessons
+  afterRecovery <- listTickets lessons
+  check "admin recovers an earlier missed reservation without consuming capacity" (statusCode (simpleStatus recovered) == 303 && beforeRecovery == afterRecovery && length (emailsDeliveries recoveryQueue) == 4)
+  _ <- request methodPost "/admin/reservation-emails/booking" adminHeaders (form "&ticket=ABCD-2345")
+  _ <- request methodPost "/admin/reservation-emails/booking" adminHeaders (form "&ticket=PQRS-6789")
+  duplicateRecovery <- readReservationEmails lessons
+  check "recovery never duplicates accepted or failed recipient jobs" (duplicateRecovery == recoveryQueue)
+  unknownRecovery <- request methodPost "/admin/reservation-emails/booking" adminHeaders (form "&ticket=UNKNOWN")
+  check "unknown tickets cannot produce a reservation email" (statusCode (simpleStatus unknownRecovery) == 400)
   let Right recipient = parseMailbox "test@example.com"
+      Right sender = parseMailbox "sender@example.com"
+      specimen = reservationDelivery True "fixture" "now" "TEST-ONLY" "Double" "2" slot recipient
+      mime = TE.decodeUtf8 (reservationMime "Okashi School" sender specimen)
+      (headers, encodedBody) = T.breakOn "\r\n\r\n" mime
+      decodedBody = convertFromBase Base64 (TE.encodeUtf8 (T.filter (`notElem` ['\r', '\n']) (T.drop 4 encodedBody))) :: Either String BS.ByteString
+  check "provider MIME carries the school identity and the actual seat count" ("From: =?UTF-8?B?T2thc2hpIFNjaG9vbA==?= <sender@example.com>\r\n" `T.isPrefixOf` headers && decodedBody == Right (TE.encodeUtf8 (deliveryBody specimen)))
+  let hostile = TE.decodeUtf8 (reservationMime "School\r\nBcc: other@example.com" sender specimen)
+  check "sender display names cannot inject headers" (not ("\r\nBcc:" `T.isInfixOf` hostile))
+  let private = reservationDelivery False "private" "now" "PRIVATE" "Private" "all" slot recipient
+  check "private-class messages state the full numerical capacity" ("Places reserved: 8 (private class" `T.isInfixOf` deliveryBody private)
   testId <- queueTestEmail lessons slot recipient
   drainReservationEmails lessons (\_ -> pure (Failed "fixture rejected"))
   _ <- retryReservationEmail lessons testId
@@ -190,6 +225,18 @@ exercise dir = do
   check "admin test send never consumes a ticket or creates a reservation" (statusCode (simpleStatus testResponse) == 303 && beforeTest == afterTest)
   blankRecipients <- request methodPost "/admin/reservation-emails/save" adminHeaders (form "&enabled=yes&recipients=")
   check "an enabled hook must have recipients" (statusCode (simpleStatus blankRecipients) == 400)
+  oldBundle <- loadBundle secretFile master
+  let connected = oldBundle {sbGoogleClientId = Just (SecretValue "client"), sbGoogleClientSecret = Just (SecretValue "client-secret"), sbGoogleRefreshToken = Just (SecretValue "calendar-token")}
+  Right () <- saveBundle secretFile master connected
+  check "existing shared Google connections retain their sender" ((secretText . gcRefreshToken <$> googleMailCredsOf connected) == Just "calendar-token")
+  forgedAccount <- request methodPost "/admin/reservation-emails/account" adminHeaders "googleMailRefreshToken=mail-token"
+  check "sender changes require CSRF" (statusCode (simpleStatus forgedAccount) == 403)
+  savedAccount <- request methodPost "/admin/reservation-emails/account" adminHeaders (form "&googleMailRefreshToken=mail-token")
+  storedAccount <- loadBundle secretFile master
+  check "school sender is encrypted and independent of the calendar identity" (statusCode (simpleStatus savedAccount) == 303 && (secretText . gcRefreshToken <$> googleMailCredsOf storedAccount) == Just "mail-token" && (secretText . gcRefreshToken <$> googleCredsOf storedAccount) == Just "calendar-token" && (secretText <$> sbStripeWebhook storedAccount) == Just webhookSecret)
+  blankAccount <- request methodPost "/admin/reservation-emails/account" adminHeaders (form "&googleMailRefreshToken=")
+  accountPage <- request methodGet "/admin/bookings" [("Cookie", cookie)] ""
+  check "empty sender updates preserve the account and secrets are never rendered" (statusCode (simpleStatus blankAccount) == 400 && not ("mail-token" `T.isInfixOf` bodyText accountPage))
   brokenBooking <- newBookingStore (dir </> "missing-booking" </> "bookings.json")
   failedBooking <- try (issueTicket brokenBooking "pi_storage" "K7Q2-M4XW" "Class" "1") :: IO (Either IOException (Either T.Text (Ticket, Bool)))
   invisibleBooking <- listTickets brokenBooking

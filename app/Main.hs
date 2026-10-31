@@ -58,7 +58,7 @@ import Swwstructor.Content (siteTitle)
 import Swwstructor.Server.App (AppEnv (..), Stage (Prod, Test), swwApp)
 import Swwstructor.Server.Booking (newBookingStore)
 import Swwstructor.Server.PaymentCodes (newPaymentCodeStore)
-import Swwstructor.Server.Google (googleCredsOf)
+import Swwstructor.Server.Google (googleCredsOf, googleMailCredsOf)
 import Swwstructor.Server.Venues (listVenues, newVenueStore)
 import Swwstructor.Server.Notify (BookingCtx (..), siteSlots)
 import Swwstructor.Server.Reminders (startReminderLoop)
@@ -163,6 +163,7 @@ main = do
           { bcManager = mgr
           , bcStore = bookings
           , bcCreds = googleCredsOf <$> loadBundle secretFile masterKey
+          , bcMailCreds = googleMailCredsOf <$> loadBundle secretFile masterKey
           , bcStaff = staff
           , bcSiteName = T.pack bookingName
           , bcBaseUrl = T.pack baseUrl

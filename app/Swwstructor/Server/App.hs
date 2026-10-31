@@ -141,6 +141,7 @@ import Swwstructor.Server.Booking
   , readReservationEmails
   , configureReservationEmails
   , queueTestEmail
+  , queueMissingReservationEmails
   , retryReservationEmail
   )
 import Swwstructor.Server.ReservationEmail (parseRecipients, parseMailbox)
@@ -386,6 +387,8 @@ swwApp env = do
   post "/admin/reservation-emails/save" (reservationEmailGate env (handleReservationEmailsSave env))
   post "/admin/reservation-emails/test" (reservationEmailGate env (handleReservationEmailsTest env))
   post "/admin/reservation-emails/retry" (reservationEmailGate env (handleReservationEmailsRetry env))
+  post "/admin/reservation-emails/booking" (reservationEmailGate env (handleReservationEmailsBooking env))
+  post "/admin/reservation-emails/account" (reservationEmailGate env (handleReservationEmailAccount env))
   get "/admin/venues" (adminGate env (handleVenues env Nothing))
   post "/admin/venues/save" (adminGate env (handleVenueSave env))
   post "/admin/venues/delete" (adminGate env (handleVenueDelete env))
@@ -1155,6 +1158,27 @@ handleReservationEmailsRetry env = do
   if retried
     then liftIO (deliverReservationEmails (aeBookingCtx env)) >> reservationEmailsRedirect
     else status status400 >> handleBookings env (Just "That email is not eligible for retry. Reload to see its current status.")
+
+handleReservationEmailsBooking :: AppEnv -> ActionM ()
+handleReservationEmailsBooking env = do
+  code <- fromMaybe "" <$> formParamMaybe "ticket"
+  site <- currentSite env
+  result <- liftIO (queueMissingReservationEmails (aeBookings env) (siteSlots site) code)
+  case result of
+    Left why -> status status400 >> handleBookings env (Just why)
+    Right _ -> liftIO (deliverReservationEmails (aeBookingCtx env)) >> reservationEmailsRedirect
+
+handleReservationEmailAccount :: AppEnv -> ActionM ()
+handleReservationEmailAccount env = do
+  token <- T.strip . fromMaybe "" <$> formParamMaybe "googleMailRefreshToken"
+  if T.null token
+    then status status400 >> handleBookings env (Just "Enter the authorised sending account's refresh token. The current connection was kept.")
+    else do
+      bundle <- liftIO (loadBundle (aeSecretFile env) (aeMasterKey env))
+      result <- liftIO (saveBundle (aeSecretFile env) (aeMasterKey env) bundle {sbGoogleMailRefreshToken = Just (SecretValue token)})
+      case result of
+        Left _ -> status status500 >> handleBookings env (Just "Could not save the sending account. No notification was sent.")
+        Right () -> reservationEmailsRedirect
 
 reservationEmailsRedirect :: ActionM ()
 reservationEmailsRedirect = status status303 >> setHeader "Location" "/admin/bookings#reservation-emails"

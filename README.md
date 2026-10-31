@@ -195,8 +195,22 @@ never compiles (`nix.settings.max-jobs = 0`); closures are built on a builder an
 Open **Admin → Bookings → Reservation notifications**. Add up to 20 bare
 email addresses and enable the hook. Each successful paid-ticket redemption
 queues a separate email for each recipient, normally sent within a minute via
-the configured Google account (which must grant Gmail send permission).
-Changes apply to future reservations; existing bookings are not emailed.
+the configured Google account (which must grant Gmail send and profile-read
+permission). The message uses the booking site's name as its sender display
+name and the authenticated Google mailbox as its address. The account's own
+display name is not changed. Subject and body state the number of places;
+the Bookings table uses seat totals, including double and private tickets.
+
+**Notification sending account** accepts a separate authorised refresh token
+from the same Google OAuth client, so school emails can use the school's
+mailbox without moving the staff calendar. It is saved in the encrypted secret
+bundle; a missing override retains the existing shared account.
+The prominent ON/OFF status confirms whether future notifications are enabled.
+Changes apply to future reservations; existing bookings are not emailed automatically.
+For a missed reservation, use **Send missing notifications** beside its ticket.
+This queues only recipients without a delivery record for that ticket and does
+not alter the reservation. Failed or uncertain existing deliveries still use
+the separate retry control.
 
 **Send test notification** uses the same outbox and sender, labels the message
 `[TEST]`, and consumes no ticket or class capacity. Delivery history reports

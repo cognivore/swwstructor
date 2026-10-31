@@ -15,12 +15,14 @@
 module Swwstructor.Server.Google
   ( GoogleCreds (..)
   , googleCredsOf
+  , googleMailCredsOf
   , CalendarEvent (..)
   , createCalendarEvent
   , patchEventLocation
   , Mail (..)
   , sendMail
   , sendReservationEmail
+  , reservationMime
   ) where
 
 import Control.Exception (SomeException, try)
@@ -50,7 +52,7 @@ import Network.HTTP.Types.Status (statusCode)
 import Swwstructor.Checkout (encodeForm)
 import Swwstructor.Server.ReservationEmail
 import Swwstructor.Server.SecretStore
-  ( SecretBundle (sbGoogleClientId, sbGoogleClientSecret, sbGoogleRefreshToken)
+  ( SecretBundle (sbGoogleClientId, sbGoogleClientSecret, sbGoogleRefreshToken, sbGoogleMailRefreshToken)
   , SecretValue
   , secretText
   )
@@ -70,6 +72,13 @@ googleCredsOf b =
     <$> sbGoogleClientId b
     <*> sbGoogleClientSecret b
     <*> sbGoogleRefreshToken b
+
+-- An email-specific account does not move existing calendar events or change
+-- the calendar creator. Older configurations keep their shared connection.
+googleMailCredsOf :: SecretBundle -> Maybe GoogleCreds
+googleMailCredsOf b =
+  GoogleCreds <$> sbGoogleClientId b <*> sbGoogleClientSecret b
+    <*> (case sbGoogleMailRefreshToken b of Just token -> Just token; Nothing -> sbGoogleRefreshToken b)
 
 -- | A calendar event to create. Times are RFC-3339 with offset
 -- (e.g. @2026-09-01T11:00:00+01:00@); 'ceTimeZone' is the IANA name Google
@@ -186,23 +195,25 @@ patchEventLocation mgr creds eventId location = do
 -- | Dedicated reservation delivery: distinguish an explicit rejection from an
 -- unknown send result; only a provider receipt is reported as accepted. Never
 -- retain an HTTP exception's request headers (which include the access token).
-sendReservationEmail :: Manager -> GoogleCreds -> Delivery -> IO EmailState
-sendReservationEmail mgr creds delivery = do
+sendReservationEmail :: Manager -> GoogleCreds -> Text -> Delivery -> IO EmailState
+sendReservationEmail mgr creds senderName delivery = do
   etok <- mintAccessToken mgr creds
   case etok of
     Left err -> pure (Failed ("Google authorisation failed before sending. Check the Google connection. " <> if "HTTP " `T.isPrefixOf` err then T.take 8 err else ""))
     Right tok -> do
+      profile <- httpJson mgr "GET" "https://gmail.googleapis.com/gmail/v1/users/me/profile" (Just tok) "application/json" Nothing
+      let sender = do
+            value <- profile
+            address <- either (Left . T.pack) Right (jstr =<< value .: "emailAddress")
+            parseMailbox (T.pack address)
+      case sender of
+        Left err -> pure (Failed ("Google sender lookup failed before sending. The connection needs Gmail profile access. " <> if "HTTP " `T.isPrefixOf` err then T.take 8 err else ""))
+        Right address -> sendFrom tok address
+  where
+    sendFrom tok sender = do
       base <- parseRequest "https://gmail.googleapis.com/gmail/v1/users/me/messages/send"
-      let mime = T.intercalate "\r\n"
-            [ "To: " <> mailboxText (deliveryTo delivery)
-            , "Subject: =?UTF-8?B?" <> TE.decodeUtf8 (convertToBase Base64 (TE.encodeUtf8 (T.unwords (T.words (deliverySubject delivery)))) :: ByteString) <> "?="
-            , "MIME-Version: 1.0"
-            , "Content-Type: text/plain; charset=utf-8"
-            , "Content-Transfer-Encoding: base64"
-            , ""
-            , T.intercalate "\r\n" (chunks76 (TE.decodeUtf8 (convertToBase Base64 (TE.encodeUtf8 (deliveryBody delivery)) :: ByteString)))
-            ]
-          payload = JObj [("raw", JStr (T.unpack (TE.decodeUtf8 (convertToBase Base64URLUnpadded (TE.encodeUtf8 mime) :: ByteString))))]
+      let mime = reservationMime senderName sender delivery
+          payload = JObj [("raw", JStr (T.unpack (TE.decodeUtf8 (convertToBase Base64URLUnpadded mime :: ByteString))))]
           req = base {method = "POST", requestHeaders = [("Authorization", TE.encodeUtf8 ("Bearer " <> tok)), ("Content-Type", "application/json")], requestBody = RequestBodyBS (TE.encodeUtf8 (T.pack (encode payload))), responseTimeout = responseTimeoutMicro 20_000_000}
       result <- try (httpLbs req mgr) :: IO (Either HttpException (Response BL.ByteString))
       pure $ case result of
@@ -218,7 +229,22 @@ sendReservationEmail mgr creds delivery = do
                 else if status >= 400 && status < 500
                   then Failed ("Gmail rejected the send (HTTP " <> T.pack (show status) <> "). Check Gmail send permission and account limits before retrying.")
                   else Uncertain ("Gmail returned HTTP " <> T.pack (show status) <> ". Check Sent mail before retrying.")
+
+-- Gmail supplies the authenticated mailbox; the site's name belongs only to
+-- this message, so other mail from the account keeps its own identity.
+reservationMime :: Text -> Mailbox -> Delivery -> ByteString
+reservationMime senderName sender delivery = TE.encodeUtf8 $ T.intercalate "\r\n"
+  [ "From: " <> encodedHeader senderName <> " <" <> mailboxText sender <> ">"
+  , "To: " <> mailboxText (deliveryTo delivery)
+  , "Subject: " <> encodedHeader (deliverySubject delivery)
+  , "MIME-Version: 1.0"
+  , "Content-Type: text/plain; charset=utf-8"
+  , "Content-Transfer-Encoding: base64"
+  , ""
+  , T.intercalate "\r\n" (chunks76 (TE.decodeUtf8 (convertToBase Base64 (TE.encodeUtf8 (deliveryBody delivery)) :: ByteString)))
+  ]
   where
+    encodedHeader value = "=?UTF-8?B?" <> TE.decodeUtf8 (convertToBase Base64 (TE.encodeUtf8 (T.unwords (T.words value))) :: ByteString) <> "?="
     chunks76 value | T.null value = []
                    | otherwise = T.take 76 value : chunks76 (T.drop 76 value)
 

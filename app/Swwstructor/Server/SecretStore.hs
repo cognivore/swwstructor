@@ -112,11 +112,13 @@ data SecretBundle = SecretBundle
   -- ^ Google OAuth client secret
   , sbGoogleRefreshToken :: !(Maybe SecretValue)
   -- ^ refresh token for the Google account the site acts as
+  , sbGoogleMailRefreshToken :: !(Maybe SecretValue)
+  -- ^ optional sending account, using the same OAuth client; calendar unchanged
   }
   deriving (Show)
 
 emptyBundle :: SecretBundle
-emptyBundle = SecretBundle Nothing Nothing Nothing Nothing Nothing Nothing
+emptyBundle = SecretBundle Nothing Nothing Nothing Nothing Nothing Nothing Nothing
 
 -- | Whether the bundle has enough to run checkout (a secret key).
 bundleHasCheckout :: SecretBundle -> Bool
@@ -133,6 +135,7 @@ bundleToJSON b =
     , ("googleClientId", enc (sbGoogleClientId b))
     , ("googleClientSecret", enc (sbGoogleClientSecret b))
     , ("googleRefreshToken", enc (sbGoogleRefreshToken b))
+    , ("googleMailRefreshToken", enc (sbGoogleMailRefreshToken b))
     ]
   where
     enc Nothing = JNull
@@ -147,6 +150,7 @@ bundleFromJSON v =
     (field "googleClientId")
     (field "googleClientSecret")
     (field "googleRefreshToken")
+    (field "googleMailRefreshToken")
   where
     field k = case v .:? k of
       Just j -> case jstr j of

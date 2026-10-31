@@ -45,7 +45,7 @@ import Swwstructor.Content
   , slotIdOf
   )
 import Swwstructor.Plugins.StripeCatalog (CatalogItem (..))
-import Swwstructor.Server.Booking (Redemption (..), Ticket (..))
+import Swwstructor.Server.Booking (Redemption (..), Ticket (..), takenFor)
 import Swwstructor.Server.ReservationEmail
 import Swwstructor.Server.Media (MediaEntry (..))
 import Swwstructor.Server.Venues (Venue (..))
@@ -65,6 +65,7 @@ import Swwstructor.Server.SecretStore
       ( sbGoogleClientId
       , sbGoogleClientSecret
       , sbGoogleRefreshToken
+      , sbGoogleMailRefreshToken
       , sbStripePk
       , sbStripeSk
       , sbStripeWebhook
@@ -842,6 +843,7 @@ bookingsPage tickets slots bundle emails csrf fl =
     csrfField = hidden "csrf" csrf
     emailCard = elAttr "section" [("class", "card"), ("id", "reservation-emails")] $ htmlConcat
       [ el "h2" (esc "Reservation notifications")
+      , elAttr "p" [("class", if emailsEnabled emails then "flash" else "card"), ("role", "status")] (esc (if emailsEnabled emails then "ON — new reservations will email the saved recipients." else "OFF — no reservation emails will be sent. Tick the box below and save to enable them."))
       , el "p" (esc "When a paid ticket is used to book a class, email these people the class, date, time, number of places, ticket code and preferred name. Emails are sent within a minute. Each person receives a separate email. Customer email addresses are not collected.")
       , elAttr "form" [("method", "post"), ("action", "/admin/reservation-emails/save")] $
           csrfField
@@ -854,6 +856,11 @@ bookingsPage tickets slots bundle emails csrf fl =
       , elAttr "form" [("method", "post"), ("action", "/admin/reservation-emails/test")] $
           csrfField <> ipt "text" "testRecipient" "Send test to" ""
           <> elAttr "button" [("type", "submit")] (esc "Send test notification")
+      , el "details" $
+          el "summary" (esc "Notification sending account")
+          <> el "p" (esc (if isSet' (sbGoogleMailRefreshToken bundle) then "A separate notification account is configured. Calendar invitations keep their existing account." else "Notifications currently use the calendar's Google account."))
+          <> el "p" (esc "To use the school's address, supply its authorised refresh token for the same Google OAuth client, with Gmail sending and profile access. Emails use the site's name and that account's real email address. A test does not change reservations.")
+          <> elAttr "form" [("method", "post"), ("action", "/admin/reservation-emails/account")] (csrfField <> ipt "password" "googleMailRefreshToken" "Sending account refresh token" "" <> elAttr "button" [("type", "submit")] (esc "Save sending account"))
       , el "h3" (esc "Recent notification deliveries")
       , el "p" (esc "Accepted by Gmail means the email service accepted it, not that it reached the inbox. For uncertain deliveries, check the sender's Sent folder before retrying; a retry could send a duplicate.")
       , if null (emailsDeliveries emails) then el "p" (esc "No notification emails yet.") else
@@ -872,7 +879,6 @@ bookingsPage tickets slots bundle emails csrf fl =
     slotLabelOf sid = case [s | s <- slots, slotIdOf s == sid] of
       (s : _) -> fmtSlotDay (slotDate s) <> " " <> slotStart s <> "\x2013" <> slotEnd s <> " \xB7 " <> slotArea s
       [] -> sid <> " (slot no longer defined)"
-    takenOf s = length [() | t <- tickets, Just r <- [tkRedemption t], redSlotId r == slotIdOf s]
     slotsCard =
       elAttr "div" [("class", "card")] $
         el "h2" (esc "Slots on offer")
@@ -885,7 +891,7 @@ bookingsPage tickets slots bundle emails csrf fl =
                     [ elAttr "tr" [] $
                         el "td" (esc (fmtSlotDay (slotDate s) <> " " <> slotStart s <> "\x2013" <> slotEnd s))
                           <> el "td" (esc (slotArea s))
-                          <> el "td" (esc (T.pack (show (takenOf s)) <> " / " <> T.pack (show (slotCap s))))
+                          <> el "td" (esc (T.pack (show (takenFor tickets s)) <> " booked / " <> T.pack (show (slotCap s)) <> " places"))
                     | s <- slots
                     ]
     ticketsCard =
@@ -895,7 +901,7 @@ bookingsPage tickets slots bundle emails csrf fl =
             then elAttr "p" [("class", "muted")] (esc "No tickets yet. A ticket is issued automatically the moment a checkout is paid.")
             else
               elAttr "table" [("class", "plist")] $
-                elAttr "tr" [] (el "th" (esc "Code") <> el "th" (esc "Ticket") <> el "th" (esc "Reserved as") <> el "th" (esc "Calendar"))
+                elAttr "tr" [] (el "th" (esc "Code") <> el "th" (esc "Ticket") <> el "th" (esc "Reserved as") <> el "th" (esc "Calendar") <> el "th" (esc "Notification"))
                   <> htmlConcat (map ticketRow tickets)
     ticketRow t =
       elAttr "tr" [] $
@@ -909,6 +915,11 @@ bookingsPage tickets slots bundle emails csrf fl =
                         Nothing
                           | Just _ <- tkRedemption t -> elAttr "span" [("class", "pill off")] (esc "pending")
                           | otherwise -> esc "\x2014")
+          <> el "td" (case tkRedemption t of
+              Just _ -> elAttr "form" [("method", "post"), ("action", "/admin/reservation-emails/booking")] $
+                csrfField <> hidden "ticket" (tkCode t) <> elAttr "button" [("type", "submit")] (esc "Send missing notifications")
+                <> elAttr "p" [("class", "hint")] (esc "Only recipients without a delivery record. Existing emails are not repeated.")
+              Nothing -> esc "Not reserved")
     googleCard =
       elAttr "div" [("class", "card")] $
         htmlConcat

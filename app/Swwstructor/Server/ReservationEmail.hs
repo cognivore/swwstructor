@@ -66,7 +66,7 @@ emptyReservationEmails = ReservationEmails False [] []
 reservationDelivery :: Bool -> Text -> Text -> Text -> Text -> Text -> SlotSpec -> Mailbox -> Delivery
 reservationDelivery isTest ident now code productName seats slot recipient = Delivery
   ident recipient
-  ((if isTest then "[TEST] " else "") <> "Class reservation confirmed — " <> slotDate slot <> " " <> slotStart slot)
+  ((if isTest then "[TEST] " else "") <> places <> (if places == "1" then " place reserved — " else " places reserved — ") <> slotDate slot <> " " <> slotStart slot)
   (T.unlines
     [ if isTest then "TEST NOTIFICATION — no ticket was redeemed and no place was reserved." else "A ticket has been redeemed and a class reservation is confirmed."
     , ""
@@ -76,8 +76,10 @@ reservationDelivery isTest ident now code productName seats slot recipient = Del
     , "Venue: " <> slotArea slot
     , "Ticket: " <> code
     , "Ticket type: " <> productName
-    , "Places: " <> (if seats == "all" then "Private class" else seats)
+    , "Places reserved: " <> places <> (if seats == "all" then " (private class — all places)" else "")
     ]) now Queued
+  where
+    places = if seats == "all" then T.pack (show (slotCap slot)) else seats
 
 emailStatus :: EmailState -> Text
 emailStatus Queued = "Queued"
