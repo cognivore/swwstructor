@@ -27,7 +27,7 @@ import Swwstructor.Server.Booking
 import Swwstructor.Server.Catalog (newCatalogCache)
 import Swwstructor.Server.Notify (BookingCtx (..), drainReservationEmails)
 import Swwstructor.Server.Admin (bookingsPage)
-import Swwstructor.Server.Google (GoogleCreds (gcRefreshToken), googleCredsOf, googleMailCredsOf, reservationMime)
+import Swwstructor.Server.Google (GoogleCreds (gcRefreshToken, gcMailFrom), googleCredsOf, googleMailCredsOf, reservationMime, verifiedSendAs)
 import Swwstructor.Html (renderHtml)
 import Swwstructor.Server.ReservationEmail
 import Swwstructor.Server.PaymentCodes
@@ -204,6 +204,9 @@ exercise dir = do
   check "provider MIME carries the school identity and the actual seat count" ("From: =?UTF-8?B?T2thc2hpIFNjaG9vbA==?= <sender@example.com>\r\n" `T.isPrefixOf` headers && decodedBody == Right (TE.encodeUtf8 (deliveryBody specimen)))
   let hostile = TE.decodeUtf8 (reservationMime "School\r\nBcc: other@example.com" sender specimen)
   check "sender display names cannot inject headers" (not ("\r\nBcc:" `T.isInfixOf` hostile))
+  let aliasResponse state address = JObj [("sendAs", JArr [JObj [("sendAsEmail", JStr address), ("verificationStatus", JStr state)]])]
+  check "only the requested verified alias can send" (verifiedSendAs sender (aliasResponse "accepted" "sender@example.com") == Right sender)
+  check "pending and mismatched aliases cannot silently fall back" (all (either (const True) (const False) . verifiedSendAs sender) [aliasResponse "pending" "sender@example.com", aliasResponse "accepted" "someone@example.com", JObj []])
   let private = reservationDelivery False "private" "now" "PRIVATE" "Private" "all" slot recipient
   check "private-class messages state the full numerical capacity" ("Places reserved: 8 (private class" `T.isInfixOf` deliveryBody private)
   testId <- queueTestEmail lessons slot recipient
@@ -237,6 +240,12 @@ exercise dir = do
   blankAccount <- request methodPost "/admin/reservation-emails/account" adminHeaders (form "&googleMailRefreshToken=")
   accountPage <- request methodGet "/admin/bookings" [("Cookie", cookie)] ""
   check "empty sender updates preserve the account and secrets are never rendered" (statusCode (simpleStatus blankAccount) == 400 && not ("mail-token" `T.isInfixOf` bodyText accountPage))
+  savedAlias <- request methodPost "/admin/reservation-emails/account" adminHeaders (form "&googleMailRefreshToken=mail-token&googleMailFrom=hello%40okashi-school.com")
+  aliasBundle <- loadBundle secretFile master
+  check "sender alias survives encryption independently of calendar credentials" (statusCode (simpleStatus savedAlias) == 303 && (googleMailCredsOf aliasBundle >>= gcMailFrom) == either (const Nothing) Just (parseMailbox "hello@okashi-school.com") && (googleCredsOf aliasBundle >>= gcMailFrom) == Nothing)
+  injectedAlias <- request methodPost "/admin/reservation-emails/account" adminHeaders (form "&googleMailRefreshToken=other-token&googleMailFrom=hello%40okashi-school.com%0D%0ABcc%3Aother%40example.com")
+  afterInjection <- loadBundle secretFile master
+  check "invalid alias updates preserve both sender and token" (statusCode (simpleStatus injectedAlias) == 400 && sbGoogleMailFrom afterInjection == sbGoogleMailFrom aliasBundle && (secretText <$> sbGoogleMailRefreshToken afterInjection) == Just "mail-token")
   brokenBooking <- newBookingStore (dir </> "missing-booking" </> "bookings.json")
   failedBooking <- try (issueTicket brokenBooking "pi_storage" "K7Q2-M4XW" "Class" "1") :: IO (Either IOException (Either T.Text (Ticket, Bool)))
   invisibleBooking <- listTickets brokenBooking

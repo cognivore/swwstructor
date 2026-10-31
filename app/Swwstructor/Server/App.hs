@@ -1171,11 +1171,13 @@ handleReservationEmailsBooking env = do
 handleReservationEmailAccount :: AppEnv -> ActionM ()
 handleReservationEmailAccount env = do
   token <- T.strip . fromMaybe "" <$> formParamMaybe "googleMailRefreshToken"
-  if T.null token
-    then status status400 >> handleBookings env (Just "Enter the authorised sending account's refresh token. The current connection was kept.")
-    else do
+  rawFrom <- T.strip . fromMaybe "" <$> formParamMaybe "googleMailFrom"
+  case if T.null rawFrom then Right Nothing else Just <$> parseMailbox rawFrom of
+    Left why -> status status400 >> handleBookings env (Just why)
+    Right _ | T.null token -> status status400 >> handleBookings env (Just "Enter the authorised sending account's refresh token. The current connection was kept.")
+    Right sender -> do
       bundle <- liftIO (loadBundle (aeSecretFile env) (aeMasterKey env))
-      result <- liftIO (saveBundle (aeSecretFile env) (aeMasterKey env) bundle {sbGoogleMailRefreshToken = Just (SecretValue token)})
+      result <- liftIO (saveBundle (aeSecretFile env) (aeMasterKey env) bundle {sbGoogleMailRefreshToken = Just (SecretValue token), sbGoogleMailFrom = sender})
       case result of
         Left _ -> status status500 >> handleBookings env (Just "Could not save the sending account. No notification was sent.")
         Right () -> reservationEmailsRedirect

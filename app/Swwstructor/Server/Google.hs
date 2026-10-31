@@ -23,6 +23,7 @@ module Swwstructor.Server.Google
   , sendMail
   , sendReservationEmail
   , reservationMime
+  , verifiedSendAs
   ) where
 
 import Control.Exception (SomeException, try)
@@ -52,7 +53,7 @@ import Network.HTTP.Types.Status (statusCode)
 import Swwstructor.Checkout (encodeForm)
 import Swwstructor.Server.ReservationEmail
 import Swwstructor.Server.SecretStore
-  ( SecretBundle (sbGoogleClientId, sbGoogleClientSecret, sbGoogleRefreshToken, sbGoogleMailRefreshToken)
+  ( SecretBundle (sbGoogleClientId, sbGoogleClientSecret, sbGoogleRefreshToken, sbGoogleMailRefreshToken, sbGoogleMailFrom)
   , SecretValue
   , secretText
   )
@@ -63,6 +64,7 @@ data GoogleCreds = GoogleCreds
   { gcClientId :: !SecretValue
   , gcClientSecret :: !SecretValue
   , gcRefreshToken :: !SecretValue
+  , gcMailFrom :: !(Maybe Mailbox)
   }
 
 -- | The bundle's Google credentials, when all three parts are present.
@@ -72,6 +74,7 @@ googleCredsOf b =
     <$> sbGoogleClientId b
     <*> sbGoogleClientSecret b
     <*> sbGoogleRefreshToken b
+    <*> pure Nothing
 
 -- An email-specific account does not move existing calendar events or change
 -- the calendar creator. Older configurations keep their shared connection.
@@ -79,6 +82,7 @@ googleMailCredsOf :: SecretBundle -> Maybe GoogleCreds
 googleMailCredsOf b =
   GoogleCreds <$> sbGoogleClientId b <*> sbGoogleClientSecret b
     <*> (case sbGoogleMailRefreshToken b of Just token -> Just token; Nothing -> sbGoogleRefreshToken b)
+    <*> pure (sbGoogleMailFrom b)
 
 -- | A calendar event to create. Times are RFC-3339 with offset
 -- (e.g. @2026-09-01T11:00:00+01:00@); 'ceTimeZone' is the IANA name Google
@@ -201,13 +205,18 @@ sendReservationEmail mgr creds senderName delivery = do
   case etok of
     Left err -> pure (Failed ("Google authorisation failed before sending. Check the Google connection. " <> if "HTTP " `T.isPrefixOf` err then T.take 8 err else ""))
     Right tok -> do
-      profile <- httpJson mgr "GET" "https://gmail.googleapis.com/gmail/v1/users/me/profile" (Just tok) "application/json" Nothing
-      let sender = do
+      sender <- case gcMailFrom creds of
+        Just requested -> do
+          aliases <- httpJson mgr "GET" "https://gmail.googleapis.com/gmail/v1/users/me/settings/sendAs" (Just tok) "application/json" Nothing
+          pure (aliases >>= verifiedSendAs requested)
+        Nothing -> do
+          profile <- httpJson mgr "GET" "https://gmail.googleapis.com/gmail/v1/users/me/profile" (Just tok) "application/json" Nothing
+          pure $ do
             value <- profile
             address <- either (Left . T.pack) Right (jstr =<< value .: "emailAddress")
             parseMailbox (T.pack address)
       case sender of
-        Left err -> pure (Failed ("Google sender lookup failed before sending. The connection needs Gmail profile access. " <> if "HTTP " `T.isPrefixOf` err then T.take 8 err else ""))
+        Left _ -> pure (Failed "Google could not verify the configured sender. Check Gmail read access and that the From address is an accepted send-as alias. No email was sent.")
         Right address -> sendFrom tok address
   where
     sendFrom tok sender = do
@@ -230,7 +239,19 @@ sendReservationEmail mgr creds senderName delivery = do
                   then Failed ("Gmail rejected the send (HTTP " <> T.pack (show status) <> "). Check Gmail send permission and account limits before retrying.")
                   else Uncertain ("Gmail returned HTTP " <> T.pack (show status) <> ". Check Sent mail before retrying.")
 
--- Gmail supplies the authenticated mailbox; the site's name belongs only to
+-- A configured alias must be accepted by Gmail for this exact account. Never
+-- silently fall back to a personal address when the school alias is unavailable.
+verifiedSendAs :: Mailbox -> JSON -> Either Text Mailbox
+verifiedSendAs requested value = case value .: "sendAs" of
+  Right (JArr aliases)
+    | any accepted aliases -> Right requested
+  _ -> Left "The configured From address is not verified by Gmail."
+  where
+    accepted alias = case (alias .: "sendAsEmail", alias .: "verificationStatus") of
+      (Right (JStr address), Right (JStr "accepted")) -> parseMailbox (T.pack address) == Right requested
+      _ -> False
+
+-- Gmail supplies the authenticated mailbox or verified alias; the site's name belongs only to
 -- this message, so other mail from the account keeps its own identity.
 reservationMime :: Text -> Mailbox -> Delivery -> ByteString
 reservationMime senderName sender delivery = TE.encodeUtf8 $ T.intercalate "\r\n"

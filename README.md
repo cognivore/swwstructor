@@ -197,7 +197,7 @@ email addresses and enable the hook. Each successful paid-ticket redemption
 queues a separate email for each recipient, normally sent within a minute via
 the configured Google account (which must grant Gmail send and profile-read
 permission). The message uses the booking site's name as its sender display
-name and the authenticated Google mailbox as its address. The account's own
+name and the authenticated Google mailbox (or verified alias) as its address. The account's own
 display name is not changed. Subject and body state the number of places;
 the Bookings table uses seat totals, including double and private tickets.
 
@@ -205,6 +205,11 @@ the Bookings table uses seat totals, including double and private tickets.
 from the same Google OAuth client, so school emails can use the school's
 mailbox without moving the staff calendar. It is saved in the encrypted secret
 bundle; a missing override retains the existing shared account.
+The optional **From address** must be a verified send-as alias in that Google
+account. Before each send the server checks Gmail's accepted aliases; it fails
+without sending if the alias is absent or pending, rather than falling back to
+another identity. Blank selects the account's primary address. Configure the
+alias's incoming delivery separately so replies reach the intended inbox.
 The prominent ON/OFF status confirms whether future notifications are enabled.
 Changes apply to future reservations; existing bookings are not emailed automatically.
 For a missed reservation, use **Send missing notifications** beside its ticket.

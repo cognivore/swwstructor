@@ -49,6 +49,7 @@ import qualified Data.ByteString as BS
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import Swwstructor.Server.ReservationEmail (Mailbox, mailboxText, parseMailbox)
 import StickyWM (JSON (JNull, JObj, JStr), decode, encode, jstr, (.:?))
 import System.Directory (doesFileExist, renameFile)
 import System.IO (hPutStrLn, stderr)
@@ -114,11 +115,13 @@ data SecretBundle = SecretBundle
   -- ^ refresh token for the Google account the site acts as
   , sbGoogleMailRefreshToken :: !(Maybe SecretValue)
   -- ^ optional sending account, using the same OAuth client; calendar unchanged
+  , sbGoogleMailFrom :: !(Maybe Mailbox)
+  -- ^ optional Gmail-verified send-as alias; checked against Google before sending
   }
   deriving (Show)
 
 emptyBundle :: SecretBundle
-emptyBundle = SecretBundle Nothing Nothing Nothing Nothing Nothing Nothing Nothing
+emptyBundle = SecretBundle Nothing Nothing Nothing Nothing Nothing Nothing Nothing Nothing
 
 -- | Whether the bundle has enough to run checkout (a secret key).
 bundleHasCheckout :: SecretBundle -> Bool
@@ -136,14 +139,20 @@ bundleToJSON b =
     , ("googleClientSecret", enc (sbGoogleClientSecret b))
     , ("googleRefreshToken", enc (sbGoogleRefreshToken b))
     , ("googleMailRefreshToken", enc (sbGoogleMailRefreshToken b))
+    , ("googleMailFrom", maybe JNull (JStr . T.unpack . mailboxText) (sbGoogleMailFrom b))
     ]
   where
     enc Nothing = JNull
     enc (Just (SecretValue t)) = JStr (T.unpack t)
 
-bundleFromJSON :: JSON -> SecretBundle
-bundleFromJSON v =
-  SecretBundle
+bundleFromJSON :: JSON -> Either Text SecretBundle
+bundleFromJSON v = do
+  sender <- case v .:? "googleMailFrom" of
+    Nothing -> Right Nothing
+    Just JNull -> Right Nothing
+    Just (JStr value) -> Just <$> parseMailbox (T.pack value)
+    Just _ -> Left "secret store: invalid notification sender"
+  pure $ SecretBundle
     (field "stripePk")
     (field "stripeSk")
     (field "stripeWebhook")
@@ -151,6 +160,7 @@ bundleFromJSON v =
     (field "googleClientSecret")
     (field "googleRefreshToken")
     (field "googleMailRefreshToken")
+    sender
   where
     field k = case v .:? k of
       Just j -> case jstr j of
@@ -198,7 +208,7 @@ decryptBundle (MasterKey key) b64 = do
           AuthTag tag' = aeadFinalize aeadFinal tagLen
       if BA.constEq tag (BA.convert tag' :: ByteString)
         then case decode (T.unpack (TE.decodeUtf8 pt)) of
-          Right j -> Right (bundleFromJSON j)
+          Right j -> bundleFromJSON j
           Left e -> Left ("secret store: bad plaintext json: " <> T.pack e)
         else Left "secret store: authentication failed (wrong key or tampered file)"
   where

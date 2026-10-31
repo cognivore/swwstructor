@@ -66,6 +66,7 @@ import Swwstructor.Server.SecretStore
       , sbGoogleClientSecret
       , sbGoogleRefreshToken
       , sbGoogleMailRefreshToken
+    , sbGoogleMailFrom
       , sbStripePk
       , sbStripeSk
       , sbStripeWebhook
@@ -859,8 +860,8 @@ bookingsPage tickets slots bundle emails csrf fl =
       , el "details" $
           el "summary" (esc "Notification sending account")
           <> el "p" (esc (if isSet' (sbGoogleMailRefreshToken bundle) then "A separate notification account is configured. Calendar invitations keep their existing account." else "Notifications currently use the calendar's Google account."))
-          <> el "p" (esc "To use the school's address, supply its authorised refresh token for the same Google OAuth client, with Gmail sending and profile access. Emails use the site's name and that account's real email address. A test does not change reservations.")
-          <> elAttr "form" [("method", "post"), ("action", "/admin/reservation-emails/account")] (csrfField <> ipt "password" "googleMailRefreshToken" "Sending account refresh token" "" <> elAttr "button" [("type", "submit")] (esc "Save sending account"))
+          <> el "p" (esc "Use an authorised Google account with Gmail sending and read access. Leave From address blank to use its primary address, or enter an alias verified in that account's Gmail settings. An unverified alias will stop delivery rather than use a different sender.")
+          <> elAttr "form" [("method", "post"), ("action", "/admin/reservation-emails/account")] (csrfField <> ipt "password" "googleMailRefreshToken" "Sending account refresh token" "" <> ipt "email" "googleMailFrom" "From address (optional verified alias)" (maybe "" mailboxText (sbGoogleMailFrom bundle)) <> elAttr "button" [("type", "submit")] (esc "Save sending account"))
       , el "h3" (esc "Recent notification deliveries")
       , el "p" (esc "Accepted by Gmail means the email service accepted it, not that it reached the inbox. For uncertain deliveries, check the sender's Sent folder before retrying; a retry could send a duplicate.")
       , if null (emailsDeliveries emails) then el "p" (esc "No notification emails yet.") else
