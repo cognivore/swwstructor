@@ -438,7 +438,7 @@ instance BlockSym HtmlBlock where
       elAttr "form" [("class", "sww-sched"), ("method", "post"), ("action", "/schedule")] $
         cards
           <> (if null offered then elAttr "p" [("class", "sww-schednote sww-schedsoldout")] (esc "Every class is now fully booked \x2014 get in touch and we'll find you a date.") else mempty)
-          <> elAttr "p" [("class", "sww-schednote")] (esc "Pick your class, then enter your ticket code and the name you'd like to be called. Your booking page includes the venue address and a calendar file to save.")
+          <> elAttr "p" [("class", "sww-schednote")] (esc "Choose your class and enter your preferred name. Coming from your receipt? Your ticket code is already filled in. Your booking page includes the venue address and a calendar file to save.")
           <> elAttr "div" [("class", "sww-schedfields")] (
                field "Ticket code (on your Stripe receipt)" [("name", "code"), ("required", "required"), ("placeholder", "e.g. K7Q2-M4XW"), ("autocomplete", "off")]
                  <> field "Your preferred name" [("name", "name"), ("required", "required"), ("autocomplete", "off")]

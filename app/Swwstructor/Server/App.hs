@@ -470,7 +470,7 @@ handleBuy env = do
           -- Separate metadata keys preserve the distinction even if an older
           -- server receives this webhook after a rollback.
           let (code, fields, description) = case reference of
-                ClassCode c -> (c, [("sww_code", c), ("sww_seats", seats)], bcSiteName (aeBookingCtx env) <> " class ticket " <> c <> ": reserve your class at " <> aeBaseUrl env <> "/classes")
+                ClassCode c -> (c, [("sww_code", c), ("sww_seats", seats)], "Select the time for your class: " <> aeBaseUrl env <> bookingLink c <> " — " <> bcSiteName (aeBookingCtx env) <> " ticket " <> c)
                 PaymentOnlyCode c -> (c, [("sww_payment_code", c)], bcSiteName (aeBookingCtx env) <> " payment-only code " <> c <> ": not eligible for a lesson")
               req =
                 CheckoutRequest
@@ -578,8 +578,8 @@ ticketPage th an t =
     htmlConcat
       [ para ("Your payment for \x201C" <> tkProduct t <> "\x201D is confirmed. This is your class ticket code \x2014 it is printed on your Stripe receipt too:")
       , codeLine (tkCode t)
-      , para "Now pick the date of your class: choose a class and enter this code with the name you'd like to be called."
-      , scheduleButton
+      , para "Choose your class and tell us the name you'd like to be called. Your ticket code is filled in for you."
+      , scheduleButton (tkCode t)
       ]
 
 pendingTicketPage :: Theme -> Maybe Analytics -> Text -> Html
@@ -589,7 +589,7 @@ pendingTicketPage th an code =
       [ para "Your payment is being confirmed (this usually takes a few seconds). Your class ticket code is:"
       , codeLine code
       , para "It is printed on your Stripe receipt as well. It works as soon as the payment confirms \x2014 refresh this page in a moment to see it confirmed, then pick the date of your class."
-      , scheduleButton
+      , scheduleButton code
       ]
 
 para :: Text -> Html
@@ -598,9 +598,12 @@ para txt = elAttr "p" [("class", "sww-paragraph")] (esc txt)
 codeLine :: Text -> Html
 codeLine c = elAttr "p" [("class", "sww-price"), ("style", "font-size:28px;letter-spacing:.06em")] (esc c)
 
-scheduleButton :: Html
-scheduleButton =
-  elAttr "p" [] (elAttr "a" [("href", "/classes"), ("class", "sww-buy sww-schedsubmit"), ("style", "display:inline-block;text-decoration:none")] (esc "Schedule your class \x2192"))
+bookingLink :: Text -> Text
+bookingLink code = "/classes#booking=" <> code
+
+scheduleButton :: Text -> Html
+scheduleButton code =
+  elAttr "p" [] (elAttr "a" [("href", bookingLink code), ("class", "sww-buy sww-schedsubmit"), ("style", "display:inline-block;text-decoration:none")] (esc "Select the time for your class"))
 
 -- ---------------------------------------------------------------------------
 -- Schedule: cash a ticket in for a slot

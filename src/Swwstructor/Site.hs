@@ -267,6 +267,14 @@ relayoutScript th =
   rawHtml $
     T.concat
       [ "<script>(function(){var MAX=" <> T.pack (show (themeMaxWidth th)) <> ";var lastW=-1;"
+      , "var bookingValues={},bookingJump=false;"
+      , "function readBookingLink(){var m=/^#booking=([A-Z0-9]{4}-[A-Z0-9]{4})$/.exec(location.hash);if(m){bookingValues.code=m[1];bookingJump=true;}}readBookingLink();"
+      , "document.addEventListener('input',function(e){var f=e.target;if(f.closest&&f.closest('form.sww-sched')&&f.name){bookingValues[f.name]=f.value;}});"
+      , "document.addEventListener('change',function(e){var f=e.target;if(f.closest&&f.closest('form.sww-sched')&&f.name){bookingValues[f.name]=f.value;}});"
+      , "function fillBooking(stage){var form=stage.querySelector('form.sww-sched');if(!form)return;"
+      , "form.querySelectorAll('input').forEach(function(f){if(Object.prototype.hasOwnProperty.call(bookingValues,f.name)){if(f.type==='radio')f.checked=f.value===bookingValues[f.name];else f.value=bookingValues[f.name];}});"
+      , "if(bookingJump){bookingJump=false;form.scrollIntoView({block:'start'});}}"
+      , "window.addEventListener('hashchange',function(){readBookingLink();var s=document.querySelector('.sww-stage');if(s)fillBooking(s);});"
       , "function apply(html){var cur=document.querySelector('.sww-stage');if(!cur)return null;"
       , "var tmp=document.createElement('div');tmp.innerHTML=html;var next=tmp.firstElementChild;"
       , "if(next){cur.replaceWith(next);return next;}return null;}"
@@ -320,7 +328,7 @@ relayoutScript th =
       -- Re-fill any revealed email after a stage swap (the widget in the fresh
       -- server HTML is always the unrevealed button).
       , "function finish(stage){stage.style.visibility='visible';setupSticky(stage);"
-      , "if(window.__swwFillReveal)window.__swwFillReveal();}"
+      , "fillBooking(stage);if(window.__swwFillReveal)window.__swwFillReveal();}"
       , "function settle(stage,w,prev,n){"
       , "var ov=measure(stage);"
       , "if(n>=3||same(ov,prev)){finish(stage);return;}"
@@ -331,10 +339,10 @@ relayoutScript th =
       , "function relayout(force){"
       , "var w=Math.min(document.documentElement.clientWidth||window.innerWidth||1180,MAX);"
       , "if(!force&&w===lastW)return;lastW=w;"
-      , "fetch('/layout?w='+w).then(function(r){return r.text();}).then(function(h){"
+      , "fetch('/layout?w='+w+'&path='+encodeURIComponent(location.pathname)).then(function(r){return r.text();}).then(function(h){"
       , "var stage=apply(h);if(!stage)return;stage.style.visibility='hidden';"
       , "settle(stage,w,null,0);"
-      , "}).catch(function(){});}"
+      , "}).catch(function(){var s=document.querySelector('.sww-stage');if(s)finish(s);});}"
       , "var t;window.addEventListener('resize',function(){clearTimeout(t);t=setTimeout(function(){relayout(false);},200);});"
       , "var init=document.querySelector('.sww-stage');if(init)init.style.visibility='hidden';"
       , "relayout(true);"
