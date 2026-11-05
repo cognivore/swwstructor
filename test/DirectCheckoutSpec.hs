@@ -412,11 +412,11 @@ exercise dir = do
   partnerInvite <- createInvite "Partner" "partner" "general" ""
   (partnerPath, partnerPage, partnerCookie) <- openInvite partnerInvite
   check "general invitation explains choosing a date later and displays £75" ("75" `T.isInfixOf` textOf partnerPage && "date" `T.isInfixOf` textOf partnerPage)
-  check "a general invitation does not promise a particular venue or address"
-    (not ("UKIYO" `T.isInfixOf` textOf partnerPage) && not ("class=\"invitation-location\"" `T.isInfixOf` textOf partnerPage))
+  check "a general invitation offers dated booking and retains its transferable ticket option"
+    (all (`T.isInfixOf` textOf partnerPage) ["Choose your date", "UKIYO, A different future address", "Buy a transferable ticket for £75"])
   badCsrf <- request methodPost (TE.encodeUtf8 (partnerPath <> "/checkout")) [("Cookie", partnerCookie), (hContentType, "application/x-www-form-urlencoded")] (form [("csrf", "wrong")])
   check "invitation checkout needs its own attempt-bound CSRF" (status badCsrf == 403)
-  partnerBought <- buyInvite partnerPath partnerPage partnerCookie [("price", "price_friend"), ("amount", "1"), ("tier", "friend"), ("slot", slotIdOf later)]
+  partnerBought <- buyInvite partnerPath partnerPage partnerCookie [("price", "price_friend"), ("amount", "1"), ("tier", "friend")]
   check "one invitation POST reaches payment" (status partnerBought == 303)
   let partnerCode = codeOf partnerCookie
   partnerRequests <- filter ((== Just partnerCode) . lookup "metadata[sww_code]") <$> readIORef creates
@@ -447,14 +447,14 @@ exercise dir = do
   upsertVenue venues (Venue "ukiyo" "UKIYO" "8 Slingsby Place, London WC2E 9AB" "Ukiyo, Covent Garden" "" "" True)
   (friendPath, friendPage, friendCookie) <- openInvite friendInvite
   check "event invitation names its venue and gives the complete address"
-    (all (`T.isInfixOf` textOf friendPage) ["learn mochi making at UKIYO", "UKIYO, 8 Slingsby Place, London WC2E 9AB"])
+    (all (`T.isInfixOf` textOf friendPage) ["Learn mochi making at UKIYO", "UKIYO, 8 Slingsby Place, London WC2E 9AB"])
   check "event invitation displays the date, year, time and authored class description"
     (all (`T.isInfixOf` textOf friendPage) ["Wed 9 Jan 2030", "19:00–21:00", slotDescription later])
   check "venue enrichment keeps the saved private URL and checkout action"
     (friendPath == "/invite/" <> Inv.invitationTokenText (Inv.invitationToken friendInvite) &&
      ("action=\"" <> friendPath <> "/checkout\"") `T.isInfixOf` textOf friendPage)
   check "rendering venue details does not rewrite the saved invitation token or terms" . (== savedFriendSnapshot) =<< BS.readFile (dir </> "bookings.json")
-  friendBought <- buyInvite friendPath friendPage friendCookie []
+  friendBought <- buyInvite friendPath friendPage friendCookie [("slot", slotIdOf later)]
   check "event invitation goes directly to the chosen class payment" (status friendBought == 303)
   let friendCode = codeOf friendCookie
   friendRequests <- filter ((== Just friendCode) . lookup "metadata[sww_code]") <$> readIORef creates
@@ -473,7 +473,7 @@ exercise dir = do
   check "disabled link exposes no checkout form and cannot start another purchase" (status deniedNew == 403 && not ("/checkout\"" `T.isInfixOf` textOf stoppedPage))
   _ <- adminPost (TE.encodeUtf8 (friendAdminPath <> "/enabled")) [("csrf", adminCsrf), ("enabled", "yes")]
   (_, reusablePage, reusableCookie) <- openInvite friendInvite
-  reusable <- buyInvite friendPath reusablePage reusableCookie []
+  reusable <- buyInvite friendPath reusablePage reusableCookie [("slot", slotIdOf later)]
   check "friends can share the same reusable invitation for a new single ticket" (status reusable == 303 && codeOf reusableCookie /= friendCode)
   detail <- adminGet (TE.encodeUtf8 friendAdminPath)
   check "admin detail shows the purchased ticket and payment reference" (friendCode `T.isInfixOf` textOf detail && "pi_invitation_friend" `T.isInfixOf` textOf detail)
@@ -490,6 +490,56 @@ exercise dir = do
   check "refused history deletion preserves all tickets, holds, invitations and reporting" . (== historySnapshot) =<< BS.readFile (dir </> "bookings.json")
   retainedDetail <- adminGet (TE.encodeUtf8 friendAdminPath)
   check "historical invitation remains available to the administrator" (status retainedDetail == 200)
+
+  -- The same reusable capability offers three later dates. Each button is a
+  -- complete checkout action; no intermediate picker or price authority lives
+  -- in the browser. Competing clicks still share the ordinary capacity gate.
+  let sold = first {slotDate = "2031-02-01", slotCap = 1}
+      next = sold {slotDate = "2031-02-08", slotTaken = 0}
+      third = next {slotDate = "2031-02-15"}
+      fourth = next {slotDate = "2031-02-22"}
+      fifth = next {slotDate = "2031-03-01"}
+      fallbackSite = siteData {sitePages = [PageSpec "/classes" "Classes" [ScheduleClass Nothing Nothing 0 [sold, next, third, fourth, fifth]]]}
+  _ <- modifySite site (const fallbackSite)
+  soldCode <- newTicketCode bookings
+  _ <- issueTicket bookings "pi_sold_fixture" soldCode "Existing ticket" "1"
+  soldBooking <- redeemTicket bookings [sold] 0 soldCode "Existing guest" (slotIdOf sold)
+  check "fallback fixture reserves the original final seat" (case soldBooking of Right _ -> True; _ -> False)
+  fallbackInvite <- createInvite "FallbackFriend" "friend" "event" (slotIdOf sold)
+  immutableInvite <- lookupInvitation bookings (Inv.invitationToken fallbackInvite)
+  (fallbackPath, fallbackPage, fallbackCookie) <- openInvite fallbackInvite
+  (_, rivalPage, rivalCookie) <- openInvite fallbackInvite
+  let dateButton sid = "name=\"slot\" value=\"" <> sid <> "\""
+  check "sold date presents exactly three next available direct checkout buttons"
+    (all (`T.isInfixOf` textOf fallbackPage) (map (dateButton . slotIdOf) [next, third, fourth]) &&
+     not (dateButton (slotIdOf sold) `T.isInfixOf` textOf fallbackPage) &&
+     not (dateButton (slotIdOf fifth) `T.isInfixOf` textOf fallbackPage) &&
+     T.count ">Book for £65</button>" (textOf fallbackPage) == 3)
+  fallbackBought <- buyInvite fallbackPath fallbackPage fallbackCookie [("slot", slotIdOf next), ("amount", "1")]
+  check "one alternative date click redirects straight to Stripe" (status fallbackBought == 303 && maybe False ("https://checkout.stripe.com/" `BS.isPrefixOf`) (lookup hLocation (simpleHeaders fallbackBought)))
+  changedChoice <- buyInvite fallbackPath fallbackPage fallbackCookie [("slot", slotIdOf third)]
+  check "a different date click cannot silently resume the previous date" (status changedChoice == 409 && not (maybe False ("https://checkout.stripe.com/" `BS.isPrefixOf`) (lookup hLocation (simpleHeaders changedChoice))))
+  rivalBought <- buyInvite fallbackPath rivalPage rivalCookie [("slot", slotIdOf next)]
+  check "a stale last-seat click returns fresh available buttons without silently changing dates"
+    (status rivalBought == 409 && not (dateButton (slotIdOf next) `T.isInfixOf` textOf rivalBought) && dateButton (slotIdOf fifth) `T.isInfixOf` textOf rivalBought)
+  check "rejected stale selection creates no hold" . (== Nothing) =<< lookupCheckoutHold bookings (codeOf rivalCookie)
+  let fallbackCode = codeOf fallbackCookie
+  fallbackRequests <- filter ((== Just fallbackCode) . lookup "metadata[sww_code]") <$> readIORef creates
+  check "fallback retains the friend price and original invitation attribution with the selected date" (case fallbackRequests of
+    [params] -> lookup "line_items[0][price]" params == Just "price_friend" && lookup "metadata[sww_class_date]" params == Just (slotDate next) && lookup "metadata[sww_fee_minor]" params == Just "0"
+    _ -> False)
+  _ <- signed (invitePayment fallbackCode "pi_fallback" 6500)
+  fallbackTickets <- filter ((== fallbackCode) . tkCode) <$> listTickets bookings
+  check "payment books the explicitly selected alternative" (case fallbackTickets of [ticket] -> maybe False ((== slotIdOf next) . redSlotId) (tkRedemption ticket); _ -> False)
+  check "fallback checkout never changes the invitation URL or saved terms" . (== immutableInvite) =<< lookupInvitation bookings (Inv.invitationToken fallbackInvite)
+  generalDates <- createInvite "GeneralDates" "partner" "general" ""
+  (generalDatesPath, generalDatesPage, generalDatesCookie) <- openInvite generalDates
+  generalDatedBuy <- buyInvite generalDatesPath generalDatesPage generalDatesCookie [("slot", slotIdOf third)]
+  check "general invitations also support one-click dated checkout" (status generalDatedBuy == 303)
+  _ <- signed (invitePayment (codeOf generalDatesCookie) "pi_general_dated" 7500)
+  generalDatedTickets <- filter ((== codeOf generalDatesCookie) . tkCode) <$> listTickets bookings
+  check "general invitation dated purchase books selected class at partner terms" (case generalDatedTickets of [ticket] -> maybe False ((== slotIdOf third) . redSlotId) (tkRedemption ticket); _ -> False)
+  check "new public invitation presentation contains no middle dots" (not ("·" `T.isInfixOf` textOf fallbackPage))
   parserChecks
   priceCatalogChecks
   invitationPriceChecks

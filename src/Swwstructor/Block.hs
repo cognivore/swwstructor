@@ -519,7 +519,7 @@ instance BlockSym HtmlBlock where
               <> elAttr "div" [("class", "sww-class-cards")] (htmlConcat (zipWith offerCard [0 :: Int ..] offers))
               <> elAttr "p" [("class", "sww-upcoming-links")] (
                 esc "Buying for someone else? " <> elAttr "a" [("href", "/gifts"), ("class", "sww-link")] (esc "Give a ticket")
-                  <> elAttr "span" [("aria-hidden", "true")] (esc " · ")
+                  <> esc " or "
                   <> elAttr "a" [("href", "/classes#redeem"), ("class", "sww-link")] (esc "Redeem a ticket")
               )
     where
@@ -542,7 +542,7 @@ instance BlockSym HtmlBlock where
               ("aria-labelledby", cardId n <> "-date")] $
               elAttr "div" [("class", "sww-class-when")] (
                 elAttr "h2" [("id", cardId n <> "-date")] (esc (day <> " " <> monthYear))
-                  <> elAttr "p" [] (esc (dow <> " · " <> slotStart s <> "–" <> slotEnd s))
+                  <> elAttr "p" [] (esc (dow <> ", " <> slotStart s <> "–" <> slotEnd s))
               )
                 <> elAttr "div" [("class", "sww-class-description")] (mdInline (if T.null (slotDescription s) then "Japanese pastry workshop" else slotDescription s))
                 <> elAttr "p" [("class", "sww-class-venue")] (esc (slotArea s))
@@ -560,7 +560,7 @@ instance BlockSym HtmlBlock where
                               <> voidElAttr "input" [("type", "hidden"), ("name", "expectedCurrency"), ("value", currencyCode currency)]
                               <> elAttr "button" [("type", "submit"), ("class", "sww-buy sww-class-submit")]
                                 (esc ("Book " <> label <> " — " <> formatPrice (ctoPrice first)))
-                              <> elAttr "p" [("class", "sww-class-availability")] (esc (free <> " · Payment confirms your place"))
+                              <> elAttr "p" [("class", "sww-class-availability")] (esc (free <> ". Payment confirms your place."))
                 )
       ticketOption _ n option =
         let Price amount currency = ctoPrice option
@@ -572,7 +572,7 @@ instance BlockSym HtmlBlock where
                  ("data-price-label", formatPrice (ctoPrice option))]
                   <> if n == 0 then [("checked", "checked")] else []
               )
-                <> elAttr "span" [] (esc ((if seats == 1 then "1 person" else T.pack (show seats) <> " people") <> " · " <> formatPrice (ctoPrice option)))
+                <> elAttr "span" [] (esc ((if seats == 1 then "1 person" else T.pack (show seats) <> " people") <> " for " <> formatPrice (ctoPrice option)))
                 <> voidElAttr "input" [("type", "hidden"), ("name", "expectedAmount_" <> ctoPriceId option), ("value", T.pack (show (centsInt amount)))]
                 <> voidElAttr "input" [("type", "hidden"), ("name", "expectedCurrency_" <> ctoPriceId option), ("value", currencyCode currency)]
             )
@@ -770,9 +770,9 @@ instance BlockSym PlainBlock where
   paragraph = PlainBlock
   byline = PlainBlock
   timestamp = PlainBlock
-  navBar links = PlainBlock (T.intercalate " \xB7 " (map navLabel links))
+  navBar links = PlainBlock (T.intercalate " | " (map navLabel links))
   brandMark = PlainBlock
-  compactBrand t tag = PlainBlock (t <> maybe "" (" · " <>) tag)
+  compactBrand t tag = PlainBlock (t <> maybe "" (" — " <>) tag)
   figureBox cap _ = PlainBlock ("(image: " <> cap <> ")")
   priceTag p = PlainBlock (formatPrice p)
   buyButton _ lbl = PlainBlock ("[" <> lbl <> "]")
@@ -784,7 +784,7 @@ instance BlockSym PlainBlock where
     PlainBlock ("(schedule a class \x2014 " <> T.pack (show (length slots)) <> " slots)")
   upcomingClasses _ title _ offers = PlainBlock $
     maybe "Book your next class" id title <> "\n" <> T.intercalate "\n"
-      [fmtSlotDay (slotDate (coSlot offer)) <> " · " <> T.intercalate ", " [formatPrice (ctoPrice o) | o <- coOptions offer] | offer <- offers]
+      [fmtSlotDay (slotDate (coSlot offer)) <> ": " <> T.intercalate ", " [formatPrice (ctoPrice o) | o <- coOptions offer] | offer <- offers]
   ruleLine = PlainBlock "\x2014"
 
 -- ---------------------------------------------------------------------------

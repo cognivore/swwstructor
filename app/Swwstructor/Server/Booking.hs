@@ -32,6 +32,7 @@ module Swwstructor.Server.Booking
   , takenFor
   , CheckoutHold
   , CheckoutTarget (..)
+  , CheckoutRequestVersion (..)
   , HoldState (..)
   , HoldError (..)
   , holdErrorMessage
@@ -46,8 +47,10 @@ module Swwstructor.Server.Booking
   , chCreatedAt
   , chExpiresAt
   , chState
+  , chRequestVersion
   , beginCheckoutHold
   , beginInvitationCheckout
+  , availableInvitationSlots
   , createInvitation
   , listInvitations
   , lookupInvitation
@@ -76,6 +79,8 @@ import Control.Exception (IOException, throwIO, try)
 import Crypto.Random (getRandomBytes)
 import qualified Data.ByteString as BS
 import Data.Char (isAscii, isAlphaNum, isControl)
+import Data.List (sortOn)
+import Data.Either (isRight)
 import Data.Maybe (mapMaybe)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
@@ -158,6 +163,9 @@ data HoldState
 
 data CheckoutTarget = TransferableTicket | DatedClass !SlotSpec deriving (Eq, Show)
 
+-- Stripe retries must use the exact request form originally promised.
+data CheckoutRequestVersion = CheckoutRequestV1 | CheckoutRequestV2 deriving (Eq, Show)
+
 -- | A checked, immutable purchase promise. Construction is kept in this module:
 -- consumers cannot manufacture a hold without the atomic admission operation.
 -- The slot snapshot survives subsequent content edits. The ticket code doubles
@@ -173,6 +181,7 @@ data CheckoutHold = CheckoutHold
   , chExpiresAt :: !Integer
   , chState :: !HoldState
   , chInvitation :: !(Maybe InvitationAttribution)
+  , chRequestVersion :: !CheckoutRequestVersion
   }
   deriving (Eq)
 
@@ -326,7 +335,26 @@ takenFromUsage usage s = case M.lookup (slotIdOf s) usage of
 occupiedWeekSessions :: [Ticket] -> [CheckoutHold] -> [SlotSpec] -> Text -> Int
 occupiedWeekSessions ts holds slots wk =
   let usage = occupiedUsage ts holds
-   in S.size (S.fromList [slotIdOf s | s <- slots <> mapMaybe checkoutSlot holds, mondayOf (slotDate s) == wk, takenFromUsage usage s > 0])
+   in S.size (S.filter ((== wk) . fst) (occupiedWeekSlots usage ts holds slots))
+
+-- Gift redemptions predate hold snapshots. Their checked slot identifiers keep
+-- a committed earlier class counted even when callers supply only future dates.
+-- The set also prevents a paid ticket and its hold from counting twice.
+occupiedWeekSlots :: Map Text (Int, Bool) -> [Ticket] -> [CheckoutHold] -> [SlotSpec] -> S.Set (Text, Text)
+occupiedWeekSlots usage ts holds slots = S.fromList $
+  [(mondayOf (slotDate s), slotIdOf s) | s <- slots <> mapMaybe checkoutSlot holds, takenFromUsage usage s > 0] <>
+  [(mondayOf day, redSlotId red) | ticket <- ts, Just red <- [tkRedemption ticket], Just day <- [dateFromSlotId (redSlotId red)]]
+
+dateFromSlotId :: Text -> Maybe Text
+dateFromSlotId ident
+  | T.length ident /= 15 || T.take 1 (T.drop 10 ident) /= "-" = Nothing
+  | otherwise = do
+      let dayText = T.take 10 ident
+          timeText = T.drop 11 ident
+      day <- parseTimeM True defaultTimeLocale "%F" (T.unpack dayText) :: Maybe Day
+      start <- parseTimeM True defaultTimeLocale "%H%M" (T.unpack timeText) :: Maybe TimeOfDay
+      if T.pack (formatTime defaultTimeLocale "%F" day) == dayText && T.pack (formatTime defaultTimeLocale "%H%M" start) == timeText
+        then Just dayText else Nothing
 
 activeHold :: CheckoutHold -> Bool
 activeHold h = case chState h of
@@ -353,6 +381,47 @@ bookingAvailability store slots = do
   let usage = occupiedUsage ts holds
   pure [s {slotTaken = takenFromUsage usage s} | s <- slots]
 
+-- | Both page rendering and atomic admission use this decision. The caller
+-- supplies only currently offered, upcoming slots; this store owns seats and
+-- weekly limits. Event invitations offer their original when available and
+-- the earliest three later classes; general invitations offer the earliest
+-- three classes. The original invitation and attribution never change.
+availableInvitationSlots :: BookingStore -> [SlotSpec] -> Int -> InvitationToken -> IO (Either HoldError [SlotSpec])
+availableInvitationSlots store slots maxWeekly token = do
+  BookingData ts _ holds invitations <- readMVar (bsVar store)
+  pure $ case registryLookupToken invitations token of
+    Nothing -> Left (HoldInvitationError InvitationNotFound)
+    Just invitation
+      | not (invitationEnabled invitation) -> Left (HoldInvitationError InvitationDisabled)
+      | otherwise -> Right (selectInvitationSlots ts holds slots maxWeekly invitation)
+
+selectInvitationSlots :: [Ticket] -> [CheckoutHold] -> [SlotSpec] -> Int -> Invitation -> [SlotSpec]
+selectInvitationSlots ts holds slots maxWeekly invitation =
+  let uniqueSlots = M.elems (M.fromListWith (\_ original -> original) [(slotIdOf slot, slot) | slot <- slots])
+      available = sortOn slotOrder (filter (isRight . reservationCapacity ts holds slots maxWeekly "1") uniqueSlots)
+      choices = case invitationScope invitation of
+        GeneralTicket -> take 3 available
+        EventTicket original -> [s | s <- available, slotIdOf s == slotIdOf original] <>
+          take 3 [s | s <- available, slotOrder s > slotOrder original]
+   in [s {slotTaken = occupiedFor ts holds s} | s <- choices]
+
+slotOrder :: SlotSpec -> (Text, Text)
+slotOrder slot = (slotDate slot, slotStart slot)
+
+reservationCapacity :: [Ticket] -> [CheckoutHold] -> [SlotSpec] -> Int -> Text -> SlotSpec -> Either HoldError ()
+reservationCapacity ts holds slots maxWeekly seats =
+  let usage = occupiedUsage ts holds
+      occupied = occupiedWeekSlots usage ts holds slots
+      weekCounts = M.fromListWith (+) [(week, 1 :: Int) | (week, _) <- S.toList occupied]
+   in \slot ->
+     let taken = takenFromUsage usage slot
+         need = if seats == "all" then slotCap slot else seatCount seats
+         weekAtCap = maxWeekly > 0 && M.findWithDefault 0 (mondayOf (slotDate slot)) weekCounts >= maxWeekly
+      in if
+     | (seats == "all" && taken > 0) || need > slotCap slot - taken -> Left HoldSlotFull
+     | taken == 0 && weekAtCap -> Left HoldWeekFull
+     | otherwise -> Right ()
+
 lookupCheckoutHold :: BookingStore -> Text -> IO (Maybe CheckoutHold)
 lookupCheckoutHold store code = do
   BookingData _ _ holds _ <- readMVar (bsVar store)
@@ -378,19 +447,32 @@ beginCheckoutHold store slots maxWeekly code slotId priceId product' seats price
 -- server. Price, single-person entitlement, scope and attribution come only
 -- from the saved invitation. Disabling and first admission share this lock.
 -- Already saved promises remain resumable after disable or content changes.
-beginInvitationCheckout :: BookingStore -> [SlotSpec] -> Int -> Text -> InvitationToken -> Text -> Text -> Integer -> IO (Either HoldError CheckoutHold)
-beginInvitationCheckout store slots maxWeekly code token priceId product' expiry = do
+beginInvitationCheckout :: BookingStore -> [SlotSpec] -> Int -> Text -> InvitationToken -> Maybe Text -> Text -> Text -> Integer -> IO (Either HoldError CheckoutHold)
+beginInvitationCheckout store slots maxWeekly code token requestedSlot priceId product' expiry = do
   now <- iso8601Now
   epoch <- floor <$> getPOSIXTime
-  modifyData store $ \old@(BookingData _ _ holds invitations) ->
+  modifyData store $ \old@(BookingData ts _ holds invitations) ->
     case registryLookupToken invitations token of
       Nothing -> (old, Left (HoldInvitationError InvitationNotFound))
       Just invitation
         | not (invitationEnabled invitation) && not (any (\h -> chCode h == code && maybe False ((== invitationId invitation) . iaInvitationId) (chInvitation h)) holds) ->
             (old, Left (HoldInvitationError InvitationDisabled))
         | otherwise ->
-            let target = case invitationScope invitation of GeneralTicket -> TicketChoice; EventTicket slot -> SlotChoice (slotIdOf slot)
-             in admitCheckout now epoch slots maxWeekly code target priceId product' "1" (invitationPrice invitation) expiry (Just (attributionFor invitation)) old
+            let saved = lookup code [(chCode h, h) | h <- holds]
+                selected = case saved of
+                  Just h -> Right (checkoutSlot h)
+                  Nothing -> case (invitationScope invitation, requestedSlot) of
+                    (GeneralTicket, Nothing) -> Right Nothing
+                    (_, Just ident) -> maybe (Left HoldConflict) (Right . Just)
+                      (lookup ident [(slotIdOf s, s) | s <- selectInvitationSlots ts holds slots maxWeekly invitation])
+                    _ -> Left HoldConflict
+             in case selected of
+               Left err -> (old, Left err)
+               Right chosen
+                 | requestedSlot /= fmap slotIdOf chosen -> (old, Left HoldConflict)
+                 | otherwise ->
+                     let target = maybe TicketChoice (SlotChoice . slotIdOf) chosen
+                      in admitCheckout now epoch slots maxWeekly code target priceId product' "1" (invitationPrice invitation) expiry (Just (attributionFor invitation)) old
 
 data TargetChoice = TicketChoice | SlotChoice !Text
 
@@ -405,14 +487,7 @@ admitCheckout now epoch slots maxWeekly code choice priceId product' seats price
       selected = case choice of TicketChoice -> Right TransferableTicket; SlotChoice ident -> maybe (Left HoldSlotUnknown) (Right . DatedClass) (lookup ident [(slotIdOf s, s) | s <- slots])
       capacity target = case target of
         TransferableTicket -> Right ()
-        DatedClass slot ->
-          let taken = occupiedFor ts holds slot
-              need = if seats == "all" then slotCap slot else seatCount seats
-              weekAtCap = maxWeekly > 0 && occupiedWeekSessions ts holds slots (mondayOf (slotDate slot)) >= maxWeekly
-           in if
-             | (seats == "all" && taken > 0) || need > slotCap slot - taken -> Left HoldSlotFull
-             | taken == 0 && weekAtCap -> Left HoldWeekFull
-             | otherwise -> Right ()
+        DatedClass slot -> reservationCapacity ts holds slots maxWeekly seats slot
    in case [h | h <- holds, chCode h == code] of
      h : _
        | not (matching h) -> reject HoldConflict
@@ -421,7 +496,7 @@ admitCheckout now epoch slots maxWeekly code choice priceId product' seats price
      [] | any ((== code) . tkCode) ts -> reject HoldConflict
      [] -> case selected of
        Left err -> reject err
-       Right target -> case checkedHoldFields code target priceId product' seats price' attribution of
+       Right target -> case checkedHoldFields CheckoutRequestV2 code target priceId product' seats price' attribution of
          Left why -> reject (HoldInvalidInput (T.pack why))
          Right ()
            | expiry <= epoch || expiry > epoch + 86400 -> reject (HoldInvalidInput "the checkout expiry must be within the next 24 hours")
@@ -429,7 +504,7 @@ admitCheckout now epoch slots maxWeekly code choice priceId product' seats price
                Left err -> reject err
                Right () ->
                  let canonical = case target of TransferableTicket -> TransferableTicket; DatedClass slot -> DatedClass slot {slotTaken = 0}
-                     h = CheckoutHold code canonical priceId product' seats price' now expiry HoldCreating attribution
+                     h = CheckoutHold code canonical priceId product' seats price' now expiry HoldCreating attribution CheckoutRequestV2
                   in (BookingData ts emails (holds <> [h]) invitations, Right h)
 
 -- | The adapter has received a successful Stripe create/retrieve response.
@@ -525,13 +600,13 @@ replaceHold h' = map (\h -> if chCode h == chCode h' then h' else h)
 validReference :: Text -> Text -> Bool
 validReference prefix value = prefix `T.isPrefixOf` value && T.length value > T.length prefix && T.length value <= 255 && T.all (\c -> isAscii c && (isAlphaNum c || c == '_')) value
 
-checkedHoldFields :: Text -> CheckoutTarget -> Text -> Text -> Text -> Price -> Maybe InvitationAttribution -> Either String ()
-checkedHoldFields code target priceId product' seats price'@(Price (Cents amount) _) attribution
+checkedHoldFields :: CheckoutRequestVersion -> Text -> CheckoutTarget -> Text -> Text -> Text -> Price -> Maybe InvitationAttribution -> Either String ()
+checkedHoldFields version code target priceId product' seats price'@(Price (Cents amount) _) attribution
   | not (isTicketCode code) = Left "the ticket reference is invalid"
   | not (validReference "price_" priceId) = Left "the Stripe price reference is invalid"
   | T.null (T.strip product') || T.length product' > 1000 = Left "the ticket name is empty or too long"
   | amount <= 0 = Left "a positive ticket price is required"
-  | Just source <- attribution, seats /= "1" || price' /= iaPrice source || not (scopeMatches target (iaScope source)) = Left "the invitation and checkout terms differ"
+  | Just source <- attribution, seats /= "1" || price' /= iaPrice source || not (scopeMatches version target (iaScope source)) = Left "the invitation and checkout terms differ"
   | TransferableTicket <- target, attribution == Nothing = Left "a transferable checkout requires an invitation"
   | DatedClass slot <- target, slotCap slot < 1 || slotCap slot > 1000 = Left "the class capacity must be between 1 and 1000"
   | DatedClass slot <- target, (parseTimeM True defaultTimeLocale "%F" (T.unpack (slotDate slot)) :: Maybe Day) == Nothing = Left "the class date is invalid"
@@ -542,10 +617,12 @@ checkedHoldFields code target priceId product' seats price'@(Price (Cents amount
       [(n, "")] | n >= 1 && n <= 1000 && T.pack (show n) == seats -> Right ()
       _ -> Left "the ticket must reserve a positive whole number of places or the whole class"
 
-scopeMatches :: CheckoutTarget -> InvitationScope -> Bool
-scopeMatches TransferableTicket GeneralTicket = True
-scopeMatches (DatedClass slot) (EventTicket invited) = slotIdOf slot == slotIdOf invited
-scopeMatches _ _ = False
+scopeMatches :: CheckoutRequestVersion -> CheckoutTarget -> InvitationScope -> Bool
+scopeMatches _ TransferableTicket GeneralTicket = True
+scopeMatches CheckoutRequestV2 (DatedClass _) GeneralTicket = True
+scopeMatches version (DatedClass slot) (EventTicket invited) = slotIdOf slot == slotIdOf invited ||
+  (version == CheckoutRequestV2 && slotOrder slot > slotOrder invited)
+scopeMatches _ _ _ = False
 
 -- | Issue the ticket for a succeeded payment, under the code minted before
 -- checkout. Idempotent on the payment: a redelivered webhook finds the ticket
@@ -902,7 +979,8 @@ holdToJSON h =
         , ("seats", string (chSeats h)), ("amount", JNum (fromIntegral amount))
         , ("currency", string (currencyCode currency)), ("createdAt", string (chCreatedAt h))
         , ("expiresAt", JStr (show (chExpiresAt h))), ("state", state)
-        ] <> [("invitation", attributionToJSON attribution) | Just attribution <- [chInvitation h]]
+        ] <> [("invitation", attributionToJSON attribution) | Just attribution <- [chInvitation h]] <>
+        [("requestVersion", JNum 2) | chRequestVersion h == CheckoutRequestV2]
   where string = JStr . T.unpack
 
 slotToJSON :: SlotSpec -> JSON
@@ -916,6 +994,11 @@ slotToJSON slot = JObj
 holdFromJSON :: JSON -> Either String CheckoutHold
 holdFromJSON v = do
   code <- txt v "code"
+  version <- case v .:? "requestVersion" of
+    Nothing -> Right CheckoutRequestV1
+    Just (JNum 1) -> Right CheckoutRequestV1
+    Just (JNum 2) -> Right CheckoutRequestV2
+    _ -> Left "checkout request version is unsupported; refusing to change an idempotent payment request"
   target <- case v .:? "target" of
     Nothing -> do
       sv <- v .: "slot"
@@ -930,7 +1013,7 @@ holdFromJSON v = do
   currency <- maybe (Left "checkout hold has an unsupported currency") Right (currencyOfCode currencyText)
   let price' = Price (Cents amount) currency
   attribution <- mapM attributionFromJSON (v .:? "invitation")
-  checkedHoldFields code target priceId product' seats price' attribution
+  checkedHoldFields version code target priceId product' seats price' attribution
   created <- txt v "createdAt"
   expiryText <- txt v "expiresAt"
   expiry <- case reads (T.unpack expiryText) of
@@ -951,7 +1034,7 @@ holdFromJSON v = do
       if validReference "pi_" paymentRef then Right (HoldConfirmed paymentRef) else Left "checkout hold has an invalid payment reference"
     "released" -> Right HoldReleased
     _ -> Left "checkout hold has an unsupported state; refusing to assume free capacity"
-  pure (CheckoutHold code target priceId product' seats price' created expiry state attribution)
+  pure (CheckoutHold code target priceId product' seats price' created expiry state attribution version)
   where
     txt o k = T.pack <$> (jstr =<< o .: k)
     int o k = do

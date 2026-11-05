@@ -5,6 +5,7 @@ module Main (main) where
 import Control.Monad (unless)
 import qualified Data.ByteString as BS
 import Data.Either (isLeft)
+import Data.List (nub)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
@@ -38,9 +39,11 @@ main = do
       check "Location appears in both variants" (all (T.isInfixOf "Ukiyo, 8 Slingsby Place, London WC2E 9AB") [shared, personal])
       check "QR has a white quiet zone" ("width=\"29\" height=\"29\" fill=\"white\"" `T.isInfixOf` svg)
       check "Palette cannot request a local paint URL" (not ("url(" `T.isInfixOf` invitationSvg SharedInvitation (brand {themeBg = Color "url(/etc/passwd)"}) "Friend" (price GBP 65) Nothing matrix))
-      check "QR precedes invitation copy" (T.length (fst (T.breakOn "<path fill=\"black\"" svg)) < T.length (fst (T.breakOn "invite you to a" svg)))
+      check "Complete headline precedes QR" (T.length (fst (T.breakOn "to a mochi-making class" svg)) < T.length (fst (T.breakOn "<path fill=\"black\"" svg)))
       check "Personal variant addresses the recipient" (">Dear Tess,<" `T.isInfixOf` personal && ">you are invited to a<" `T.isInfixOf` personal)
-      check "Shared variant credits the co-inviter" (">and Tess<" `T.isInfixOf` shared && ">invite you to a<" `T.isInfixOf` shared)
+      check "Shared headline reads as one invitation" (">and Tess invite you<" `T.isInfixOf` shared && ">to a mochi-making class<" `T.isInfixOf` shared)
+      check "Invitation has only three text sizes" (all ((== 3) . length . nub . textSizes) [shared, personal])
+      check "Invitation has no middle-dot separators" (all (not . T.isInfixOf "·") [shared, personal])
       check "Both variants retain the exact same QR matrix" (qrFragment personal == qrFragment shared)
       check "Compact export uses A6 portrait" ("width=\"105mm\" height=\"148mm\"" `T.isInfixOf` personal)
       mapM_ (\style -> mapM_ (\(ticketPrice, label) -> do
@@ -76,10 +79,10 @@ renderFixtures pricesOnly dir = do
   where
     fixtures :: [(FilePath, Text, Price, Maybe InvitationEventDetails)]
     fixtures =
-      [ ("tess", "Tess", price GBP 65, atUkiyo "18 November 2026 · 19:00–21:00")
-      , ("partner-event", "UKIYO", price GBP 75, atUkiyo "18 November 2026 · 19:00–21:00")
+      [ ("tess", "Tess", price GBP 65, atUkiyo "18 November 2026, 19:00–21:00")
+      , ("partner-event", "UKIYO", price GBP 75, atUkiyo "18 November 2026, 19:00–21:00")
       , ("friend-unicode", "Émilie & 友達", price GBP 65, Nothing)
-      , ("long-name", "Translator Magazine and the Society of Friends of Japanese Sweets, Tea and Handcrafted Delights", price GBP 65, Just (InvitationEventDetails "Wednesday 18 November 2026 · 19:00–21:00" "Ukiyo, The Workshop and Japanese Tea Room, Courtyard Entrance, 8 Slingsby Place, Covent Garden, London WC2E 9AB, United Kingdom"))
+      , ("long-name", "Translator Magazine and the Society of Friends of Japanese Sweets, Tea and Handcrafted Delights", price GBP 65, Just (InvitationEventDetails "Wednesday 18 November 2026, 19:00–21:00" "Ukiyo, The Workshop and Japanese Tea Room, Courtyard Entrance, 8 Slingsby Place, Covent Garden, London WC2E 9AB, United Kingdom"))
       , ("wide-name", T.replicate 100 "W", price GBP 65, Nothing)
       , ("japanese-name", T.replicate 50 "友達", price GBP 65, atUkiyo "18 November 2026")
       ]
@@ -93,3 +96,6 @@ renderFixtures pricesOnly dir = do
 
 qrFragment :: Text -> Text
 qrFragment = fst . T.breakOn "</g>" . snd . T.breakOn "<g transform="
+
+textSizes :: Text -> [Text]
+textSizes = map (T.takeWhile (/= '"')) . drop 1 . T.splitOn "font-size=\""

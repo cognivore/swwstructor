@@ -211,8 +211,11 @@ test-suite direct-booking-test
   default-language: GHC2021
   other-modules:
     Swwstructor.Server.Booking
+    Swwstructor.Server.DirectBooking
+    Swwstructor.Server.DirectStripe
     Swwstructor.Server.Invitation
     Swwstructor.Server.ReservationEmail
+    Swwstructor.Server.SecretStore
   build-depends:
       base
     , bytestring
@@ -220,6 +223,9 @@ test-suite direct-booking-test
     , crypton
     , directory
     , filepath
+    , http-client
+    , http-types
+    , memory
     , stickywebwm
     , swwstructor
     , text

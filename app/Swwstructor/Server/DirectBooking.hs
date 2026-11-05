@@ -21,8 +21,8 @@ import Swwstructor.Money (Quantity (Quantity), Price (..), Cents (..))
 import Swwstructor.Server.Invitation
   ( InvitationTier (..), iaInvitationId, iaTier, iaReferralFee, invitationIdText )
 import Swwstructor.Server.Booking
-  ( BookingStore, CheckoutHold, HoldState (..), Ticket, HoldError
-  , chCode, checkoutSlot, chInvitation, chPriceId, chProduct, chSeats, chPrice, chExpiresAt, chState
+  ( BookingStore, CheckoutHold, HoldState (..), CheckoutRequestVersion (..), Ticket, HoldError
+  , chCode, checkoutSlot, chInvitation, chPriceId, chProduct, chSeats, chPrice, chExpiresAt, chState, chRequestVersion
   , attachCheckoutSession, confirmCheckoutHold, releaseCheckoutHold
   , listPendingCheckoutHolds, holdErrorMessage
   )
@@ -43,24 +43,24 @@ data CheckoutProgress
   | CheckoutPending !Text
   deriving (Eq, Show)
 
--- This is the immutable wire shape for persisted attempts. Future changes
--- need a stored request version (or drained Creating holds), because Stripe
--- requires identical parameters when an uncertain creation is retried.
+-- The persisted request version keeps the exact form of uncertain attempts.
+-- Stripe requires identical parameters when a creation is retried.
 requestFor :: DirectBooking -> CheckoutHold -> DirectRequest
 requestFor ctx hold = case (chInvitation hold, checkoutSlot hold) of
   (Nothing, Just slot) -> legacyRequestFor ctx hold slot
   _ -> invitationRequestFor ctx hold
 
--- Preserve the exact previous form for every legacy dated hold, including
--- Creating holds which may already have reached Stripe before a restart.
+-- Preserve the previous form for version-one dated holds, including Creating
+-- holds which may already have reached Stripe before a restart.
 legacyRequestFor :: DirectBooking -> CheckoutHold -> SlotSpec -> DirectRequest
 legacyRequestFor ctx hold slot =
   let code = chCode hold
-      label = slotDate slot <> " " <> slotStart slot <> "–" <> slotEnd slot <> " · " <> slotArea slot
+      legacy = chRequestVersion hold == CheckoutRequestV1
+      label = slotDate slot <> (if legacy then " " else " at ") <> slotStart slot <> "–" <> slotEnd slot <> (if legacy then " · " else ", ") <> slotArea slot
       summary = "Your class: " <> label <> ". Your place is reserved when payment succeeds."
       receipt = dbName ctx <> " class " <> label <> ". Your booking: " <> dbBaseUrl ctx <> "/booking/" <> code
-      ticketLabel = slotDate slot <> " · " <> slotStart slot <> "–" <> slotEnd slot <> " · " <>
-        (if chSeats hold == "1" then "1 person" else chSeats hold <> " people") <> " · " <> chProduct hold
+      ticketLabel = slotDate slot <> (if legacy then " · " else " at ") <> slotStart slot <> "–" <> slotEnd slot <> (if legacy then " · " else ", ") <>
+        (if chSeats hold == "1" then "1 person" else chSeats hold <> " people") <> (if legacy then " · " else ", ") <> chProduct hold
       request = CheckoutRequest
         -- A dated line uses the server-checked price snapshot, so Stripe can
         -- name the chosen class without the gift product's redeem-later copy.
@@ -72,13 +72,13 @@ legacyRequestFor ctx hold slot =
         (Just receipt)
   in DirectRequest request code (chExpiresAt hold) summary
 
--- Invitation attribution is the persisted request-version discriminator.
 -- Use the real fixed Stripe Price, so product reporting includes these sales.
 invitationRequestFor :: DirectBooking -> CheckoutHold -> DirectRequest
 invitationRequestFor ctx hold =
   let code = chCode hold
+      legacy = chRequestVersion hold == CheckoutRequestV1
       target = maybe "A transferable ticket for one person. Choose a class date after payment."
-        (\slot -> "Your class: " <> slotDate slot <> " " <> slotStart slot <> "–" <> slotEnd slot <> " · " <> slotArea slot <> ". Your place is reserved when payment succeeds.")
+        (\slot -> "Your class: " <> slotDate slot <> (if legacy then " " else " at ") <> slotStart slot <> "–" <> slotEnd slot <> (if legacy then " · " else ", ") <> slotArea slot <> ". Your place is reserved when payment succeeds.")
         (checkoutSlot hold)
       attribution = case chInvitation hold of
         Nothing -> [] -- the store rejects this invalid target/attribution pair

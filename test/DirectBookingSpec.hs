@@ -7,13 +7,20 @@ import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (IOException, bracket, try)
 import Control.Monad (unless)
 import Data.Either (isLeft, isRight)
+import Data.IORef (newIORef, readIORef, writeIORef)
+import Data.List.NonEmpty (NonEmpty ((:|)))
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString as BS
 import Data.Time.Clock.POSIX (getPOSIXTime)
+import StickyWM (JSON (..), decode, encode, (.:?))
+import Swwstructor.Checkout (CheckoutRequest (..), CheckoutItem (..), CheckoutError (..), Url (..), lineItem)
 import Swwstructor.Content (SlotSpec (..), slotIdOf)
-import Swwstructor.Money (Currency (GBP), price)
+import Swwstructor.Money (Currency (GBP), Quantity (..), price)
 import Swwstructor.Server.Booking
+import Swwstructor.Server.DirectBooking (DirectBooking (..), resumeCheckout)
+import Swwstructor.Server.DirectStripe (DirectStripe (..), DirectRequest (..), directFormParams)
+import qualified Swwstructor.Server.Invitation as Inv
 import Swwstructor.Server.ReservationEmail (emailsDeliveries, parseMailbox)
 import System.Directory (createDirectory, getTemporaryDirectory, removeFile, removePathForcibly)
 import System.FilePath ((</>))
@@ -83,6 +90,62 @@ main = bracket fixture removePathForcibly $ \dir -> do
   check "confirmed promise survives restart with price and class snapshot" (maybe False (\x -> checkoutSlot x == Just one && chPrice x == p && chState x == HoldConfirmed "pi_booking") restored)
   check "paid gift and dated tickets both survive restart" . ((== 2) . length) =<< listTickets reloaded
 
+  -- A human-copy change cannot alter the idempotent request of an attempt
+  -- already sent to Stripe. Capture the real resume interpreter's full form.
+  wireStore <- open "wire"
+  newWire <- start wireStore [one] 3 "AAAA-2222" one "1" p >>= right
+  check "new checkout stores the current request version" (chRequestVersion newWire == CheckoutRequestV2)
+  wireJSON <- readJSON (dir </> "wire.json")
+  writeJSON (dir </> "wire-legacy.json") (mapHolds (removeField "requestVersion") wireJSON)
+  legacyWireStore <- open "wire-legacy"
+  legacyWire <- lookupCheckoutHold legacyWireStore "AAAA-2222" >>= maybe (fail "Missing legacy hold") pure
+  check "holds saved before request versioning decode as the original wire version" (chRequestVersion legacyWire == CheckoutRequestV1)
+  legacyParams <- captureRequest legacyWireStore legacyWire
+  let legacyLabel = "2030-01-07 19:00–21:00 · Kitchen"
+      expectedLegacy = DirectRequest (CheckoutRequest
+        (ItemAdHoc (lineItem "2030-01-07 · 19:00–21:00 · 1 person · Group class" p) :| [])
+        (Url "https://example.test/booking/AAAA-2222") (Url "https://example.test/checkout/AAAA-2222")
+        [("sww_code", "AAAA-2222"), ("sww_flow", "dated"), ("sww_product", "Group class"), ("sww_seats", "1"), ("sww_price_id", "price_fixture")]
+        (Just ("Fixture class " <> legacyLabel <> ". Your booking: https://example.test/booking/AAAA-2222")))
+        "AAAA-2222" expiry ("Your class: " <> legacyLabel <> ". Your place is reserved when payment succeeds.")
+  check "legacy dated replay preserves every Stripe form parameter exactly" (legacyParams == directFormParams expectedLegacy)
+  newParams <- captureRequest wireStore newWire
+  check "new dated checkout uses natural separators without middle dots"
+    (lookup "line_items[0][price_data][product_data][name]" newParams == Just "2030-01-07 at 19:00–21:00, 1 person, Group class" &&
+     all (not . T.isInfixOf "·" . snd) newParams)
+  wireReload <- open "wire"
+  sameWire <- lookupCheckoutHold wireReload "AAAA-2222" >>= maybe (fail "Missing versioned hold") pure
+  check "versioned request remains identical after reload" . (== newParams) =<< captureRequest wireReload sameWire
+  _ <- attachCheckoutSession legacyWireStore "AAAA-2222" "cs_old_wire" "https://checkout.stripe.com/old" >>= right
+  persistedLegacy <- readJSON (dir </> "wire-legacy.json")
+  check "rewriting a legacy hold does not add a new request version" (case persistedLegacy .:? "checkoutHolds" of Just (JArr [value]) -> value .:? "requestVersion" == Nothing; _ -> False)
+  writeJSON (dir </> "wire-unknown.json") (mapHolds (setField "requestVersion" (JNum 99)) wireJSON)
+  unknownWire <- try (open "wire-unknown") :: IO (Either IOException BookingStore)
+  check "unknown request versions fail closed instead of creating a different payment" (isLeft unknownWire)
+
+  invitationWireStore <- open "invitation-wire"
+  invitationDraft <- either (fail . T.unpack . Inv.invitationErrorMessage) pure (Inv.mkInvitationDraft "Friend" Inv.Friend (Inv.EventTicket one))
+  invitation <- createInvitation invitationWireStore invitationDraft >>= either (fail . T.unpack . Inv.invitationErrorMessage) pure
+  invitationWire <- beginInvitationCheckout invitationWireStore [one] 3 "BBBB-2222" (Inv.invitationToken invitation) (Just (slotIdOf one)) "price_friend" "Invitation ticket" expiry >>= right
+  invitationJSON <- readJSON (dir </> "invitation-wire.json")
+  writeJSON (dir </> "invitation-wire-legacy.json") (mapHolds (removeField "requestVersion") invitationJSON)
+  invitationLegacyStore <- open "invitation-wire-legacy"
+  invitationLegacy <- lookupCheckoutHold invitationLegacyStore "BBBB-2222" >>= maybe (fail "Missing legacy invitation hold") pure
+  legacyInvitationParams <- captureRequest invitationLegacyStore invitationLegacy
+  let legacyInvitationSummary = "Your class: " <> legacyLabel <> ". Your place is reserved when payment succeeds."
+      expectedInvitation = DirectRequest (CheckoutRequest
+        (ItemPrice "price_friend" (Quantity 1) :| [])
+        (Url "https://example.test/booking/BBBB-2222") (Url "https://example.test/checkout/BBBB-2222")
+        [("sww_code", "BBBB-2222"), ("sww_flow", "invitation"), ("sww_product", "Invitation ticket"), ("sww_seats", "1"), ("sww_price_id", "price_friend")
+        ,("sww_invitation_id", Inv.invitationIdText (Inv.invitationId invitation)), ("sww_tier", "friend"), ("sww_fee_minor", "0")
+        ,("sww_scope", "event"), ("sww_class_date", "2030-01-07"), ("sww_class_start", "19:00")]
+        (Just ("Fixture. " <> legacyInvitationSummary <> " Your ticket: https://example.test/booking/BBBB-2222")))
+        "BBBB-2222" expiry legacyInvitationSummary
+  check "legacy invitation replay preserves every Stripe form parameter exactly" (legacyInvitationParams == directFormParams expectedInvitation)
+  newInvitationParams <- captureRequest invitationWireStore invitationWire
+  check "new invitation checkout removes middle dots without changing its price"
+    (all (not . T.isInfixOf "·" . snd) newInvitationParams && lookup "line_items[0][price]" newInvitationParams == Just "price_friend")
+
   -- An abandoned attempt is removed only by a terminal result supplied by the
   -- adapter. It never becomes an ordinary gift ticket, and its code is retired.
   abandoned <- open "abandoned"
@@ -148,6 +211,17 @@ main = bracket fixture removePathForcibly $ \dir -> do
   _ <- releaseCheckoutHold weekly "PPPP-2222" >>= right
   _ <- start weekly [eight, nextDay] 1 "NNNN-2222" nextDay "1" p >>= right
 
+  earlierGift <- open "earlier-gift"
+  _ <- issueTicket earlierGift "pi_earlier_gift" "AAAA-2222" "Older gift" "1"
+  _ <- redeemTicket earlierGift [eight] 1 "AAAA-2222" "Guest" (slotIdOf eight)
+  excludedEarlierGift <- start earlierGift [nextDay] 1 "BBBB-2222" nextDay "1" p
+  check "a gift redemption earlier in the week counts when only upcoming dates are supplied" (excludedEarlierGift == Left HoldWeekFull)
+  alreadyPaid <- open "already-paid-week"
+  _ <- start alreadyPaid [eight] 2 "AAAA-2222" eight "1" p >>= right
+  _ <- confirmCheckoutHold alreadyPaid "AAAA-2222" "pi_earlier_dated" p >>= right
+  remainingWeekly <- start alreadyPaid [nextDay] 2 "BBBB-2222" nextDay "1" p
+  check "the same confirmed ticket and hold count as one weekly class" (isRight remainingWeekly)
+
   -- Actual competing MVar-backed operations, not a pure-policy imitation.
   race <- open "race"
   (a, b) <- concurrently
@@ -197,6 +271,34 @@ main = bracket fixture removePathForcibly $ \dir -> do
   corrupt <- try (open "corrupt") :: IO (Either IOException BookingStore)
   check "corrupt hold records cannot restart with silently free capacity" (isLeft corrupt)
   putStrLn "Direct booking capacity, persistence, idempotency and compatibility checks passed."
+
+captureRequest :: BookingStore -> CheckoutHold -> IO [(T.Text, T.Text)]
+captureRequest store hold = do
+  captured <- newIORef Nothing
+  let unavailable = pure (Left (CheckoutTransport "fixture response lost after creation"))
+      stripe = DirectStripe
+        { directCreate = \request -> writeIORef captured (Just (directFormParams request)) >> unavailable
+        , directRetrieve = const unavailable, directExpire = const unavailable }
+  _ <- resumeCheckout (DirectBooking store stripe "https://example.test" "Fixture") hold
+  readIORef captured >>= maybe (fail "Expected one idempotent Stripe create") pure
+
+readJSON :: FilePath -> IO JSON
+readJSON path = BS.readFile path >>= either fail pure . decode . T.unpack . TE.decodeUtf8
+
+writeJSON :: FilePath -> JSON -> IO ()
+writeJSON path = BS.writeFile path . TE.encodeUtf8 . T.pack . encode
+
+mapHolds :: (JSON -> JSON) -> JSON -> JSON
+mapHolds change (JObj fields) = JObj [(key, case value of JArr holds | key == "checkoutHolds" -> JArr (map change holds); _ -> value) | (key, value) <- fields]
+mapHolds _ value = value
+
+removeField :: String -> JSON -> JSON
+removeField key (JObj fields) = JObj (filter ((/= key) . fst) fields)
+removeField _ value = value
+
+setField :: String -> JSON -> JSON -> JSON
+setField key value (JObj fields) = JObj ((key, value) : filter ((/= key) . fst) fields)
+setField _ _ value = value
 
 fixture :: IO FilePath
 fixture = do

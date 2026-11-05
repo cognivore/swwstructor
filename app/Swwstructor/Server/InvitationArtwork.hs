@@ -188,19 +188,11 @@ invitationSvg style theme name ticketPrice event (QrMatrix matrix) =
   "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"105mm\" height=\"148mm\" viewBox=\"0 0 1050 1480\">"
   <> "<rect width=\"1050\" height=\"1480\" fill=\"" <> background <> "\"/>"
   <> "<path d=\"M72 72 H978 M72 1408 H978\" stroke=\"" <> accent <> "\" stroke-width=\"2\"/>"
-  <> textAt 179 77 mast "600" foreground "Okashi School"
-  <> T.concat [textAt (nameTop + fromIntegral i * nameLineHeight) nameSize display "500" foreground line | (i,line) <- zip [0 :: Int ..] nameLines]
-  <> "<path d=\"M460 378 H590\" stroke=\"" <> accent <> "\" stroke-width=\"2\"/>"
-  <> qrSvg 424
-  <> textAt 759 22 body "500" accent "Scan to book your place"
-  <> textAt 793 25 body "500" foreground ("Ticket price: " <> formatPrice ticketPrice <> " per person")
-  <> textAt 857 39 display "500" foreground invitationLine
-  <> textAt 946 83 display "600" foreground "mochi-making"
-  <> textAt 1020 83 display "600" foreground "class"
-  <> T.concat [textAt (eventTop + fromIntegral i * 30) 24 body "500" accent line | (i,line) <- zip [0 :: Int ..] eventLines]
-  <> T.concat [textAt (locationTop + fromIntegral i * locationLineHeight) locationSize body "400" foreground line | (i,line) <- zip [0 :: Int ..] locationLines]
-  <> textAt 1286 17 body "500" foreground "JAPANESE PASTRY & WAGASHI · LONDON"
-  <> textAt 1331 18 body "400" foreground "okashi-school.com"
+  <> T.concat [textAt (headlineTop + fromIntegral i * headlineLineHeight) headlineSize display "600" foreground line | (i,line) <- zip [0 :: Int ..] headlineLines]
+  <> qrSvg 520
+  <> T.concat [textAt (925 + fromIntegral i * detailLineHeight) detailSize body "400" foreground line | (i,line) <- zip [0 :: Int ..] detailLines]
+  <> textAt 1294 20 body "400" accent "Okashi School, Japanese pastry & wagashi in London"
+  <> textAt 1332 20 body "400" accent "okashi-school.com"
   <> "</svg>"
   where
     -- SVG paint values must not admit url(...), including local file paints.
@@ -212,35 +204,30 @@ invitationSvg style theme name ticketPrice event (QrMatrix matrix) =
     background = cleanColor "#fff5f3" (themeBg theme)
     accent = cleanColor "#791a3e" (themeAccent theme)
     foreground = cleanColor "#2d2926" (themeFg theme)
-    mast = sanitizeCssValue (themeMastFont theme)
+    -- Three text styles: one headline, one details style, one footer. The
+    -- canonical display/body stacks use Cormorant Garamond and Inter, with
+    -- Noto Serif JP only as their shared Unicode fallback.
     display = sanitizeCssValue (themeDisplayFont theme)
     body = sanitizeCssValue (themeBodyFont theme)
-    recipient = case style of
-      SharedInvitation -> "and " <> name
-      PersonalInvitation -> "Dear " <> name <> ","
-    invitationLine = case style of
-      SharedInvitation -> "invite you to a"
-      PersonalInvitation -> "you are invited to a"
-    nameLines = wrapInvitationName 42 recipient
-    -- The name owns a bounded 135px area; long names wrap and shrink together,
-    -- rather than pushing the QR or the class details off the printed card.
-    nameSize = minimum [62, 820 / maximum (1 : map lineUnits nameLines), 135 / (fromIntegral (max 1 (length nameLines)) * 1.18)]
+    headlineLines = case style of
+      SharedInvitation -> ["Okashi School"] <> wrapInvitationName 36 ("and " <> name <> " invite you") <> ["to a mochi-making class"]
+      PersonalInvitation -> wrapInvitationName 36 ("Dear " <> name <> ",") <> ["you are invited to a", "mochi-making class"]
+    -- Long names wrap within the same headline style. The whole block scales
+    -- together, retaining the sentence's hierarchy and the QR's fixed space.
+    headlineSize = minimum [76, 860 / maximum (1 : map lineUnits headlineLines), 370 / (fromIntegral (max 1 (length headlineLines)) * 1.13)]
     lineUnits = sum . map glyphUnits . T.unpack
     glyphUnits c
       | generalCategory c `elem` [NonSpacingMark, SpacingCombiningMark, EnclosingMark] = 0
       | ord c >= 0x2e80 || c `elem` ("MW@%&—" :: String) = 1
       | c `elem` ("ilIjtfr., '’\x2011-" :: String) = 0.4
-      | otherwise = 0.7
-    nameLineHeight = nameSize * 1.18
-    nameHeight = fromIntegral (max 1 (length nameLines)) * nameLineHeight
-    nameTop = 284 - nameHeight / 2 + nameSize * 0.8
-    eventLines = maybe ["Choose your evening"] (wrapInvitationName 57 . ieDateLabel) event
-    eventTop = 1108
-    locationLines = maybe [] (wrapInvitationName 62 . ieLocation) event
-    locationTop = eventTop + fromIntegral (length eventLines) * 30 + 16
-    locationSize = min 23 ((1238 - locationTop) / (fromIntegral (max 1 (length locationLines)) * 1.3))
-    locationLineHeight = locationSize * 1.3
-    qrSize = 292
+      | otherwise = 0.6
+    headlineLineHeight = headlineSize * 1.13
+    headlineTop = 310 - fromIntegral (length headlineLines - 1) * headlineLineHeight / 2
+    detailLines = ["Scan to book your place", "Ticket price: " <> formatPrice ticketPrice <> " per person", ""]
+      <> maybe ["Choose your evening"] (\v -> wrapInvitationName 57 (ieDateLabel v) <> wrapInvitationName 57 (ieLocation v)) event
+    detailSize = min 29 (310 / (fromIntegral (max 1 (length detailLines - 1)) * 1.4))
+    detailLineHeight = detailSize * 1.4
+    qrSize = 330
     number :: Double -> Text
     number = T.pack . show
     textAt y size family weight fill content = renderHtml $

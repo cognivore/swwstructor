@@ -147,12 +147,12 @@ import Swwstructor.Server.Booking
   , queueTestEmail
   , queueMissingReservationEmails
   , retryReservationEmail
-  , CheckoutHold, HoldState (..), chCode, checkoutSlot, chInvitation, chPriceId, chState, chCreatedAt, chExpiresAt, chSeats
+  , CheckoutHold, HoldState (..), HoldError (HoldConflict), CheckoutRequestVersion (..), chRequestVersion, chCode, checkoutSlot, chInvitation, chPriceId, chState, chCreatedAt, chExpiresAt, chSeats
   , beginCheckoutHold, lookupCheckoutHold, bookingAvailability, holdErrorMessage
   , setPreferredName
   , listPendingCheckoutHolds
   , createInvitation, listInvitations, lookupInvitation, setInvitationEnabled, deleteInvitation
-  , beginInvitationCheckout, listInvitationPurchases, InvitationPurchase (..)
+  , beginInvitationCheckout, availableInvitationSlots, listInvitationPurchases, InvitationPurchase (..)
   )
 import qualified Swwstructor.Server.Invitation as Inv
 import Swwstructor.Server.InvitationStripe (InvitationPrice (..))
@@ -398,6 +398,21 @@ swwApp env = do
   -- no reverse proxy serves them, the deployed template's static assets.
   get "/media/:file" (serveMediaFile env)
   get "/assets/:file" (serveAssetFile env)
+  -- Fixed, same-origin font assets keep private invitation URLs away from
+  -- third-party font services. Versioned names are the entire allowlist.
+  get "/fonts/:file" $ do
+    name <- captureParam "file"
+    if name `elem` (["okashi-cormorant-garamond-v1.ttf", "okashi-inter-v1.ttf", "okashi-noto-serif-jp-v1.ttf"] :: [Text])
+      then do
+        let fontPath = aeDataDir env </> "fonts" </> T.unpack name
+        exists <- liftIO (doesFileExist fontPath)
+        if exists then do
+          setHeader "Content-Type" "font/ttf"
+          setHeader "Cache-Control" "public, max-age=31536000, immutable"
+          setHeader "X-Content-Type-Options" "nosniff"
+          file fontPath
+        else status status404 >> text "Font not found."
+      else status status404 >> text "Font not found."
 
   get "/layout" $ do
     mw <- queryParamMaybe "w"
@@ -1452,12 +1467,15 @@ invitationEventLabel invitation = case Inv.invitationScope invitation of
   Inv.EventTicket slot -> Just (invitationSlotLabel slot)
 
 invitationSlotLabel :: SlotSpec -> Text
-invitationSlotLabel slot = fmtSlotDay (slotDate slot) <> " " <> T.take 4 (slotDate slot) <> " · " <> slotStart slot <> "–" <> slotEnd slot
+invitationSlotLabel slot = fmtSlotDay (slotDate slot) <> " " <> T.take 4 (slotDate slot) <> " at " <> slotStart slot <> "–" <> slotEnd slot
 
 invitationEventInfo :: [Venue] -> Inv.Invitation -> Maybe InvitationEvent
 invitationEventInfo venues invitation = case Inv.invitationScope invitation of
   Inv.GeneralTicket -> Nothing
-  Inv.EventTicket slot -> Just InvitationEvent
+  Inv.EventTicket slot -> Just (invitationSlotInfo venues slot)
+
+invitationSlotInfo :: [Venue] -> SlotSpec -> InvitationEvent
+invitationSlotInfo venues slot = InvitationEvent
     { ieWhen = invitationSlotLabel slot
     , ieVenue = case venueForArea venues (slotArea slot) of
         Just venue | not (T.null (T.strip (vnName venue))) -> T.strip (vnName venue)
@@ -1467,8 +1485,8 @@ invitationEventInfo venues invitation = case Inv.invitationScope invitation of
     }
 
 invitationTierLabel :: Inv.InvitationTier -> Text
-invitationTierLabel Inv.Friend = "Friends and their friends · £65"
-invitationTierLabel Inv.Partner = "Partner / venue · £75 · £5 referral fee"
+invitationTierLabel Inv.Friend = "Friends and their friends — £65"
+invitationTierLabel Inv.Partner = "Partner / venue — £75, including a £5 referral fee"
 
 findPublicInvitation :: AppEnv -> ActionM (Maybe Inv.Invitation)
 findPublicInvitation env = do
@@ -1482,25 +1500,32 @@ handleInvitation env = do
   site <- currentSite env
   case found of
     Nothing -> status status404 >> htmlOf (simplePage (siteTheme site) Nothing "Invitation not found" "Please check the invitation link with the person who shared it.")
-    Just invitation -> do
-      attempt <- ensureBookingAttempt env
-      now <- liftIO getCurrentTime
-      slots <- liftIO (bookingAvailability (aeBookings env) (siteSlots site))
-      venues <- liftIO (listVenues (aeVenues env))
-      let eventAvailable = case Inv.invitationScope invitation of
-            Inv.GeneralTicket -> True
-            Inv.EventTicket saved -> maybe False (\slot -> slotIsUpcoming (aeBookingCtx env) now slot && slotTaken slot < slotCap slot && weeklyAllows (siteMaxWeekly site) slots slot) (slotById slots (slotIdOf saved))
-          available = Inv.invitationEnabled invitation && eventAvailable
-          notice | not (Inv.invitationEnabled invitation) = Just "This invitation is no longer open for new purchases. Tickets already bought are still valid."
-                 | not eventAvailable = Just "This date is no longer available through this invitation. Please ask your host about another date."
-                 | otherwise = Nothing
-          token = Inv.invitationTokenText (Inv.invitationToken invitation)
-      htmlOf (invitationLandingPage (siteTheme site) InvitationLanding
-        { ilInviter = Inv.invitationReferrer invitation, ilPrice = Inv.invitationPrice invitation
-        , ilEvent = invitationEventInfo venues invitation
-        , ilCheckoutAction = "/invite/" <> token <> "/checkout"
-        , ilCsrf = checkoutActionToken env ("invite:" <> token) attempt
-        , ilMessage = notice, ilAvailable = available })
+    Just invitation -> renderInvitation env invitation Nothing
+
+renderInvitation :: AppEnv -> Inv.Invitation -> Maybe Text -> ActionM ()
+renderInvitation env invitation message = do
+  site <- currentSite env
+  attempt <- ensureBookingAttempt env
+  now <- liftIO getCurrentTime
+  venues <- liftIO (listVenues (aeVenues env))
+  let upcoming = filter (slotIsUpcoming (aeBookingCtx env) now) (siteSlots site)
+  offered <- liftIO (availableInvitationSlots (aeBookings env) upcoming (siteMaxWeekly site) (Inv.invitationToken invitation))
+  let choices = either (const []) id offered
+      original = case Inv.invitationScope invitation of
+        Inv.GeneralTicket -> Nothing
+        Inv.EventTicket saved -> Just (slotIdOf saved)
+      enabled = Inv.invitationEnabled invitation
+      notice | not enabled = Just "This invitation is no longer open for new purchases. Tickets already bought are still valid."
+             | Just sid <- original, all ((/= sid) . slotIdOf) choices = Just "This date is no longer available. Your invitation price applies to the dates below."
+             | otherwise = message
+      token = Inv.invitationTokenText (Inv.invitationToken invitation)
+  htmlOf (invitationLandingPage (siteTheme site) InvitationLanding
+    { ilInviter = Inv.invitationReferrer invitation, ilPrice = Inv.invitationPrice invitation
+    , ilEvent = invitationEventInfo venues invitation, ilOriginalSlot = original
+    , ilDates = [(slotIdOf slot, invitationSlotInfo venues slot) | slot <- choices]
+    , ilCheckoutAction = "/invite/" <> token <> "/checkout"
+    , ilCsrf = checkoutActionToken env ("invite:" <> token) attempt
+    , ilMessage = notice, ilAvailable = enabled })
 
 handleInvitationCheckout :: AppEnv -> ActionM ()
 handleInvitationCheckout env = do
@@ -1508,6 +1533,7 @@ handleInvitationCheckout env = do
   found <- findPublicInvitation env
   attempt <- bookingCookieCode env
   csrf <- fromMaybe "" <$> formParamMaybe "csrf"
+  requestedSlot <- formParamMaybe "slot"
   originOk <- csrfFormOrigin env
   case (found, attempt) of
     (Just invitation, Just code)
@@ -1515,7 +1541,8 @@ handleInvitationCheckout env = do
           previous <- liftIO (lookupCheckoutHold (aeBookings env) code)
           case previous of
             Just hold
-              | (Inv.iaInvitationId <$> chInvitation hold) == Just (Inv.invitationId invitation) -> runCheckout (env {aeAnalytics = Nothing}) hold
+              | (Inv.iaInvitationId <$> chInvitation hold) == Just (Inv.invitationId invitation)
+              , requestedSlot == (slotIdOf <$> checkoutSlot hold) || (requestedSlot == Nothing && chRequestVersion hold == CheckoutRequestV1) -> runCheckout (env {aeAnalytics = Nothing}) hold
               | otherwise -> checkoutMessage (env {aeAnalytics = Nothing}) status409 "You already have a checkout open" "Finish or cancel that checkout before starting another purchase." (Just code)
             Nothing -> do
               currentPrice <- liftIO (aeInvitationPrice env (Inv.invitationTier invitation))
@@ -1527,10 +1554,12 @@ handleInvitationCheckout env = do
                   venues <- liftIO (bcVenues (aeBookingCtx env))
                   let slots = [s {slotArea = venueLocation venues (slotArea s)} | s <- siteSlots site, slotIsUpcoming (aeBookingCtx env) now s]
                       expiry = floor (utcTimeToPOSIXSeconds now) + 1860
-                  result <- liftIO (tryStorage (beginInvitationCheckout (aeBookings env) slots (siteMaxWeekly site) code (Inv.invitationToken invitation) (ipId price) (ipProduct price) expiry))
+                  result <- liftIO (tryStorage (beginInvitationCheckout (aeBookings env) slots (siteMaxWeekly site) code (Inv.invitationToken invitation) requestedSlot (ipId price) (ipProduct price) expiry))
                   case result of
                     Left _ -> checkoutMessage (env {aeAnalytics = Nothing}) status503 "Please try again shortly" "We couldn't save your checkout. No payment was started." Nothing
-                    Right (Left err) -> checkoutMessage (env {aeAnalytics = Nothing}) status409 "Invitation unavailable" (holdErrorMessage err) Nothing
+                    Right (Left err) -> status status409 >> renderInvitation env invitation (Just (case err of
+                      HoldConflict -> "That date is no longer available for this invitation. Please choose one of the dates below. No payment was started."
+                      _ -> holdErrorMessage err))
                     Right (Right hold) -> runCheckout (env {aeAnalytics = Nothing}) hold
     _ -> status status403 >> text "Please open the invitation link again and use its checkout button."
 
@@ -1565,7 +1594,7 @@ handleInvitations env message = do
         let purchases = invitationSales invitation sales
         in InvitationRow
           { irName = Inv.invitationReferrer invitation, irTier = invitationTierLabel (Inv.invitationTier invitation)
-          , irScope = fromMaybe "General ticket · choose a date later" (invitationEventLabel invitation)
+          , irScope = fromMaybe "General ticket — choose a date later" (invitationEventLabel invitation)
           , irEnabled = Inv.invitationEnabled invitation, irPurchases = length purchases
           , irGross = sumInvitationMoney ipPaidPrice purchases
           , irFee = sumInvitationMoney (Inv.iaReferralFee . ipAttribution) purchases
@@ -1622,7 +1651,7 @@ handleInvitationDetail env = do
         , isrPrice = ipPaidPrice purchase, isrFee = Inv.iaReferralFee (ipAttribution purchase) }
   htmlOf (invitationDetailPage InvitationDetail
     { idName = Inv.invitationReferrer invitation, idTier = invitationTierLabel (Inv.invitationTier invitation)
-    , idScope = fromMaybe "General ticket · choose a date later" (invitationEventLabel invitation)
+    , idScope = fromMaybe "General ticket — choose a date later" (invitationEventLabel invitation)
     , idEnabled = Inv.invitationEnabled invitation, idShareUrl = invitationUrl env invitation
     , idPngUrl = path <> "/invitation.png", idPdfUrl = path <> "/invitation.pdf"
     , idPersonalPngUrl = path <> "/personal.png", idPersonalPdfUrl = path <> "/personal.pdf"
@@ -1719,7 +1748,7 @@ handleCheckouts env = do
     elAttr "p" [] (elAttr "a" [("href", "/admin/bookings"), ("class", "sww-link")] (esc "Back to bookings")))
   where
     entry now hold = elAttr "div" [("style", "border-top:1px solid;padding:1rem 0")] $
-      para (chCode hold <> " · " <> maybe "Transferable ticket" slotLabel (checkoutSlot hold) <> " · " <> chSeats hold <> " place(s)") <>
+      para (chCode hold <> ": " <> maybe "Transferable ticket" slotLabel (checkoutSlot hold) <> ", " <> chSeats hold <> " place(s)") <>
       para ("Started: " <> chCreatedAt hold <> ". Stripe price: " <> chPriceId hold <> ".") <>
       para (case chState hold of
         HoldCreating | now > chExpiresAt hold + 22 * 3600 -> "Operator action required: checkout creation is unresolved beyond its safe retry window. Check Stripe using this ticket reference before releasing capacity; do not create a replacement purchase."

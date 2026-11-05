@@ -233,7 +233,7 @@ headContent th an title =
         ]
 
 footerHtml :: Maybe Text -> Html
-footerHtml Nothing = elAttr "footer" [("class", "sww-footer")] (esc "made with swwstructor \xB7 the stickywebwm layout engine")
+footerHtml Nothing = elAttr "footer" [("class", "sww-footer")] (esc "made with swwstructor and the stickywebwm layout engine")
 footerHtml (Just "") = mempty
 footerHtml (Just t) = elAttr "footer" [("class", "sww-footer")] (esc t)
 

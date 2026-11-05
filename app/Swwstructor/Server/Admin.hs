@@ -233,7 +233,7 @@ ix listName i f = listName <> "-" <> T.pack (show i) <> "-" <> f
 
 adminLoginPage :: Theme -> Maybe Text -> Html
 adminLoginPage _ merr =
-  adminDoc "swwstructor admin \xB7 sign in" $
+  adminDoc "swwstructor admin — sign in" $
     elAttr "div" [("class", "wrap"), ("style", "max-width:420px;margin-top:8vh")] $
       elAttr "div" [("class", "card")] $
         htmlConcat
@@ -390,8 +390,8 @@ templatePage site fl =
     partialRow p =
       let nm = partialName p
           auto
-            | nm == "header" = "  \xB7  auto: top of every page"
-            | nm == "footer" = "  \xB7  auto: bottom of every page"
+            | nm == "header" = " — auto: top of every page"
+            | nm == "footer" = " — auto: bottom of every page"
             | otherwise = ""
        in elAttr "div" [("class", "sec")] $
             htmlConcat
@@ -426,7 +426,7 @@ sectionSummary s = case s of
   FooterBand t -> t
   IncludePartial nm -> "Include: " <> (if T.null nm then "(choose a partial)" else nm)
   where
-    headlines = T.intercalate " \xB7 " . map storyHeadline . take 2
+    headlines = T.intercalate " / " . map storyHeadline . take 2
 
 -- ---------------------------------------------------------------------------
 -- Section form (per kind)
@@ -891,7 +891,7 @@ bookingsPage tickets slots bundle emails csrf fl =
     retryButton d = elAttr "form" [("method", "post"), ("action", "/admin/reservation-emails/retry")] $
       csrfField <> hidden "delivery" (deliveryId d) <> elAttr "button" [("type", "submit")] (esc "Retry email")
     slotLabelOf sid = case [s | s <- slots, slotIdOf s == sid] of
-      (s : _) -> fmtSlotDay (slotDate s) <> " " <> slotStart s <> "\x2013" <> slotEnd s <> " \xB7 " <> slotArea s
+      (s : _) -> fmtSlotDay (slotDate s) <> " " <> slotStart s <> "\x2013" <> slotEnd s <> ", " <> slotArea s
       [] -> sid <> " (slot no longer defined)"
     slotsCard =
       elAttr "div" [("class", "card")] $
@@ -923,7 +923,7 @@ bookingsPage tickets slots bundle emails csrf fl =
           <> el "td" (esc (tkProduct t))
           <> el "td" (case tkRedemption t of
                         Nothing -> elAttr "span" [("class", "pill off")] (esc "not scheduled")
-                        Just r -> esc (redName r <> " \xB7 " <> slotLabelOf (redSlotId r)))
+                        Just r -> esc (redName r <> " — " <> slotLabelOf (redSlotId r)))
           <> el "td" (case tkRedemption t >>= redEventId of
                         Just _ -> elAttr "span" [("class", "pill on")] (esc "invited")
                         Nothing
@@ -987,7 +987,7 @@ venuesPage noun venues areas fl =
       | otherwise =
           elAttr "div" [("class", "card")] $
             el "h3" (esc "Areas currently on offer")
-              <> elAttr "p" [("class", "muted")] (esc (T.intercalate "  \xB7  " areas) <> esc ("  \x2014 a " <> noun <> "'s \x201CArea\x201D must match one of these exactly for automatic announcements."))
+              <> elAttr "p" [("class", "muted")] (esc (T.intercalate ", " areas) <> esc ("  \x2014 a " <> noun <> "'s \x201CArea\x201D must match one of these exactly for automatic announcements."))
     venueCard v =
       elAttr "div" [("class", "card")] $
         elAttr "form" [("method", "post"), ("action", "/admin/venues/save")] (
@@ -1095,7 +1095,7 @@ mediaLibraryPage entries builtins fl =
        in elAttr "div" [("class", "mediacard")] $
             htmlConcat
               [ elAttr "a" [("href", url), ("target", "_blank")] (voidElAttr "img" [("src", url), ("loading", "lazy"), ("alt", meName e)])
-              , elAttr "div" [("class", "meta")] (elAttr "code" [] (esc (meName e)) <> esc (" \xB7 " <> fmtBytes (meBytes e)))
+              , elAttr "div" [("class", "meta")] (elAttr "code" [] (esc (meName e)) <> esc (", " <> fmtBytes (meBytes e)))
               , elAttr "div" [("class", "bar")] $
                   elAttr "button" [("type", "button"), ("data-copy", url)] (esc "Copy URL")
                     <> ( if deletable
