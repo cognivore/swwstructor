@@ -151,15 +151,15 @@ import Swwstructor.Server.Booking
   , beginCheckoutHold, lookupCheckoutHold, bookingAvailability, holdErrorMessage
   , setPreferredName
   , listPendingCheckoutHolds
-  , createInvitation, listInvitations, lookupInvitation, setInvitationEnabled
+  , createInvitation, listInvitations, lookupInvitation, setInvitationEnabled, deleteInvitation
   , beginInvitationCheckout, listInvitationPurchases, InvitationPurchase (..)
   )
 import qualified Swwstructor.Server.Invitation as Inv
 import Swwstructor.Server.InvitationStripe (InvitationPrice (..))
 import Swwstructor.Server.InvitationArtwork
-  ( ArtworkRenderer, ArtifactFormat (..), renderInvitationArtifact )
+  ( ArtworkRenderer, ArtifactFormat (..), InvitationStyle (..), InvitationEventDetails (..), renderInvitationArtifact )
 import Swwstructor.Server.InvitationView
-  ( InvitationLanding (..), InvitationRow (..), InvitationDetail (..), InvitationSaleRow (..)
+  ( InvitationLanding (..), InvitationEvent (..), InvitationRow (..), InvitationDetail (..), InvitationSaleRow (..)
   , invitationLandingPage, invitationsPage, invitationDetailPage )
 import Swwstructor.Server.ReservationEmail (parseRecipients, parseMailbox)
 import Swwstructor.Server.Media (deleteMedia, listAssets, listMedia, resolveMedia, saveMedia)
@@ -174,7 +174,7 @@ import Swwstructor.Server.Notify
   , siteSlots
   )
 import Swwstructor.Server.Venues
-  ( Venue (Venue, vnMapUrl)
+  ( Venue (Venue, vnName, vnMapUrl)
   , VenueStore
   , deleteVenue
   , listVenues
@@ -449,8 +449,11 @@ swwApp env = do
   post "/admin/invitations" (invitationAdminGate env (handleInvitationCreate env))
   get "/admin/invitations/:id" (adminGate env (handleInvitationDetail env))
   post "/admin/invitations/:id/enabled" (invitationAdminGate env (handleInvitationEnabled env))
-  get "/admin/invitations/:id/invitation.png" (adminGate env (handleInvitationArtifact env ArtifactPng))
-  get "/admin/invitations/:id/invitation.pdf" (adminGate env (handleInvitationArtifact env ArtifactPdf))
+  post "/admin/invitations/:id/delete" (invitationAdminGate env (handleInvitationDelete env))
+  get "/admin/invitations/:id/invitation.png" (adminGate env (handleInvitationArtifact env ArtifactPng SharedInvitation))
+  get "/admin/invitations/:id/invitation.pdf" (adminGate env (handleInvitationArtifact env ArtifactPdf SharedInvitation))
+  get "/admin/invitations/:id/personal.png" (adminGate env (handleInvitationArtifact env ArtifactPng PersonalInvitation))
+  get "/admin/invitations/:id/personal.pdf" (adminGate env (handleInvitationArtifact env ArtifactPdf PersonalInvitation))
   post "/admin/site" (adminGate env (handleSiteMeta env))
   post "/admin/page/new" (adminGate env (handlePageNew env))
   post "/admin/page/delete" (adminGate env (handlePageDelete env))
@@ -1446,7 +1449,22 @@ invitationPath invitation = "/admin/invitations/" <> Inv.invitationIdText (Inv.i
 invitationEventLabel :: Inv.Invitation -> Maybe Text
 invitationEventLabel invitation = case Inv.invitationScope invitation of
   Inv.GeneralTicket -> Nothing
-  Inv.EventTicket slot -> Just (fmtSlotDay (slotDate slot) <> " " <> T.take 4 (slotDate slot) <> " · " <> slotStart slot <> "–" <> slotEnd slot)
+  Inv.EventTicket slot -> Just (invitationSlotLabel slot)
+
+invitationSlotLabel :: SlotSpec -> Text
+invitationSlotLabel slot = fmtSlotDay (slotDate slot) <> " " <> T.take 4 (slotDate slot) <> " · " <> slotStart slot <> "–" <> slotEnd slot
+
+invitationEventInfo :: [Venue] -> Inv.Invitation -> Maybe InvitationEvent
+invitationEventInfo venues invitation = case Inv.invitationScope invitation of
+  Inv.GeneralTicket -> Nothing
+  Inv.EventTicket slot -> Just InvitationEvent
+    { ieWhen = invitationSlotLabel slot
+    , ieVenue = case venueForArea venues (slotArea slot) of
+        Just venue | not (T.null (T.strip (vnName venue))) -> T.strip (vnName venue)
+        _ -> slotArea slot
+    , ieWhere = T.unwords (T.words (venueLocation venues (slotArea slot)))
+    , ieDescription = markdownPlain (slotDescription slot)
+    }
 
 invitationTierLabel :: Inv.InvitationTier -> Text
 invitationTierLabel Inv.Friend = "Friends and their friends · £65"
@@ -1468,6 +1486,7 @@ handleInvitation env = do
       attempt <- ensureBookingAttempt env
       now <- liftIO getCurrentTime
       slots <- liftIO (bookingAvailability (aeBookings env) (siteSlots site))
+      venues <- liftIO (listVenues (aeVenues env))
       let eventAvailable = case Inv.invitationScope invitation of
             Inv.GeneralTicket -> True
             Inv.EventTicket saved -> maybe False (\slot -> slotIsUpcoming (aeBookingCtx env) now slot && slotTaken slot < slotCap slot && weeklyAllows (siteMaxWeekly site) slots slot) (slotById slots (slotIdOf saved))
@@ -1478,7 +1497,7 @@ handleInvitation env = do
           token = Inv.invitationTokenText (Inv.invitationToken invitation)
       htmlOf (invitationLandingPage (siteTheme site) InvitationLanding
         { ilInviter = Inv.invitationReferrer invitation, ilPrice = Inv.invitationPrice invitation
-        , ilEvent = invitationEventLabel invitation
+        , ilEvent = invitationEventInfo venues invitation
         , ilCheckoutAction = "/invite/" <> token <> "/checkout"
         , ilCsrf = checkoutActionToken env ("invite:" <> token) attempt
         , ilMessage = notice, ilAvailable = available })
@@ -1606,7 +1625,8 @@ handleInvitationDetail env = do
     , idScope = fromMaybe "General ticket · choose a date later" (invitationEventLabel invitation)
     , idEnabled = Inv.invitationEnabled invitation, idShareUrl = invitationUrl env invitation
     , idPngUrl = path <> "/invitation.png", idPdfUrl = path <> "/invitation.pdf"
-    , idDisableAction = path <> "/enabled", idCsrf = invitationCsrf env epoch
+    , idPersonalPngUrl = path <> "/personal.png", idPersonalPdfUrl = path <> "/personal.pdf"
+    , idDisableAction = path <> "/enabled", idDeleteAction = path <> "/delete", idCsrf = invitationCsrf env epoch
     , idPurchases = length purchases, idGross = sumInvitationMoney ipPaidPrice purchases
     , idFee = sumInvitationMoney (Inv.iaReferralFee . ipAttribution) purchases
     , idSales = map saleRow (reverse purchases) } Nothing)
@@ -1623,19 +1643,31 @@ handleInvitationEnabled env = do
         _ -> status status503 >> text "The invitation could not be changed. Please try again."
     _ -> status status400 >> text "Choose whether this invitation is enabled."
 
-handleInvitationArtifact :: AppEnv -> ArtifactFormat -> ActionM ()
-handleInvitationArtifact env format = do
+handleInvitationDelete :: AppEnv -> ActionM ()
+handleInvitationDelete env = do
+  invitation <- findAdminInvitation env
+  result <- liftIO (tryStorage (deleteInvitation (aeBookings env) (Inv.invitationId invitation)))
+  case result of
+    Right (Right ()) -> status status303 >> setHeader "Location" "/admin/invitations"
+    Right (Left failure) -> status status400 >> handleInvitations env (Just (Inv.invitationErrorMessage failure))
+    Left _ -> status status503 >> text "The invitation could not be deleted. Please try again."
+
+handleInvitationArtifact :: AppEnv -> ArtifactFormat -> InvitationStyle -> ActionM ()
+handleInvitationArtifact env format style = do
   invitationHeaders
   invitation <- findAdminInvitation env
   site <- currentSite env
-  result <- liftIO (renderInvitationArtifact (aeInvitationArtwork env) format (siteTheme site)
-    (Inv.invitationReferrer invitation) (invitationUrl env invitation) (invitationEventLabel invitation))
+  venues <- liftIO (listVenues (aeVenues env))
+  let event = (\details -> InvitationEventDetails (ieWhen details) (ieWhere details)) <$> invitationEventInfo venues invitation
+  result <- liftIO (renderInvitationArtifact (aeInvitationArtwork env) format style (siteTheme site)
+    (Inv.invitationReferrer invitation) (invitationUrl env invitation) event)
   case result of
     Left _ -> status status503 >> text "The invitation download is temporarily unavailable. Please try again shortly."
     Right bytes -> do
       let (mime, extension) = case format of ArtifactPng -> ("image/png", ".png"); ArtifactPdf -> ("application/pdf", ".pdf")
+          styleName = case style of SharedInvitation -> "-shared"; PersonalInvitation -> "-personal"
       setHeader "Content-Type" mime
-      setHeader "Content-Disposition" ("attachment; filename=\"okashi-" <> TL.fromStrict (Inv.invitationIdText (Inv.invitationId invitation)) <> extension <> "\"")
+      setHeader "Content-Disposition" ("attachment; filename=\"okashi-" <> TL.fromStrict (Inv.invitationIdText (Inv.invitationId invitation)) <> styleName <> extension <> "\"")
       raw (BL.fromStrict bytes)
 
 adminGate :: AppEnv -> ActionM () -> ActionM ()

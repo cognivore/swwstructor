@@ -6,6 +6,8 @@
 module Swwstructor.Server.InvitationArtwork
   ( ArtworkRenderer
   , ArtifactFormat (..)
+  , InvitationStyle (..)
+  , InvitationEventDetails (..)
   , ArtworkError (..)
   , newArtworkRenderer
   , renderInvitationArtifact
@@ -33,6 +35,15 @@ import System.Process (readProcessWithExitCode)
 import System.Timeout (timeout)
 
 data ArtifactFormat = ArtifactPng | ArtifactPdf deriving (Eq, Show)
+
+-- The same invitation link can be shared by a co-host or addressed personally.
+-- Style changes presentation only; it never changes the offer or QR payload.
+data InvitationStyle = SharedInvitation | PersonalInvitation deriving (Eq, Show)
+
+data InvitationEventDetails = InvitationEventDetails
+  { ieDateLabel :: Text
+  , ieLocation :: Text
+  } deriving (Eq, Show)
 
 -- No input names, tokens, command arguments or converter stderr are retained:
 -- those may disclose the bearer link. These constructors retain the safe
@@ -75,8 +86,8 @@ parseQrMatrix encoded
 -- | One export may run at a time; public request pressure cannot create an
 -- unbounded converter queue. All mutable file/process work lives here, while
 -- the presentation below is a pure value interpreter.
-renderInvitationArtifact :: ArtworkRenderer -> ArtifactFormat -> Theme -> Text -> Text -> Maybe Text -> IO (Either ArtworkError ByteString)
-renderInvitationArtifact (ArtworkRenderer dir gate) format theme name url event =
+renderInvitationArtifact :: ArtworkRenderer -> ArtifactFormat -> InvitationStyle -> Theme -> Text -> Text -> Maybe InvitationEventDetails -> IO (Either ArtworkError ByteString)
+renderInvitationArtifact (ArtworkRenderer dir gate) format style theme name url event =
   case admissible of
     Left err -> pure (Left err)
     Right () -> do
@@ -88,8 +99,9 @@ renderInvitationArtifact (ArtworkRenderer dir gate) format theme name url event 
     admissible
       | T.null (T.strip name) || T.length name > 100 || T.any isControl name = Left (ArtworkInvalidInput "Inviter name must contain 1 to 100 visible characters")
       | BS.length (TE.encodeUtf8 url) > 1024 || T.any isControl url || not ("https://" `T.isPrefixOf` url || "http://" `T.isPrefixOf` url) = Left (ArtworkInvalidInput "Invitation URL must be a bounded absolute HTTP URL")
-      | maybe False (\v -> T.length v > 100 || T.any isControl v) event = Left (ArtworkInvalidInput "Event label must contain at most 100 visible characters")
+      | maybe False (\v -> invalidText 100 (ieDateLabel v) || invalidText 400 (ieLocation v)) event = Left (ArtworkInvalidInput "Event date and location must contain 1 to 100 and 1 to 400 visible characters respectively")
       | otherwise = Right ()
+    invalidText limit value = T.null (T.strip value) || T.length value > limit || T.any isControl value
     export = do
       qr <- runTool "qrencode" ["-t", "ASCII", "-m", "0", "-l", "M", "-o", "-"] (T.unpack url)
       case qr >>= parseQrMatrix . T.pack of
@@ -103,7 +115,7 @@ renderInvitationArtifact (ArtworkRenderer dir gate) format theme name url event 
                     _ <- try (hClose handle) :: IO (Either IOException ())
                     _ <- try (removeFile path) :: IO (Either IOException ())
                     pure ()
-              result <- (hClose handle >> renderTo path (invitationSvg theme name event matrix)) `onException` abandon
+              result <- (hClose handle >> renderTo path (invitationSvg style theme name event matrix)) `onException` abandon
               cleaned <- try (removeFile path)
               pure $ case cleaned of
                 Left (_ :: IOException) -> Left (ArtworkCleanupFailed (either Just (const Nothing) result))
@@ -125,8 +137,8 @@ renderInvitationArtifact (ArtworkRenderer dir gate) format theme name url event 
           pure $ either (\(_ :: IOException) -> Left (ArtworkFileFailure "Could not read the completed invitation export")) id loaded
     extension = case format of ArtifactPng -> "png"; ArtifactPdf -> "pdf"
     dimensions = case format of
-      ArtifactPng -> ["--width", "2100", "--height", "2980"]
-      ArtifactPdf -> ["--width", "148mm", "--height", "210mm", "--page-width", "148mm", "--page-height", "210mm"]
+      ArtifactPng -> ["--width", "1575", "--height", "2220"]
+      ArtifactPdf -> ["--width", "105mm", "--height", "148mm", "--page-width", "105mm", "--page-height", "148mm"]
     signature = case format of
       ArtifactPng -> BS.pack [137,80,78,71,13,10,26,10]
       ArtifactPdf -> "%PDF-"
@@ -170,22 +182,23 @@ wrapInvitationName cells input = finish (foldl addWord ([], "", 0) pieces)
       Just (c, _) | ord c >= 0x2e80 -> 2
       Just _ -> 1
 
-invitationSvg :: Theme -> Text -> Maybe Text -> QrMatrix -> Text
-invitationSvg theme name event (QrMatrix matrix) =
-  "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"148mm\" height=\"210mm\" viewBox=\"0 0 1050 1490\">"
-  <> "<rect width=\"1050\" height=\"1490\" fill=\"" <> background <> "\"/>"
-  <> "<rect x=\"38\" y=\"38\" width=\"974\" height=\"1414\" fill=\"none\" stroke=\"" <> accent <> "\" stroke-width=\"2\"/>"
-  <> textAt 150 74 mast "600" "Okashi School"
-  <> textAt 202 16 body "500" "JAPANESE PASTRY & WAGASHI · LONDON"
-  <> "<path d=\"M110 245 H940\" stroke=\"" <> accent <> "\" stroke-width=\"2\"/>"
-  <> textAt (start + 28) 32 display "500" "and"
-  <> T.concat [textAt (start + 94 + fromIntegral i * nameLineHeight) nameSize display "600" line | (i,line) <- zip [0 :: Int ..] nameLines]
-  <> qrSvg qrTop
-  <> textAt (copyY) 36 display "500" "invite you to a"
-  <> textAt (copyY + 62) 57 display "600" "mochi-making class"
-  <> T.concat [textAt (copyY + 119 + fromIntegral i * 31) 22 body "500" line | (i,line) <- zip [0 :: Int ..] eventLines]
-  <> textAt (copyY + 126 + eventHeight) 19 body "500" "Scan the code to accept your invitation"
-  <> textAt 1403 16 body "500" "okashi-school.com"
+invitationSvg :: InvitationStyle -> Theme -> Text -> Maybe InvitationEventDetails -> QrMatrix -> Text
+invitationSvg style theme name event (QrMatrix matrix) =
+  "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"105mm\" height=\"148mm\" viewBox=\"0 0 1050 1480\">"
+  <> "<rect width=\"1050\" height=\"1480\" fill=\"" <> background <> "\"/>"
+  <> "<path d=\"M72 72 H978 M72 1408 H978\" stroke=\"" <> accent <> "\" stroke-width=\"2\"/>"
+  <> textAt 179 77 mast "600" foreground "Okashi School"
+  <> T.concat [textAt (nameTop + fromIntegral i * nameLineHeight) nameSize display "500" foreground line | (i,line) <- zip [0 :: Int ..] nameLines]
+  <> "<path d=\"M460 378 H590\" stroke=\"" <> accent <> "\" stroke-width=\"2\"/>"
+  <> qrSvg 424
+  <> textAt 759 18 body "500" accent "SCAN TO ACCEPT YOUR INVITATION"
+  <> textAt 857 39 display "500" foreground invitationLine
+  <> textAt 946 83 display "600" foreground "mochi-making"
+  <> textAt 1020 83 display "600" foreground "class"
+  <> T.concat [textAt (eventTop + fromIntegral i * 30) 24 body "500" accent line | (i,line) <- zip [0 :: Int ..] eventLines]
+  <> T.concat [textAt (locationTop + fromIntegral i * locationLineHeight) locationSize body "400" foreground line | (i,line) <- zip [0 :: Int ..] locationLines]
+  <> textAt 1286 17 body "500" foreground "JAPANESE PASTRY & WAGASHI · LONDON"
+  <> textAt 1331 18 body "400" foreground "okashi-school.com"
   <> "</svg>"
   where
     -- SVG paint values must not admit url(...), including local file paints.
@@ -200,27 +213,36 @@ invitationSvg theme name event (QrMatrix matrix) =
     mast = sanitizeCssValue (themeMastFont theme)
     display = sanitizeCssValue (themeDisplayFont theme)
     body = sanitizeCssValue (themeBodyFont theme)
-    -- With a 100-character admission bound even the widest Unicode name fits
-    -- in at most eight 30-cell lines at 34px. Short names keep the large serif.
-    nameLines = wrapInvitationName 30 name
-    -- One em per codepoint is conservative for the packaged faces, including
-    -- long all-capital Latin names. Combining marks do not increase width.
-    nameSize = min preferredSize (820 / fromIntegral (maximum (1 : map visibleLength nameLines)))
-    preferredSize = if length nameLines <= 2 then 52 else if length nameLines <= 4 then 42 else 34
-    visibleLength = T.length . T.filter (\c -> generalCategory c `notElem` [NonSpacingMark, SpacingCombiningMark, EnclosingMark])
-    nameLineHeight = nameSize + 7
+    recipient = case style of
+      SharedInvitation -> "and " <> name
+      PersonalInvitation -> "Dear " <> name <> ","
+    invitationLine = case style of
+      SharedInvitation -> "invite you to a"
+      PersonalInvitation -> "you are invited to a"
+    nameLines = wrapInvitationName 42 recipient
+    -- The name owns a bounded 135px area; long names wrap and shrink together,
+    -- rather than pushing the QR or the class details off the printed card.
+    nameSize = minimum [62, 820 / maximum (1 : map lineUnits nameLines), 135 / (fromIntegral (max 1 (length nameLines)) * 1.18)]
+    lineUnits = sum . map glyphUnits . T.unpack
+    glyphUnits c
+      | generalCategory c `elem` [NonSpacingMark, SpacingCombiningMark, EnclosingMark] = 0
+      | ord c >= 0x2e80 || c `elem` ("MW@%&—" :: String) = 1
+      | c `elem` ("ilIjtfr., '’\x2011-" :: String) = 0.4
+      | otherwise = 0.7
+    nameLineHeight = nameSize * 1.18
     nameHeight = fromIntegral (max 1 (length nameLines)) * nameLineHeight
-    eventLines = maybe [] (wrapInvitationName 57) event
-    eventHeight = if null eventLines then 0 else 45 + fromIntegral (length eventLines - 1) * 31
-    qrSize = max 280 (min 400 (620 - nameHeight - eventHeight))
-    blockHeight = 94 + nameHeight + 22 + qrSize + 58 + 126 + eventHeight
-    start = max 275 ((280 + 1320 - blockHeight) / 2)
-    qrTop = start + 94 + nameHeight + 22
-    copyY = qrTop + qrSize + 58
+    nameTop = 284 - nameHeight / 2 + nameSize * 0.8
+    eventLines = maybe ["Choose your evening"] (wrapInvitationName 57 . ieDateLabel) event
+    eventTop = 1108
+    locationLines = maybe [] (wrapInvitationName 62 . ieLocation) event
+    locationTop = eventTop + fromIntegral (length eventLines) * 30 + 16
+    locationSize = min 23 ((1238 - locationTop) / (fromIntegral (max 1 (length locationLines)) * 1.3))
+    locationLineHeight = locationSize * 1.3
+    qrSize = 292
     number :: Double -> Text
     number = T.pack . show
-    textAt y size family weight content = renderHtml $
-      elAttr "text" [("x","525"),("y",number y),("text-anchor","middle"),("font-family",family),("font-size",number size),("font-weight",weight),("fill",foreground)] (esc content)
+    textAt y size family weight fill content = renderHtml $
+      elAttr "text" [("x","525"),("y",number y),("text-anchor","middle"),("font-family",family),("font-size",number size),("font-weight",weight),("fill",fill)] (esc content)
     side = length matrix
     scale = qrSize / fromIntegral (side + 8) :: Double
     qrSvg y = "<g transform=\"translate(" <> number ((1050-qrSize)/2) <> " " <> number y <> ") scale(" <> number scale <> ")\">"

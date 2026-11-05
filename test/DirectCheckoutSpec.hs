@@ -339,8 +339,10 @@ exercise dir = do
   -- Exercise the real invitation HTTP journey, including admin authority,
   -- reusable friend links, event admission and paid-sale attribution.
   deniedAdmin <- get "/admin/invitations"
-  deniedExport <- get "/admin/invitations/iv_0000000000000000/invitation.pdf"
-  check "invitation registry and exports require admin login" (status deniedAdmin == 302 && status deniedExport == 302)
+  deniedExports <- traverse (get . ("/admin/invitations/iv_0000000000000000/" <>)) ["invitation.pdf", "invitation.png", "personal.pdf", "personal.png"]
+  deniedDelete <- request methodPost "/admin/invitations/iv_0000000000000000/delete" [(hContentType, "application/x-www-form-urlencoded")] (form [("csrf", "wrong")])
+  check "invitation registry, both export styles and deletion require admin login"
+    (status deniedAdmin == 302 && all ((== 302) . status) deniedExports && status deniedDelete == 302)
   login <- request methodPost "/admin/login" [(hContentType, "application/x-www-form-urlencoded")] (form [("password", "fixture-password")])
   let adminCookie = maybe "" (BC.takeWhile (/= ';')) (lookup "Set-Cookie" (simpleHeaders login))
       adminGet p = request methodGet p [("Cookie", adminCookie)] ""
@@ -368,9 +370,50 @@ exercise dir = do
         , ("metadata", JObj [("sww_code", JStr (T.unpack code)), ("sww_flow", JStr "invitation")])])
   badAdmin <- adminPost "/admin/invitations" [("csrf", "wrong"), ("name", "Invalid"), ("tier", "friend"), ("scope", "general")]
   check "invitation creation needs CSRF and makes no row on failure" (status badAdmin == 403)
+
+  -- Exercise permanent deletion through the authenticated route, rather than
+  -- relying on a hidden button to protect enabled or previously used links.
+  unusedInvite <- createInvite "UnusedInvitation" "friend" "general" ""
+  let unusedAdminPath = "/admin/invitations/" <> Inv.invitationIdText (Inv.invitationId unusedInvite)
+      unusedDeletePath = TE.encodeUtf8 (unusedAdminPath <> "/delete")
+      unusedPublicPath = TE.encodeUtf8 ("/invite/" <> Inv.invitationTokenText (Inv.invitationToken unusedInvite))
+  unusedDetail <- adminGet (TE.encodeUtf8 unusedAdminPath)
+  check "invitation detail offers shared and personal PDF cards"
+    (all (`T.isInfixOf` textOf unusedDetail) ["href=\"" <> unusedAdminPath <> "/invitation.pdf\"", "href=\"" <> unusedAdminPath <> "/personal.pdf\""])
+  activeSnapshot <- BS.readFile (dir </> "bookings.json")
+  unauthenticatedDelete <- request methodPost unusedDeletePath [(hContentType, "application/x-www-form-urlencoded")] (form [("csrf", adminCsrf)])
+  check "knowing a delete URL and CSRF token cannot replace admin authentication" (status unauthenticatedDelete == 302)
+  activeDelete <- adminPost unusedDeletePath [("csrf", adminCsrf)]
+  check "a forged delete request for an enabled invitation is refused" (status activeDelete == 400)
+  check "unauthenticated and enabled-link deletion leave all records unchanged" . (== activeSnapshot) =<< BS.readFile (dir </> "bookings.json")
+  disabledUnused <- adminPost (TE.encodeUtf8 (unusedAdminPath <> "/enabled")) [("csrf", adminCsrf), ("enabled", "no")]
+  check "an unused invitation can be disabled before deletion" (status disabledUnused == 303)
+  disabledSnapshot <- BS.readFile (dir </> "bookings.json")
+  deleteWithoutCsrf <- adminPost unusedDeletePath [("csrf", "wrong")]
+  foreignDelete <- request methodPost unusedDeletePath
+    [("Cookie", adminCookie), ("Origin", "https://elsewhere.example"), (hContentType, "application/x-www-form-urlencoded")]
+    (form [("csrf", adminCsrf)])
+  check "permanent deletion rejects invalid CSRF and explicit foreign origins"
+    (status deleteWithoutCsrf == 403 && status foreignDelete == 403)
+  check "rejected delete authority cannot change even an eligible invitation" . (== disabledSnapshot) =<< BS.readFile (dir </> "bookings.json")
+  deletedUnused <- adminPost unusedDeletePath [("csrf", adminCsrf)]
+  check "a valid disabled unused invitation delete returns to the registry"
+    (status deletedUnused == 303 && lookup hLocation (simpleHeaders deletedUnused) == Just "/admin/invitations")
+  check "permanently deleted invitation disappears from the registry" . (== Nothing) =<< lookupInvitation bookings (Inv.invitationToken unusedInvite)
+  registryAfterDelete <- adminGet "/admin/invitations"
+  check "deleted invitation is absent from the admin list"
+    (status registryAfterDelete == 200 && not (unusedAdminPath `T.isInfixOf` textOf registryAfterDelete))
+  absentDetail <- adminGet (TE.encodeUtf8 unusedAdminPath)
+  absentPublic <- get unusedPublicPath
+  absentExports <- traverse (adminGet . TE.encodeUtf8 . (unusedAdminPath <>) . ("/" <>)) ["invitation.pdf", "personal.pdf"]
+  check "deleted invitation detail, public link and both PDF routes are gone"
+    (status absentDetail == 404 && status absentPublic == 404 && all ((== 404) . status) absentExports)
+
   partnerInvite <- createInvite "Partner" "partner" "general" ""
   (partnerPath, partnerPage, partnerCookie) <- openInvite partnerInvite
   check "general invitation explains choosing a date later and displays £75" ("75" `T.isInfixOf` textOf partnerPage && "date" `T.isInfixOf` textOf partnerPage)
+  check "a general invitation does not promise a particular venue or address"
+    (not ("UKIYO" `T.isInfixOf` textOf partnerPage) && not ("class=\"invitation-location\"" `T.isInfixOf` textOf partnerPage))
   badCsrf <- request methodPost (TE.encodeUtf8 (partnerPath <> "/checkout")) [("Cookie", partnerCookie), (hContentType, "application/x-www-form-urlencoded")] (form [("csrf", "wrong")])
   check "invitation checkout needs its own attempt-bound CSRF" (status badCsrf == 403)
   partnerBought <- buyInvite partnerPath partnerPage partnerCookie [("price", "price_friend"), ("amount", "1"), ("tier", "friend"), ("slot", slotIdOf later)]
@@ -399,8 +442,18 @@ exercise dir = do
   check "later gift redemption and delayed payment replay remain compatible" (status redeemedInvite == 303 && status replayGeneral == 200)
 
   friendInvite <- createInvite "Momo" "friend" "event" (slotIdOf later)
+  savedFriendSnapshot <- BS.readFile (dir </> "bookings.json")
+  -- Venue details may be completed after a link has already been shared.
+  upsertVenue venues (Venue "ukiyo" "UKIYO" "8 Slingsby Place, London WC2E 9AB" "Ukiyo, Covent Garden" "" "" True)
   (friendPath, friendPage, friendCookie) <- openInvite friendInvite
-  check "reusable event invitation includes its year" ("2030" `T.isInfixOf` textOf friendPage)
+  check "event invitation names its venue and gives the complete address"
+    (all (`T.isInfixOf` textOf friendPage) ["learn mochi making at UKIYO", "UKIYO, 8 Slingsby Place, London WC2E 9AB"])
+  check "event invitation displays the date, year, time and authored class description"
+    (all (`T.isInfixOf` textOf friendPage) ["Wed 9 Jan 2030", "19:00–21:00", slotDescription later])
+  check "venue enrichment keeps the saved private URL and checkout action"
+    (friendPath == "/invite/" <> Inv.invitationTokenText (Inv.invitationToken friendInvite) &&
+     ("action=\"" <> friendPath <> "/checkout\"") `T.isInfixOf` textOf friendPage)
+  check "rendering venue details does not rewrite the saved invitation token or terms" . (== savedFriendSnapshot) =<< BS.readFile (dir </> "bookings.json")
   friendBought <- buyInvite friendPath friendPage friendCookie []
   check "event invitation goes directly to the chosen class payment" (status friendBought == 303)
   let friendCode = codeOf friendCookie
@@ -430,10 +483,17 @@ exercise dir = do
   check "cancelling from original browser returns to its invitation" (status cancelledInvite == 303 && lookup hLocation (simpleHeaders cancelledInvite) == Just (TE.encodeUtf8 friendPath))
   bareCode <- get (path "/checkout/" reusedCode "")
   check "short checkout code does not reveal the reusable invitation capability" (not (Inv.invitationTokenText (Inv.invitationToken friendInvite) `T.isInfixOf` textOf bareCode))
+  _ <- adminPost (TE.encodeUtf8 (friendAdminPath <> "/enabled")) [("csrf", adminCsrf), ("enabled", "no")]
+  historySnapshot <- BS.readFile (dir </> "bookings.json")
+  referencedDelete <- adminPost (TE.encodeUtf8 (friendAdminPath <> "/delete")) [("csrf", adminCsrf)]
+  check "disabled invitations with paid or released checkout history cannot be deleted" (status referencedDelete == 400)
+  check "refused history deletion preserves all tickets, holds, invitations and reporting" . (== historySnapshot) =<< BS.readFile (dir </> "bookings.json")
+  retainedDetail <- adminGet (TE.encodeUtf8 friendAdminPath)
+  check "historical invitation remains available to the administrator" (status retainedDetail == 200)
   parserChecks
   priceCatalogChecks
   invitationPriceChecks
-  putStrLn "Direct checkout HTTP, webhook, recovery, gift compatibility and parser checks passed."
+  putStrLn "Direct checkout HTTP, invitation deletion, webhook, recovery, gift compatibility and parser checks passed."
 
 parserChecks :: IO ()
 parserChecks = do

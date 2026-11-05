@@ -52,6 +52,7 @@ module Swwstructor.Server.Booking
   , listInvitations
   , lookupInvitation
   , setInvitationEnabled
+  , deleteInvitation
   , InvitationPurchase (..)
   , listInvitationPurchases
   , attachCheckoutSession
@@ -271,6 +272,16 @@ setInvitationEnabled store ident enabled = modifyData store $ \old@(BookingData 
   case registrySetEnabled ident enabled invitations of
     Left err -> (old, Left err)
     Right (updated, invitation) -> (BookingData ts emails holds updated, Right invitation)
+
+-- | Permanently remove only an unused, disabled invitation. Even released
+-- checkouts retain attribution ownership; deletion and admission share a lock.
+deleteInvitation :: BookingStore -> InvitationId -> IO (Either InvitationError ())
+deleteInvitation store ident = modifyData store $ \old@(BookingData ts emails holds invitations) ->
+  case registryDelete ident invitations of
+    Left err -> (old, Left err)
+    Right updated
+      | any ((== Just ident) . fmap iaInvitationId . chInvitation) holds -> (old, Left InvitationHasHistory)
+      | otherwise -> (BookingData ts emails holds updated, Right ())
 
 listInvitationPurchases :: BookingStore -> IO [InvitationPurchase]
 listInvitationPurchases store = do

@@ -4,6 +4,7 @@
 -- lookup, price, expiry, CSRF, purchases and the canonical bearer URL.
 module Swwstructor.Server.InvitationView
   ( InvitationLanding (..)
+  , InvitationEvent (..)
   , InvitationRow (..)
   , InvitationDetail (..)
   , InvitationSaleRow (..)
@@ -22,11 +23,18 @@ import Swwstructor.Theme (Theme (..), themeCss)
 data InvitationLanding = InvitationLanding
   { ilInviter :: !Text
   , ilPrice :: !Price
-  , ilEvent :: !(Maybe Text)
+  , ilEvent :: !(Maybe InvitationEvent)
   , ilCheckoutAction :: !Text
   , ilMessage :: !(Maybe Text)
   , ilAvailable :: !Bool
   , ilCsrf :: !Text
+  }
+
+data InvitationEvent = InvitationEvent
+  { ieWhen :: !Text
+  , ieVenue :: !Text
+  , ieWhere :: !Text
+  , ieDescription :: !Text
   }
 
 data InvitationRow = InvitationRow
@@ -57,7 +65,10 @@ data InvitationDetail = InvitationDetail
   , idShareUrl :: !Text
   , idPngUrl :: !Text
   , idPdfUrl :: !Text
+  , idPersonalPngUrl :: !Text
+  , idPersonalPdfUrl :: !Text
   , idDisableAction :: !Text
+  , idDeleteAction :: !Text
   , idPurchases :: !Int
   , idGross :: !Price
   , idFee :: !Price
@@ -75,8 +86,14 @@ invitationLandingPage theme value = privateDoc ("An invitation from " <> ilInvit
         [ elAttr "a" [("class","invitation-brand"),("href","/"),("rel","noreferrer")] (esc "Okashi School")
         , elAttr "p" [("class","invitation-and")] (esc "and")
         , el "h1" (esc (ilInviter value))
-        , elAttr "p" [("class","invitation-intro")] (esc "invite you to a mochi-making class")
-        , maybe (el "p" (esc "A ticket for one person. Choose your class date when you are ready.")) (elAttr "p" [("class","invitation-event")] . esc) (ilEvent value)
+        , elAttr "p" [("class","invitation-intro")] (esc (maybe "invite you to a mochi-making class" (\event -> "invite you to learn mochi making at " <> ieVenue event) (ilEvent value)))
+        , case ilEvent value of
+            Nothing -> el "p" (esc "A ticket for one person. Choose your class date when you are ready.")
+            Just event -> htmlConcat
+              [ elAttr "p" [("class","invitation-event")] (esc (ieWhen event))
+              , elAttr "p" [("class","invitation-location")] (esc (ieWhere event))
+              , if T.null (ieDescription event) then mempty else elAttr "p" [("class","invitation-description")] (esc (ieDescription event))
+              ]
         , elAttr "p" [("class","invitation-price")] (esc (formatPrice (ilPrice value) <> " · one person"))
         , maybe mempty (elAttr "p" [("class","invitation-message"),("role","status")] . esc) (ilMessage value)
         , if ilAvailable value
@@ -104,7 +121,7 @@ invitationsPage csrf events rows message = adminDoc "Invitations" $ topbar <> el
         [ csrfField csrf
         , fieldLabel "invitation-name" "Inviter’s name"
         , voidElAttr "input" [("type","text"),("id","invitation-name"),("name","name"),("maxlength","100"),("required","required"),("autocomplete","off")]
-        , elAttr "p" [("class","hint")] (esc "The card reads “Okashi School and NAME invite you to a mochi-making class”.")
+        , elAttr "p" [("class","hint")] (esc "Download a card to share with their friends, or a personal card addressed to them. Both use the same reusable invitation link.")
         , fieldLabel "invitation-tier" "Ticket price"
         , elAttr "select" [("id","invitation-tier"),("name","tier")] (option "friend" "Friends and friends of friends · £65" <> option "partner" "Partner · £75, including a £5 referral fee")
         , fieldLabel "invitation-scope" "What can guests buy?"
@@ -136,14 +153,30 @@ invitationDetailPage value message = adminDoc "Invitation details" $ topbar <> e
       , elAttr "p" [("class","hint")] (esc "Anyone with this link can use the invitation. Share it with your guests; it can be used for more than one purchase.")
       , elAttr "div" [("class","actions")] $ htmlConcat
           [ elAttr "a" [("href",idShareUrl value),("rel","noreferrer"),("target","_blank")] (esc "Open invitation")
-          , elAttr "a" [("href",idPngUrl value),("download","")] (esc "Download PNG")
-          , elAttr "a" [("href",idPdfUrl value),("download","")] (esc "Download PDF")
+          ]
+      , el "h2" (esc "Download invitation cards")
+      , el "h3" (esc "For sharing with friends")
+      , elAttr "p" [("class","hint")] (esc ("“Okashi School and " <> idName value <> " invite you to a mochi-making class.”"))
+      , elAttr "div" [("class","actions")] $ htmlConcat
+          [ elAttr "a" [("href",idPdfUrl value),("download","")] (esc "Shared card · PDF")
+          , elAttr "a" [("href",idPngUrl value),("download","")] (esc "Shared card · PNG")
+          ]
+      , el "h3" (esc ("Addressed to " <> idName value))
+      , elAttr "p" [("class","hint")] (esc ("“Dear " <> idName value <> ", you are invited to a mochi-making class.”"))
+      , elAttr "div" [("class","actions")] $ htmlConcat
+          [ elAttr "a" [("href",idPersonalPdfUrl value),("download","")] (esc "Personal card · PDF")
+          , elAttr "a" [("href",idPersonalPngUrl value),("download","")] (esc "Personal card · PNG")
           ]
       , elAttr "form" [("method","post"),("action",idDisableAction value)] $
           csrfField (idCsrf value)
           <> voidElAttr "input" [("type","hidden"),("name","enabled"),("value",if idEnabled value then "no" else "yes")]
           <> elAttr "div" [("class","actions")] (elAttr "button" [("type","submit"),("class","danger")] (esc (if idEnabled value then "Disable this invitation" else "Enable this invitation")))
           <> elAttr "p" [("class","hint")] (esc "Disabling stops new purchases through this link. Previously purchased tickets stay valid.")
+      , if idEnabled value then mempty else
+          elAttr "form" [("method","post"),("action",idDeleteAction value)] $
+            csrfField (idCsrf value)
+            <> elAttr "p" [("class","hint")] (esc "Unused invitations can be deleted permanently. Invitations with checkout or purchase history are kept for your records.")
+            <> elAttr "div" [("class","actions")] (elAttr "button" [("type","submit"),("class","danger")] (esc "Delete unused invitation permanently"))
       ]
   , elAttr "section" [("class","card")] $
       el "h2" (esc "Sales from this invitation")
@@ -175,6 +208,7 @@ landingCss = T.unlines
   , ".invitation h1{font:600 clamp(30px,5vw,42px)/1.15 var(--sww-display);margin:0 0 18px}"
   , ".invitation-intro{font:500 28px/1.2 var(--sww-display);margin:0 0 28px}"
   , ".invitation-event{font-weight:600}.invitation-price{font-size:22px;font-weight:600;margin:22px 0}"
+  , ".invitation-location{line-height:1.5;margin:10px 0}.invitation-description{font-size:15px;line-height:1.6;margin:18px 0}"
   , ".invitation .sww-buy{width:100%;font-size:16px;min-height:48px;padding:13px 16px}"
   , ".invitation-note{font-size:14px;line-height:1.6;margin:24px 0}.invitation-message{border:1px solid var(--sww-border);padding:12px}"
   , "@media(max-width:440px){.invitation{padding:18px 14px}.invitation-card{padding:30px 20px}}"

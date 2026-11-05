@@ -15,7 +15,7 @@ module Swwstructor.Server.Invitation
   , iaTier, iaScope, iaPrice, iaReferralFee
   , InvitationError (..), invitationErrorMessage
   , InvitationRegistry, emptyInvitationRegistry, registryInvitations
-  , registryLookupToken, registryLookupId, registryInsert, registrySetEnabled
+  , registryLookupToken, registryLookupId, registryInsert, registrySetEnabled, registryDelete
   , invitationRegistryToJSON, invitationRegistryFromJSON
   , attributionToJSON, attributionFromJSON
   ) where
@@ -79,6 +79,8 @@ invitationReferralFee = tierReferralFee . invitationTier
 data InvitationError
   = InvitationNotFound
   | InvitationDisabled
+  | InvitationActive
+  | InvitationHasHistory
   | InvitationConflict
   | InvitationLimitReached
   | InvitationInvalid !Text
@@ -88,6 +90,8 @@ invitationErrorMessage :: InvitationError -> Text
 invitationErrorMessage failure = case failure of
   InvitationNotFound -> "This invitation could not be found. No purchase was started."
   InvitationDisabled -> "This invitation is no longer available for new purchases. Existing tickets and checkouts still work."
+  InvitationActive -> "Disable this invitation before permanently deleting it. Nothing was deleted."
+  InvitationHasHistory -> "This invitation has checkout history and cannot be permanently deleted. Keep it disabled to prevent new purchases."
   InvitationConflict -> "The invitation reference already exists. No invitation was changed."
   InvitationLimitReached -> "The invitation registry has reached its limit of 10,000 links. No invitation was created."
   InvitationInvalid reason -> "The invitation is invalid: " <> reason <> "."
@@ -147,6 +151,14 @@ registrySetEnabled ident enabled registry = case registryLookupId registry ident
   Just invitation ->
     let changed = invitation {invitationEnabled = enabled}
      in Right (InvitationRegistry [if invitationId i == ident then changed else i | i <- registryInvitations registry], changed)
+
+-- Booking must also reject every checkout reference in the same transaction.
+registryDelete :: InvitationId -> InvitationRegistry -> Either InvitationError InvitationRegistry
+registryDelete ident registry = case registryLookupId registry ident of
+  Nothing -> Left InvitationNotFound
+  Just invitation
+    | invitationEnabled invitation -> Left InvitationActive
+    | otherwise -> Right (InvitationRegistry (filter ((/= ident) . invitationId) (registryInvitations registry)))
 
 invitationRegistryToJSON :: InvitationRegistry -> JSON
 invitationRegistryToJSON registry = JArr

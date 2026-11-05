@@ -169,6 +169,56 @@ exercise dir = do
   check "adding invitations preserves the previous dated-hold wire format exactly" (before .:? "checkoutHolds" == after .:? "checkoutHolds")
   _ <- open "legacy"
 
+  -- Permanent deletion is confined to disabled links with no checkout history.
+  unused <- newInvite legacyStore "Unused draft" Friend GeneralTicket
+  beforeActiveDelete <- BS.readFile (dir </> "legacy.json")
+  activeDelete <- deleteInvitation legacyStore (invitationId unused)
+  check "an enabled invitation cannot be permanently deleted" (activeDelete == Left InvitationActive)
+  check "refused active deletion leaves storage unchanged" . (== beforeActiveDelete) =<< BS.readFile (dir </> "legacy.json")
+  _ <- setInvitationEnabled legacyStore (invitationId unused) False >>= inviteRight
+  beforeDelete <- readJSON (dir </> "legacy.json")
+  removed <- deleteInvitation legacyStore (invitationId unused)
+  check "a disabled invitation with no history can be permanently deleted" (removed == Right ())
+  afterDelete <- readJSON (dir </> "legacy.json")
+  let removeUnused (JArr entries) = JArr [entry | entry <- entries, entry .:? "id" /= Just (JStr (T.unpack (invitationIdText (invitationId unused))))]
+      removeUnused value = value
+  check "deletion preserves every other invitation, ticket, hold and email record exactly"
+    (afterDelete == changeField "invitations" removeUnused beforeDelete)
+  deletedReload <- open "legacy"
+  check "deleted secret link stays absent after reload" . (== Nothing) =<< lookupInvitation deletedReload (invitationToken unused)
+  repeatedDelete <- deleteInvitation deletedReload (invitationId unused)
+  check "a repeated delete reports that the invitation is absent" (repeatedDelete == Left InvitationNotFound)
+
+  historyStore <- open "deletion-history"
+  mapM_ (\(code, wantedState) -> do
+    invitation <- newInvite historyStore "History owner" Partner GeneralTicket
+    _ <- begin historyStore [] code invitation >>= holdRight
+    case wantedState of
+      HoldCreating -> pure ()
+      HoldCheckout sid url -> do _ <- attachCheckoutSession historyStore code sid url >>= holdRight; pure ()
+      HoldConfirmed ref -> do _ <- confirmCheckoutHold historyStore code ref (price GBP 75) >>= holdRight; pure ()
+      HoldReleased -> do _ <- releaseCheckoutHold historyStore code >>= holdRight; pure ()
+    _ <- setInvitationEnabled historyStore (invitationId invitation) False >>= inviteRight
+    expectedHold <- lookupCheckoutHold historyStore code
+    saved <- BS.readFile (dir </> "deletion-history.json")
+    refused <- deleteInvitation historyStore (invitationId invitation)
+    check "every checkout state protects its invitation from deletion" (refused == Left InvitationHasHistory)
+    check "refused history deletion writes nothing" . (== saved) =<< BS.readFile (dir </> "deletion-history.json")
+    reloadedHistory <- open "deletion-history"
+    check "refused deletion preserves the exact hold after reload" . (== expectedHold) =<< lookupCheckoutHold reloadedHistory code)
+    [("QQQQ-2222", HoldCreating), ("RRRR-2222", HoldCheckout "cs_delete_open" "https://checkout.stripe.com/test/delete"),
+     ("SSSS-2222", HoldReleased), ("TTTT-2222", HoldConfirmed "pi_delete_paid")]
+
+  deletionRaceStore <- open "deletion-race"
+  deletionRaceInvite <- newInvite deletionRaceStore "Unused link" Friend GeneralTicket
+  _ <- setInvitationEnabled deletionRaceStore (invitationId deletionRaceInvite) False >>= inviteRight
+  (racedDelete, racedEnable) <- concurrently
+    (deleteInvitation deletionRaceStore (invitationId deletionRaceInvite))
+    (setInvitationEnabled deletionRaceStore (invitationId deletionRaceInvite) True)
+  check "delete and re-enable are one atomic choice"
+    ((racedDelete == Right () && racedEnable == Left InvitationNotFound) ||
+     (racedDelete == Left InvitationActive && isRight racedEnable))
+
   -- A failed durable write never publishes a new invitation or a paid record.
   broken <- newBookingStore (dir </> "missing" </> "store.json")
   chosen <- draft "Friend" Friend GeneralTicket
@@ -192,6 +242,18 @@ exercise dir = do
   renameDirectory movedDir durableDir
   _ <- confirmCheckoutHold durable "PPPP-2222" "pi_disk_retry" (price GBP 75) >>= holdRight
   check "repaired retry records one successful purchase" . ((== 1) . length) =<< listInvitationPurchases durable
+  durableUnused <- newInvite durable "Unused link" Friend GeneralTicket
+  disabledUnused <- setInvitationEnabled durable (invitationId durableUnused) False >>= inviteRight
+  renameDirectory durableDir movedDir
+  failedDelete <- try (deleteInvitation durable (invitationId durableUnused)) :: IO (Either IOException (Either InvitationError ()))
+  retainedUnused <- lookupInvitation durable (invitationToken durableUnused)
+  check "failed deletion persistence retains the disabled invitation in memory"
+    (isLeft failedDelete && retainedUnused == Just disabledUnused)
+  renameDirectory movedDir durableDir
+  restoredDurable <- newBookingStore (durableDir </> "bookings.json")
+  check "failed deletion also preserves the invitation on disk" . (== Just disabledUnused) =<< lookupInvitation restoredDurable (invitationToken durableUnused)
+  retriedDelete <- deleteInvitation durable (invitationId durableUnused)
+  check "repaired deletion can be retried successfully" (retriedDelete == Right ())
 
   -- Persisted financial or ownership corruption must fail startup.
   mainJSON <- readJSON (dir </> "main.json")
@@ -202,7 +264,7 @@ exercise dir = do
     loaded <- try (open name) :: IO (Either IOException BookingStore)
     check "corrupt invitation terms or missing attribution owner fail closed at startup" (isLeft loaded))
     [("bad-fee", corruptFee), ("missing-owner", missingRegistry)]
-  putStrLn "Invitation reuse, pricing, attribution, concurrency, persistence and legacy compatibility checks passed."
+  putStrLn "Invitation reuse, deletion, pricing, attribution, concurrency, persistence and legacy compatibility checks passed."
 
 readJSON :: FilePath -> IO JSON
 readJSON path = do

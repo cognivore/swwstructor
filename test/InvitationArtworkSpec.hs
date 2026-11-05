@@ -28,12 +28,20 @@ main = do
   case parseQrMatrix validRows of
     Left err -> die (show err)
     Right matrix -> do
-      let svg = invitationSvg brand "<Emilie & 友達>" (Just "18 November 2026") matrix
+      let details = Just (InvitationEventDetails "18 November 2026" "Ukiyo, 8 Slingsby Place, London WC2E 9AB")
+          svg = invitationSvg SharedInvitation brand "<Emilie & 友達>" details matrix
+          personal = invitationSvg PersonalInvitation brand "Tess" details matrix
+          shared = invitationSvg SharedInvitation brand "Tess" details matrix
       check "Name is escaped in SVG" ("&lt;Emilie &amp; 友達&gt;" `T.isInfixOf` svg)
       check "Date appears in event invitation" ("18 November 2026" `T.isInfixOf` svg)
+      check "Location appears in both variants" (all (T.isInfixOf "Ukiyo, 8 Slingsby Place, London WC2E 9AB") [shared, personal])
       check "QR has a white quiet zone" ("width=\"29\" height=\"29\" fill=\"white\"" `T.isInfixOf` svg)
-      check "Palette cannot request a local paint URL" (not ("url(" `T.isInfixOf` invitationSvg (brand {themeBg = Color "url(/etc/passwd)"}) "Friend" Nothing matrix))
+      check "Palette cannot request a local paint URL" (not ("url(" `T.isInfixOf` invitationSvg SharedInvitation (brand {themeBg = Color "url(/etc/passwd)"}) "Friend" Nothing matrix))
       check "QR precedes invitation copy" (T.length (fst (T.breakOn "<path fill=\"black\"" svg)) < T.length (fst (T.breakOn "invite you to a" svg)))
+      check "Personal variant addresses the recipient" (">Dear Tess,<" `T.isInfixOf` personal && ">you are invited to a<" `T.isInfixOf` personal)
+      check "Shared variant credits the co-inviter" (">and Tess<" `T.isInfixOf` shared && ">invite you to a<" `T.isInfixOf` shared)
+      check "Both variants retain the exact same QR matrix" (qrFragment personal == qrFragment shared)
+      check "Compact export uses A6 portrait" ("width=\"105mm\" height=\"148mm\"" `T.isInfixOf` personal)
   args <- getArgs
   case args of
     ["--render", dir] -> renderFixtures dir
@@ -52,23 +60,28 @@ renderFixtures :: FilePath -> IO ()
 renderFixtures dir = do
   createDirectoryIfMissing True dir
   renderer <- newArtworkRenderer (dir </> "private-tmp")
-  let url = "https://okashi-school.com/invite/fixture-qr-verification"
+  let url = "https://okashi-school.com/invite/in_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
   TIO.writeFile (dir </> "expected-qr.txt") url
   mapM_ (render renderer url) fixtures
-  rejected <- renderInvitationArtifact renderer ArtifactPng brand (T.replicate 101 "W") url Nothing
+  rejected <- renderInvitationArtifact renderer ArtifactPng SharedInvitation brand (T.replicate 101 "W") url Nothing
   unless (isLeft rejected) (die "Oversized name reached export")
   where
-    fixtures :: [(FilePath, Text, Maybe Text)]
+    fixtures :: [(FilePath, Text, Maybe InvitationEventDetails)]
     fixtures =
-      [ ("partner-event", "UKIYO", Just "18 November 2026 · 19:00–21:00")
+      [ ("tess", "Tess", atUkiyo "18 November 2026 · 19:00–21:00")
+      , ("partner-event", "UKIYO", atUkiyo "18 November 2026 · 19:00–21:00")
       , ("friend-unicode", "Émilie & 友達", Nothing)
-      , ("long-name", "Translator Magazine and the Society of Friends of Japanese Sweets, Tea and Handcrafted Delights", Just "Wednesday 18 November 2026 · 19:00–21:00")
+      , ("long-name", "Translator Magazine and the Society of Friends of Japanese Sweets, Tea and Handcrafted Delights", Just (InvitationEventDetails "Wednesday 18 November 2026 · 19:00–21:00" "Ukiyo, The Workshop and Japanese Tea Room, Courtyard Entrance, 8 Slingsby Place, Covent Garden, London WC2E 9AB, United Kingdom"))
       , ("wide-name", T.replicate 100 "W", Nothing)
-      , ("japanese-name", T.replicate 50 "友達", Just "18 November 2026")
+      , ("japanese-name", T.replicate 50 "友達", atUkiyo "18 November 2026")
       ]
-    render renderer url (stem, name, event) = mapM_ (one renderer url stem name event) [(ArtifactPng,"png"),(ArtifactPdf,"pdf")]
-    one renderer url stem name event (format, suffix) = do
-      rendered <- renderInvitationArtifact renderer format brand name url event
+    atUkiyo date = Just (InvitationEventDetails date "Ukiyo, 8 Slingsby Place, London WC2E 9AB")
+    render renderer url (stem, name, event) = mapM_ (\(style, styleName) -> mapM_ (one renderer url (stem <> "-" <> styleName) name event style) [(ArtifactPng,"png"),(ArtifactPdf,"pdf")]) [(SharedInvitation,"shared"),(PersonalInvitation,"personal")]
+    one renderer url stem name event style (format, suffix) = do
+      rendered <- renderInvitationArtifact renderer format style brand name url event
       case rendered of
         Left err -> die (show err)
         Right bytes -> BS.writeFile (dir </> stem <> "." <> suffix) bytes
+
+qrFragment :: Text -> Text
+qrFragment = fst . T.breakOn "</g>" . snd . T.breakOn "<g transform="
