@@ -74,6 +74,7 @@ executable swwstructor-server
     Swwstructor.Server.Media
     Swwstructor.Server.Catalog
     Swwstructor.Server.Booking
+    Swwstructor.Server.Invitation
     Swwstructor.Server.ReservationEmail
     Swwstructor.Server.PaymentCodes
     Swwstructor.Server.Google
@@ -82,6 +83,9 @@ executable swwstructor-server
     Swwstructor.Server.Reminders
     Swwstructor.Server.Admin
     Swwstructor.Server.App
+    Swwstructor.Server.InvitationArtwork
+    Swwstructor.Server.InvitationView
+    Swwstructor.Server.InvitationStripe
   build-depends:
       base
     , HsYAML
@@ -130,6 +134,7 @@ test-suite booking-location-test
   default-language: GHC2021
   other-modules:
     Swwstructor.Server.Booking
+    Swwstructor.Server.Invitation
     Swwstructor.Server.ReservationEmail
     Swwstructor.Server.Google
     Swwstructor.Server.Notify
@@ -165,6 +170,7 @@ test-suite payment-code-test
     Swwstructor.Server.Media
     Swwstructor.Server.Catalog
     Swwstructor.Server.Booking
+    Swwstructor.Server.Invitation
     Swwstructor.Server.ReservationEmail
     Swwstructor.Server.PaymentCodes
     Swwstructor.Server.Google
@@ -172,6 +178,9 @@ test-suite payment-code-test
     Swwstructor.Server.Notify
     Swwstructor.Server.Admin
     Swwstructor.Server.App
+    Swwstructor.Server.InvitationArtwork
+    Swwstructor.Server.InvitationView
+    Swwstructor.Server.InvitationStripe
   build-depends:
       base
     , HsYAML
@@ -202,6 +211,7 @@ test-suite direct-booking-test
   default-language: GHC2021
   other-modules:
     Swwstructor.Server.Booking
+    Swwstructor.Server.Invitation
     Swwstructor.Server.ReservationEmail
   build-depends:
       base
@@ -231,6 +241,7 @@ test-suite direct-checkout-test
     Swwstructor.Server.Media
     Swwstructor.Server.Catalog
     Swwstructor.Server.Booking
+    Swwstructor.Server.Invitation
     Swwstructor.Server.ReservationEmail
     Swwstructor.Server.PaymentCodes
     Swwstructor.Server.Google
@@ -238,6 +249,9 @@ test-suite direct-checkout-test
     Swwstructor.Server.Notify
     Swwstructor.Server.Admin
     Swwstructor.Server.App
+    Swwstructor.Server.InvitationArtwork
+    Swwstructor.Server.InvitationView
+    Swwstructor.Server.InvitationStripe
   build-depends:
       base
     , HsYAML
@@ -259,3 +273,43 @@ test-suite direct-checkout-test
     , wai
     , wai-extra
     , warp
+
+
+test-suite invitation-test
+  import:           warnings
+  type:             exitcode-stdio-1.0
+  hs-source-dirs:   test, app
+  main-is:          InvitationSpec.hs
+  default-language: GHC2021
+  other-modules:
+    Swwstructor.Server.Booking
+    Swwstructor.Server.Invitation
+    Swwstructor.Server.ReservationEmail
+  build-depends:
+      base
+    , bytestring
+    , containers
+    , crypton
+    , directory
+    , filepath
+    , stickywebwm
+    , swwstructor
+    , text
+    , time
+
+test-suite invitation-artwork-test
+  import:           warnings
+  type:             exitcode-stdio-1.0
+  hs-source-dirs:   test, app
+  main-is:          InvitationArtworkSpec.hs
+  default-language: GHC2021
+  other-modules:
+    Swwstructor.Server.InvitationArtwork
+  build-depends:
+      base
+    , bytestring
+    , directory
+    , filepath
+    , process
+    , swwstructor
+    , text

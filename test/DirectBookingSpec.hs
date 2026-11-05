@@ -80,7 +80,7 @@ main = bracket fixture removePathForcibly $ \dir -> do
   check "an unredeemed gift is not changed by preferred-name editing" (noBookingName == Left HoldTicketNotConfirmed)
   reloaded <- open "basic"
   restored <- lookupCheckoutHold reloaded "AAAA-2222"
-  check "confirmed promise survives restart with price and class snapshot" (maybe False (\x -> chSlot x == one && chPrice x == p && chState x == HoldConfirmed "pi_booking") restored)
+  check "confirmed promise survives restart with price and class snapshot" (maybe False (\x -> checkoutSlot x == Just one && chPrice x == p && chState x == HoldConfirmed "pi_booking") restored)
   check "paid gift and dated tickets both survive restart" . ((== 2) . length) =<< listTickets reloaded
 
   -- An abandoned attempt is removed only by a terminal result supplied by the

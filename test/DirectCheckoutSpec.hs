@@ -29,6 +29,9 @@ import Swwstructor.Server.App (AppEnv (..), Stage (Test), swwApp)
 import Swwstructor.Server.Booking
 import Swwstructor.Server.Catalog (newCatalogCache)
 import Swwstructor.Server.DirectStripe
+import qualified Swwstructor.Server.Invitation as Inv
+import Swwstructor.Server.InvitationArtwork (newArtworkRenderer)
+import Swwstructor.Server.InvitationStripe (InvitationPrice (..), validateInvitationPrice)
 import Swwstructor.Server.Notify (BookingCtx (..))
 import Swwstructor.Server.PaymentCodes (newPaymentCodeStore)
 import Swwstructor.Server.SecretStore (SecretBundle (..), SecretValue (..), emptyBundle, genMasterKey, saveBundle)
@@ -81,6 +84,7 @@ exercise dir = do
   loseCreate <- newIORef False
   rejectCreate <- newIORef False
   failExpiry <- newIORef False
+  artwork <- newArtworkRenderer (dir </> "artwork")
   let stripe = DirectStripe
         { directCreate = \request -> do
             let code = drCode request
@@ -117,6 +121,8 @@ exercise dir = do
         , aeCatalog = catalog, aeSpentPow = spent, aeBookings = bookings, aePaymentCodes = payments
         , aeBookingCtx = ctx, aeVenues = venues, aeAnalytics = Nothing
         , aeDirectStripe = stripe, aeDatedCatalog = readIORef items
+        , aeInvitationPrice = \tier -> pure (Right (InvitationPrice (case tier of Inv.Friend -> "price_friend"; Inv.Partner -> "price_partner") "Mochi class invitation"))
+        , aeInvitationArtwork = artwork
         }
   app <- scottyApp (swwApp env)
   let request method requestPath headers body = runSession (srequest (SRequest ((setPath defaultRequest requestPath) {requestMethod = method, requestHeaders = headers}) body)) app
@@ -329,8 +335,103 @@ exercise dir = do
   check "removing the class from sale does not erase a paid booking" (status snapshotPage == 200 && "Mochi with tea" `T.isInfixOf` textOf snapshotPage)
   check "calendar retains paid date/time after authored schedule removal" (status calendar == 200 && "DTSTART:20300107T190000Z" `T.isInfixOf` textOf calendar)
   check "confirmed booking includes the immediate venue address" ("8 Slingsby Place" `T.isInfixOf` T.replace "\r\n " "" (textOf calendar))
+
+  -- Exercise the real invitation HTTP journey, including admin authority,
+  -- reusable friend links, event admission and paid-sale attribution.
+  deniedAdmin <- get "/admin/invitations"
+  deniedExport <- get "/admin/invitations/iv_0000000000000000/invitation.pdf"
+  check "invitation registry and exports require admin login" (status deniedAdmin == 302 && status deniedExport == 302)
+  login <- request methodPost "/admin/login" [(hContentType, "application/x-www-form-urlencoded")] (form [("password", "fixture-password")])
+  let adminCookie = maybe "" (BC.takeWhile (/= ';')) (lookup "Set-Cookie" (simpleHeaders login))
+      adminGet p = request methodGet p [("Cookie", adminCookie)] ""
+      adminPost p fields = request methodPost p [("Cookie", adminCookie), ("Origin", "null"), (hContentType, "application/x-www-form-urlencoded")] (form fields)
+  adminPage <- adminGet "/admin/invitations"
+  let adminCsrf = tokenOf adminPage
+      createInvite name tier scope sid = do
+        response <- adminPost "/admin/invitations" [("csrf", adminCsrf), ("name", name), ("tier", tier), ("scope", scope), ("slot", sid)]
+        check "admin can create a checked invitation" (status response == 303)
+        registry <- listInvitations bookings
+        case filter ((== name) . Inv.invitationReferrer) registry of
+          [invitation] -> pure invitation
+          _ -> fail "Expected one persisted invitation."
+      openInvite invitation = do
+        let target = "/invite/" <> Inv.invitationTokenText (Inv.invitationToken invitation)
+        page <- get (TE.encodeUtf8 target)
+        let cookie = maybe "" (BC.takeWhile (/= ';')) (lookup "Set-Cookie" (simpleHeaders page))
+        check "private invitation sends no-cache and no-referrer headers"
+          (lookup "Referrer-Policy" (simpleHeaders page) == Just "no-referrer" && lookup "Cache-Control" (simpleHeaders page) == Just "private, no-store")
+        pure (target, page, cookie)
+      buyInvite target page cookie extras = request methodPost (TE.encodeUtf8 (target <> "/checkout"))
+        [("Cookie", cookie), ("Origin", "null"), (hContentType, "application/x-www-form-urlencoded")] (form ([("csrf", tokenOf page)] <> extras))
+      invitePayment code ident amount = rawEvent "payment_intent.succeeded" (JObj
+        [("id", JStr ident), ("status", JStr "succeeded"), ("amount_received", JNum amount), ("currency", JStr "gbp")
+        , ("metadata", JObj [("sww_code", JStr (T.unpack code)), ("sww_flow", JStr "invitation")])])
+  badAdmin <- adminPost "/admin/invitations" [("csrf", "wrong"), ("name", "Invalid"), ("tier", "friend"), ("scope", "general")]
+  check "invitation creation needs CSRF and makes no row on failure" (status badAdmin == 403)
+  partnerInvite <- createInvite "Partner" "partner" "general" ""
+  (partnerPath, partnerPage, partnerCookie) <- openInvite partnerInvite
+  check "general invitation explains choosing a date later and displays £75" ("75" `T.isInfixOf` textOf partnerPage && "date" `T.isInfixOf` textOf partnerPage)
+  badCsrf <- request methodPost (TE.encodeUtf8 (partnerPath <> "/checkout")) [("Cookie", partnerCookie), (hContentType, "application/x-www-form-urlencoded")] (form [("csrf", "wrong")])
+  check "invitation checkout needs its own attempt-bound CSRF" (status badCsrf == 403)
+  partnerBought <- buyInvite partnerPath partnerPage partnerCookie [("price", "price_friend"), ("amount", "1"), ("tier", "friend"), ("slot", slotIdOf later)]
+  check "one invitation POST reaches payment" (status partnerBought == 303)
+  let partnerCode = codeOf partnerCookie
+  partnerRequests <- filter ((== Just partnerCode) . lookup "metadata[sww_code]") <$> readIORef creates
+  check "browser cannot alter offer scope, tier, price or referral fee" (case partnerRequests of
+    [params] -> lookup "line_items[0][price]" params == Just "price_partner" && lookup "metadata[sww_fee_minor]" params == Just "500" && lookup "metadata[sww_scope]" params == Just "general" && lookup "line_items[0][quantity]" params == Just "1"
+    _ -> False)
+  _ <- buyInvite partnerPath partnerPage partnerCookie []
+  check "repeated invitation clicks create one Stripe session" . ((== 1) . length . filter ((== Just partnerCode) . lookup "metadata[sww_code]")) =<< readIORef creates
+  partnerPaid <- signed (invitePayment partnerCode "pi_invitation_partner" 7500)
+  _ <- signed (invitePayment partnerCode "pi_invitation_partner" 7500)
+  check "signed invitation payment is fulfilled without returning to site" (status partnerPaid == 200)
+  partnerTickets <- filter ((== partnerCode) . tkCode) <$> listTickets bookings
+  check "general invitation issues exactly one transferable unredeemed ticket" (case partnerTickets of [t] -> tkRedemption t == Nothing && tkSeats t == "1"; _ -> False)
+  report <- listInvitationPurchases bookings
+  check "dashboard records partner sale and £5 fee only once" (case filter ((== Inv.invitationId partnerInvite) . Inv.iaInvitationId . ipAttribution) report of
+    [sale] -> ipPaidPrice sale == price GBP 75 && Inv.iaReferralFee (ipAttribution sale) == price GBP 5
+    _ -> False)
+  generalReturn <- get (path "/booking/" partnerCode "")
+  check "general purchase return hands over its ordinary ticket" (status generalReturn == 200 && partnerCode `T.isInfixOf` textOf generalReturn)
+  redeemedInvite <- request methodPost "/schedule" [(hContentType, "application/x-www-form-urlencoded")]
+    (form [("code", partnerCode), ("name", "FriendOfPartner"), ("slot", slotIdOf later)])
+  replayGeneral <- signed (invitePayment partnerCode "pi_invitation_partner" 7500)
+  check "later gift redemption and delayed payment replay remain compatible" (status redeemedInvite == 303 && status replayGeneral == 200)
+
+  friendInvite <- createInvite "Momo" "friend" "event" (slotIdOf later)
+  (friendPath, friendPage, friendCookie) <- openInvite friendInvite
+  friendBought <- buyInvite friendPath friendPage friendCookie []
+  check "event invitation goes directly to the chosen class payment" (status friendBought == 303)
+  let friendCode = codeOf friendCookie
+  friendRequests <- filter ((== Just friendCode) . lookup "metadata[sww_code]") <$> readIORef creates
+  check "friend offer uses £65 dedicated price and zero referral fee" (case friendRequests of
+    [params] -> lookup "line_items[0][price]" params == Just "price_friend" && lookup "metadata[sww_fee_minor]" params == Just "0" && lookup "metadata[sww_class_date]" params == Just (slotDate later)
+    _ -> False)
+  let friendAdminPath = "/admin/invitations/" <> Inv.invitationIdText (Inv.invitationId friendInvite)
+  stopped <- adminPost (TE.encodeUtf8 (friendAdminPath <> "/enabled")) [("csrf", adminCsrf), ("enabled", "no")]
+  check "admin can stop new purchases through a reusable link" (status stopped == 303)
+  friendPaid <- signed (invitePayment friendCode "pi_invitation_friend" 6500)
+  check "disabling a link preserves an existing paid promise" (status friendPaid == 200)
+  friendTicket <- filter ((== friendCode) . tkCode) <$> listTickets bookings
+  check "event invitation automatically books exactly that class" (case friendTicket of [t] -> maybe False ((== slotIdOf later) . redSlotId) (tkRedemption t); _ -> False)
+  (_, stoppedPage, stoppedCookie) <- openInvite friendInvite
+  deniedNew <- buyInvite friendPath stoppedPage stoppedCookie []
+  check "disabled link exposes no checkout form and cannot start another purchase" (status deniedNew == 403 && not ("/checkout\"" `T.isInfixOf` textOf stoppedPage))
+  _ <- adminPost (TE.encodeUtf8 (friendAdminPath <> "/enabled")) [("csrf", adminCsrf), ("enabled", "yes")]
+  (_, reusablePage, reusableCookie) <- openInvite friendInvite
+  reusable <- buyInvite friendPath reusablePage reusableCookie []
+  check "friends can share the same reusable invitation for a new single ticket" (status reusable == 303 && codeOf reusableCookie /= friendCode)
+  detail <- adminGet (TE.encodeUtf8 friendAdminPath)
+  check "admin detail shows the purchased ticket and payment reference" (friendCode `T.isInfixOf` textOf detail && "pi_invitation_friend" `T.isInfixOf` textOf detail)
+  let reusedCode = codeOf reusableCookie
+  openCheckout <- request methodGet (path "/checkout/" reusedCode "") [("Cookie", reusableCookie)] ""
+  cancelledInvite <- request methodPost (path "/checkout/" reusedCode "/cancel") [("Cookie", reusableCookie), ("Origin", "null"), (hContentType, "application/x-www-form-urlencoded")] (form [("csrf", tokenOf openCheckout)])
+  check "cancelling from original browser returns to its invitation" (status cancelledInvite == 303 && lookup hLocation (simpleHeaders cancelledInvite) == Just (TE.encodeUtf8 friendPath))
+  bareCode <- get (path "/checkout/" reusedCode "")
+  check "short checkout code does not reveal the reusable invitation capability" (not (Inv.invitationTokenText (Inv.invitationToken friendInvite) `T.isInfixOf` textOf bareCode))
   parserChecks
   priceCatalogChecks
+  invitationPriceChecks
   putStrLn "Direct checkout HTTP, webhook, recovery, gift compatibility and parser checks passed."
 
 parserChecks :: IO ()
@@ -385,6 +486,8 @@ priceCatalogChecks = do
         , ordinary "price_fraction" 8000.5
         , ordinary "price_negative" (-1)
         , ordinary "price_out_of_range" 1e30
+        , priceObject "price_private" 6500 "gbp" True "one_time"
+            (JObj [("name", JStr "Private invitation"), ("active", JBool True), ("default_price", JStr "price_private"), ("metadata", JObj [("sww_visibility", JStr "private")])])
         ]
   parsed <- either fail pure (parsePage False (double : ignored <> [single]))
   check "price catalogue preserves only active current one-time defaults, sorted by price"
@@ -399,6 +502,18 @@ priceCatalogChecks = do
     (case parsePriceCatalogJSON (encode (JObj [("data", JArr [single])])) of Left _ -> True; Right _ -> False)
   check "zero-minor-unit amounts remain representable without rounding"
     (case parsePage False [ordinary "price_zero" 0] of Right [item] -> ciPrice item == price GBP 0; _ -> False)
+
+invitationPriceChecks :: IO ()
+invitationPriceChecks = do
+  let obj amount tier fee visibility = JObj
+        [("id", JStr "price_invite"), ("active", JBool True), ("type", JStr "one_time"), ("billing_scheme", JStr "per_unit")
+        , ("currency", JStr "gbp"), ("unit_amount", JNum amount)
+        , ("metadata", JObj [("sww_tier", JStr tier), ("sww_fee_minor", JStr fee)])
+        , ("product", JObj [("active", JBool True), ("name", JStr "Invitation"), ("metadata", JObj [("sww_visibility", JStr visibility), ("sww_purpose", JStr "invitation"), ("sww_seats", JStr "1")])])]
+      valid value = case validateInvitationPrice Inv.Partner "price_invite" value of Right _ -> True; Left _ -> False
+  check "server validates a dedicated £75 partner price with £5 fee" (valid (obj 7500 "partner" "500" "private"))
+  check "wrong amount, tier, fee or public product cannot authorise invitation purchase"
+    (all (not . valid) [obj 6500 "partner" "500" "private", obj 7500 "friend" "500" "private", obj 7500 "partner" "0" "private", obj 7500 "partner" "500" "public"])
 
 fixture :: IO FilePath
 fixture = do

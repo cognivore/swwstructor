@@ -66,6 +66,9 @@ import Swwstructor.Server.Notify (BookingCtx (..), siteSlots)
 import Swwstructor.Server.Reminders (startReminderLoop)
 import Swwstructor.Server.DirectBooking (DirectBooking (..), startCheckoutReconciler)
 import Swwstructor.Server.DirectStripe (liveDirectStripe)
+import Swwstructor.Server.Invitation (InvitationTier (..))
+import Swwstructor.Server.InvitationStripe (fetchInvitationPrice)
+import Swwstructor.Server.InvitationArtwork (newArtworkRenderer)
 import Swwstructor.Server.SecretStore
   ( MasterKey
   , SecretBundle
@@ -171,6 +174,9 @@ main = do
   tzName <- fromMaybe "Europe/London" . nonEmptyEnv <$> lookupEnv "SWW_BOOKING_TZ"
   tzOffset <- fromMaybe "+01:00" . nonEmptyEnv <$> lookupEnv "SWW_BOOKING_TZ_OFFSET"
   venueNoun <- fromMaybe "venue" . nonEmptyEnv <$> lookupEnv "SWW_BOOKING_VENUE_NOUN"
+  friendPrice <- fmap T.pack . nonEmptyEnv <$> lookupEnv "SWW_INVITATION_FRIEND_PRICE_ID"
+  partnerPrice <- fmap T.pack . nonEmptyEnv <$> lookupEnv "SWW_INVITATION_PARTNER_PRICE_ID"
+  artwork <- newArtworkRenderer (dataDir </> "invitation-artwork")
   let bookingCtx =
         BookingCtx
           { bcManager = mgr
@@ -214,6 +220,8 @@ main = do
           , aeAnalytics = analytics
           , aeDirectStripe = directStripe
           , aeDatedCatalog = freshCatalog
+          , aeInvitationPrice = \tier -> fetchInvitationPrice mgr loadStripe tier (case tier of Friend -> friendPrice; Partner -> partnerPrice)
+          , aeInvitationArtwork = artwork
           }
 
   -- The reminder loop: retries unfinished booking side effects and sends the

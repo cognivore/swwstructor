@@ -6,10 +6,9 @@
 -- "Swwstructor.Server.Store" — one JSON file under the data dir, held in an
 -- 'MVar', written atomically on every change, surviving restarts.
 --
--- No personal data lives here: a ticket is a reference code, what was
--- bought, and — once reserved — a slot and the name the student chose to be
--- called. Everything that identifies a person (email, card, billing details)
--- stays with Stripe; the Stripe receipt is what carries the code to them.
+-- Customer email, card and billing details stay with Stripe. This store keeps
+-- ticket references, preferred names and invitation referrer labels; Stripe's
+-- receipt carries the ticket code to its buyer.
 --
 -- A 'Ticket' is issued (idempotently, keyed by the Stripe PaymentIntent id)
 -- when the payment-succeeded webhook lands; its code was minted before
@@ -32,11 +31,14 @@ module Swwstructor.Server.Booking
   , claimNote
   , takenFor
   , CheckoutHold
+  , CheckoutTarget (..)
   , HoldState (..)
   , HoldError (..)
   , holdErrorMessage
   , chCode
-  , chSlot
+  , chTarget
+  , checkoutSlot
+  , chInvitation
   , chPriceId
   , chProduct
   , chSeats
@@ -45,6 +47,13 @@ module Swwstructor.Server.Booking
   , chExpiresAt
   , chState
   , beginCheckoutHold
+  , beginInvitationCheckout
+  , createInvitation
+  , listInvitations
+  , lookupInvitation
+  , setInvitationEnabled
+  , InvitationPurchase (..)
+  , listInvitationPurchases
   , attachCheckoutSession
   , confirmCheckoutHold
   , releaseCheckoutHold
@@ -66,6 +75,7 @@ import Control.Exception (IOException, throwIO, try)
 import Crypto.Random (getRandomBytes)
 import qualified Data.ByteString as BS
 import Data.Char (isAscii, isAlphaNum, isControl)
+import Data.Maybe (mapMaybe)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
 import qualified Data.Set as S
@@ -77,10 +87,12 @@ import Data.Time.Clock.POSIX (getPOSIXTime)
 import Data.Time.Calendar (Day)
 import Data.Time.LocalTime (TimeOfDay)
 import Data.Time.Format (defaultTimeLocale, formatTime, parseTimeM)
+import Numeric (showHex)
 import Swwstructor.Block (mondayOf)
 import Swwstructor.Content (SlotSpec (..), slotIdOf)
 import Swwstructor.Money (Price (..), Cents (..), currencyCode, currencyOfCode)
 import Swwstructor.Server.ReservationEmail
+import Swwstructor.Server.Invitation
 import StickyWM (JSON (JArr, JNull, JObj, JStr, JNum), decode, encode, jstr, (.:), (.:?))
 import System.Directory (doesFileExist, renameFile)
 
@@ -133,7 +145,7 @@ data BookingStore = BookingStore
   , bsFile :: !FilePath
   }
 
--- | The local booking state owns capacity. Creating and open checkouts both
+-- | The local booking state owns capacity. Creating and open dated checkouts
 -- occupy places until the payment adapter has established a terminal result.
 -- A timestamp alone is never evidence that a payment can no longer succeed.
 data HoldState
@@ -143,13 +155,15 @@ data HoldState
   | HoldReleased
   deriving (Eq)
 
+data CheckoutTarget = TransferableTicket | DatedClass !SlotSpec deriving (Eq, Show)
+
 -- | A checked, immutable purchase promise. Construction is kept in this module:
 -- consumers cannot manufacture a hold without the atomic admission operation.
 -- The slot snapshot survives subsequent content edits. The ticket code doubles
 -- as the stable attempt reference; it is never reassigned after release.
 data CheckoutHold = CheckoutHold
   { chCode :: !Text
-  , chSlot :: !SlotSpec
+  , chTarget :: !CheckoutTarget
   , chPriceId :: !Text
   , chProduct :: !Text
   , chSeats :: !Text
@@ -157,8 +171,22 @@ data CheckoutHold = CheckoutHold
   , chCreatedAt :: !Text
   , chExpiresAt :: !Integer
   , chState :: !HoldState
+  , chInvitation :: !(Maybe InvitationAttribution)
   }
   deriving (Eq)
+
+checkoutSlot :: CheckoutHold -> Maybe SlotSpec
+checkoutSlot h = case chTarget h of TransferableTicket -> Nothing; DatedClass slot -> Just slot
+
+-- Attribution is held once on the immutable purchase promise. The ordinary
+-- ticket can subsequently be transferred/redeemed without changing its source.
+data InvitationPurchase = InvitationPurchase
+  { ipAttribution :: !InvitationAttribution
+  , ipTicket :: !Ticket
+  , ipTarget :: !CheckoutTarget
+  , ipPaidPrice :: !Price
+  , ipConfirmedAt :: !Text -- ^ First durable confirmation, not Stripe charge time.
+  } deriving (Eq, Show)
 
 -- Expected admission alternatives are separate from storage failures, which
 -- propagate to the HTTP/worker recovery owner as IOException without publishing
@@ -174,6 +202,7 @@ data HoldError
   | HoldAlreadyConfirmed
   | HoldPaymentMismatch
   | HoldTicketNotConfirmed
+  | HoldInvitationError !InvitationError
   deriving (Eq, Show)
 
 holdErrorMessage :: HoldError -> Text
@@ -188,8 +217,9 @@ holdErrorMessage err = case err of
   HoldAlreadyConfirmed -> "This booking is already paid and confirmed. Its place cannot be released as an abandoned checkout."
   HoldPaymentMismatch -> "The payment does not match the saved price or payment reference. Your booking needs to be checked by the school."
   HoldTicketNotConfirmed -> "A confirmed booking is required to change the preferred name. No booking was changed."
+  HoldInvitationError err' -> invitationErrorMessage err'
 
-data BookingData = BookingData ![Ticket] !ReservationEmails ![CheckoutHold] deriving (Eq)
+data BookingData = BookingData ![Ticket] !ReservationEmails ![CheckoutHold] !InvitationRegistry deriving (Eq)
 
 -- | Open the store; an absent file means no tickets yet. A present-but-corrupt
 -- file prevents startup: neither paid tickets nor the email outbox may be
@@ -199,7 +229,7 @@ newBookingStore path = do
   exists <- doesFileExist path
   tickets <-
     if not exists
-      then pure (BookingData [] emptyReservationEmails [])
+      then pure (BookingData [] emptyReservationEmails [] emptyInvitationRegistry)
       else do
         r <- try (BS.readFile path) :: IO (Either IOException BS.ByteString)
         case r of
@@ -213,7 +243,41 @@ newBookingStore path = do
   pure (BookingStore var path)
 
 listTickets :: BookingStore -> IO [Ticket]
-listTickets store = do BookingData ts _ _ <- readMVar (bsVar store); pure ts
+listTickets store = do BookingData ts _ _ _ <- readMVar (bsVar store); pure ts
+
+listInvitations :: BookingStore -> IO [Invitation]
+listInvitations store = do BookingData _ _ _ invitations <- readMVar (bsVar store); pure (registryInvitations invitations)
+
+lookupInvitation :: BookingStore -> InvitationToken -> IO (Maybe Invitation)
+lookupInvitation store token = do BookingData _ _ _ invitations <- readMVar (bsVar store); pure (registryLookupToken invitations token)
+
+createInvitation :: BookingStore -> InvitationDraft -> IO (Either InvitationError Invitation)
+createInvitation store draft = do
+  bytes <- getRandomBytes 40 :: IO BS.ByteString
+  now <- iso8601Now
+  let hex = T.pack . concatMap (\byte -> let digits = showHex byte "" in if length digits == 1 then '0' : digits else digits) . BS.unpack
+      ident = parseInvitationId ("iv_" <> hex (BS.take 8 bytes))
+      token = parseInvitationToken ("in_" <> hex (BS.drop 8 bytes))
+  case (ident, token) of
+    (Just checkedId, Just checkedToken) -> modifyData store $ \old@(BookingData ts emails holds invitations) ->
+      let invitation = invitationFromDraft checkedId checkedToken now draft
+       in case registryInsert invitation invitations of
+         Left err -> (old, Left err)
+         Right updated -> (BookingData ts emails holds updated, Right invitation)
+    _ -> fail "Invitation entropy encoding failed; no invitation was created."
+
+setInvitationEnabled :: BookingStore -> InvitationId -> Bool -> IO (Either InvitationError Invitation)
+setInvitationEnabled store ident enabled = modifyData store $ \old@(BookingData ts emails holds invitations) ->
+  case registrySetEnabled ident enabled invitations of
+    Left err -> (old, Left err)
+    Right (updated, invitation) -> (BookingData ts emails holds updated, Right invitation)
+
+listInvitationPurchases :: BookingStore -> IO [InvitationPurchase]
+listInvitationPurchases store = do
+  BookingData tickets _ holds _ <- readMVar (bsVar store)
+  pure [InvitationPurchase attribution ticket (chTarget hold) (chPrice hold) (tkCreatedAt ticket)
+       | hold <- holds, HoldConfirmed payment <- [chState hold], Just attribution <- [chInvitation hold]
+       , ticket <- tickets, tkCode ticket == chCode hold, tkPaymentRef ticket == payment]
 
 -- | Seat usage per slot id: total seats claimed, and whether a whole-class
 -- (@\"all\"@) ticket sits on it.
@@ -251,7 +315,7 @@ takenFromUsage usage s = case M.lookup (slotIdOf s) usage of
 occupiedWeekSessions :: [Ticket] -> [CheckoutHold] -> [SlotSpec] -> Text -> Int
 occupiedWeekSessions ts holds slots wk =
   let usage = occupiedUsage ts holds
-   in S.size (S.fromList [slotIdOf s | s <- slots <> map chSlot holds, mondayOf (slotDate s) == wk, takenFromUsage usage s > 0])
+   in S.size (S.fromList [slotIdOf s | s <- slots <> mapMaybe checkoutSlot holds, mondayOf (slotDate s) == wk, takenFromUsage usage s > 0])
 
 activeHold :: CheckoutHold -> Bool
 activeHold h = case chState h of
@@ -263,7 +327,7 @@ activeHold h = case chState h of
 occupiedUsage :: [Ticket] -> [CheckoutHold] -> Map Text (Int, Bool)
 occupiedUsage ts holds =
   M.unionWith combine (seatUsage ts)
-    (M.fromListWith combine [(slotIdOf (chSlot h), seatQuantityUsage (chSeats h)) | h <- holds, activeHold h])
+    (M.fromListWith combine [(slotIdOf slot, seatQuantityUsage (chSeats h)) | h <- holds, activeHold h, Just slot <- [checkoutSlot h]])
   where combine (a, x) (b, y) = (a + b, x || y)
 
 occupiedFor :: [Ticket] -> [CheckoutHold] -> SlotSpec -> Int
@@ -274,18 +338,18 @@ occupiedFor ts holds = takenFromUsage (occupiedUsage ts holds)
 -- does not remove them. The reconciliation adapter owns terminal evidence.
 bookingAvailability :: BookingStore -> [SlotSpec] -> IO [SlotSpec]
 bookingAvailability store slots = do
-  BookingData ts _ holds <- readMVar (bsVar store)
+  BookingData ts _ holds _ <- readMVar (bsVar store)
   let usage = occupiedUsage ts holds
   pure [s {slotTaken = takenFromUsage usage s} | s <- slots]
 
 lookupCheckoutHold :: BookingStore -> Text -> IO (Maybe CheckoutHold)
 lookupCheckoutHold store code = do
-  BookingData _ _ holds <- readMVar (bsVar store)
+  BookingData _ _ holds _ <- readMVar (bsVar store)
   pure (lookup code [(chCode h, h) | h <- holds])
 
 listPendingCheckoutHolds :: BookingStore -> IO [CheckoutHold]
 listPendingCheckoutHolds store = do
-  BookingData _ _ holds <- readMVar (bsVar store)
+  BookingData _ _ holds _ <- readMVar (bsVar store)
   pure (filter activeHold holds)
 
 -- | Hold places before making the external checkout call. The caller resolves
@@ -297,40 +361,74 @@ beginCheckoutHold :: BookingStore -> [SlotSpec] -> Int -> Text -> Text -> Text -
 beginCheckoutHold store slots maxWeekly code slotId priceId product' seats price' expiry = do
   now <- iso8601Now
   epoch <- floor <$> getPOSIXTime
-  modifyData store $ \old@(BookingData ts emails holds) ->
-    let reject err = (old, Left err)
-        matching h = slotIdOf (chSlot h) == slotId && chPriceId h == priceId && chProduct h == product' && chSeats h == seats && chPrice h == price' && chExpiresAt h == expiry
-     in case [h | h <- holds, chCode h == code] of
-       h : _
-         | not (matching h) -> reject HoldConflict
-         | chState h == HoldReleased -> reject HoldAlreadyReleased
-         | otherwise -> (old, Right h)
-       [] | any ((== code) . tkCode) ts -> reject HoldConflict
-       [] -> case [s | s <- slots, slotIdOf s == slotId] of
-         [] -> reject HoldSlotUnknown
-         s : _ -> case checkedHoldFields code s priceId product' seats price' of
-           Left why -> reject (HoldInvalidInput (T.pack why))
-           Right ()
-             | expiry <= epoch || expiry > epoch + 86400 -> reject (HoldInvalidInput "the checkout expiry must be within the next 24 hours")
-             | otherwise ->
-                 let taken = occupiedFor ts holds s
-                     need = if seats == "all" then slotCap s else seatCount seats
-                     weekAtCap = maxWeekly > 0 && occupiedWeekSessions ts holds slots (mondayOf (slotDate s)) >= maxWeekly
-                  in if
-                    | (seats == "all" && taken > 0) || need > slotCap s - taken -> reject HoldSlotFull
-                    | taken == 0 && weekAtCap -> reject HoldWeekFull
-                    | otherwise ->
-                        let h = CheckoutHold code (s {slotTaken = 0}) priceId product' seats price' now expiry HoldCreating
-                         in (BookingData ts emails (holds <> [h]), Right h)
+  modifyData store (admitCheckout now epoch slots maxWeekly code (SlotChoice slotId) priceId product' seats price' expiry Nothing)
+
+-- | Authoritative tier price id and eligible current slots are supplied by the
+-- server. Price, single-person entitlement, scope and attribution come only
+-- from the saved invitation. Disabling and first admission share this lock.
+-- Already saved promises remain resumable after disable or content changes.
+beginInvitationCheckout :: BookingStore -> [SlotSpec] -> Int -> Text -> InvitationToken -> Text -> Text -> Integer -> IO (Either HoldError CheckoutHold)
+beginInvitationCheckout store slots maxWeekly code token priceId product' expiry = do
+  now <- iso8601Now
+  epoch <- floor <$> getPOSIXTime
+  modifyData store $ \old@(BookingData _ _ holds invitations) ->
+    case registryLookupToken invitations token of
+      Nothing -> (old, Left (HoldInvitationError InvitationNotFound))
+      Just invitation
+        | not (invitationEnabled invitation) && not (any (\h -> chCode h == code && maybe False ((== invitationId invitation) . iaInvitationId) (chInvitation h)) holds) ->
+            (old, Left (HoldInvitationError InvitationDisabled))
+        | otherwise ->
+            let target = case invitationScope invitation of GeneralTicket -> TicketChoice; EventTicket slot -> SlotChoice (slotIdOf slot)
+             in admitCheckout now epoch slots maxWeekly code target priceId product' "1" (invitationPrice invitation) expiry (Just (attributionFor invitation)) old
+
+data TargetChoice = TicketChoice | SlotChoice !Text
+
+admitCheckout :: Text -> Integer -> [SlotSpec] -> Int -> Text -> TargetChoice -> Text -> Text -> Text -> Price -> Integer -> Maybe InvitationAttribution -> BookingData -> (BookingData, Either HoldError CheckoutHold)
+admitCheckout now epoch slots maxWeekly code choice priceId product' seats price' expiry attribution old@(BookingData ts emails holds invitations) =
+  let reject err = (old, Left err)
+      sameTarget h = case (choice, chTarget h) of
+        (TicketChoice, TransferableTicket) -> True
+        (SlotChoice ident, DatedClass slot) -> ident == slotIdOf slot
+        _ -> False
+      matching h = sameTarget h && chPriceId h == priceId && chProduct h == product' && chSeats h == seats && chPrice h == price' && chExpiresAt h == expiry && chInvitation h == attribution
+      selected = case choice of TicketChoice -> Right TransferableTicket; SlotChoice ident -> maybe (Left HoldSlotUnknown) (Right . DatedClass) (lookup ident [(slotIdOf s, s) | s <- slots])
+      capacity target = case target of
+        TransferableTicket -> Right ()
+        DatedClass slot ->
+          let taken = occupiedFor ts holds slot
+              need = if seats == "all" then slotCap slot else seatCount seats
+              weekAtCap = maxWeekly > 0 && occupiedWeekSessions ts holds slots (mondayOf (slotDate slot)) >= maxWeekly
+           in if
+             | (seats == "all" && taken > 0) || need > slotCap slot - taken -> Left HoldSlotFull
+             | taken == 0 && weekAtCap -> Left HoldWeekFull
+             | otherwise -> Right ()
+   in case [h | h <- holds, chCode h == code] of
+     h : _
+       | not (matching h) -> reject HoldConflict
+       | chState h == HoldReleased -> reject HoldAlreadyReleased
+       | otherwise -> (old, Right h)
+     [] | any ((== code) . tkCode) ts -> reject HoldConflict
+     [] -> case selected of
+       Left err -> reject err
+       Right target -> case checkedHoldFields code target priceId product' seats price' attribution of
+         Left why -> reject (HoldInvalidInput (T.pack why))
+         Right ()
+           | expiry <= epoch || expiry > epoch + 86400 -> reject (HoldInvalidInput "the checkout expiry must be within the next 24 hours")
+           | otherwise -> case capacity target of
+               Left err -> reject err
+               Right () ->
+                 let canonical = case target of TransferableTicket -> TransferableTicket; DatedClass slot -> DatedClass slot {slotTaken = 0}
+                     h = CheckoutHold code canonical priceId product' seats price' now expiry HoldCreating attribution
+                  in (BookingData ts emails (holds <> [h]) invitations, Right h)
 
 -- | The adapter has received a successful Stripe create/retrieve response.
 -- A concurrent payment event may already have confirmed the hold; attachment
 -- then leaves the confirmed result intact. Session capabilities stay private.
 attachCheckoutSession :: BookingStore -> Text -> Text -> Text -> IO (Either HoldError CheckoutHold)
-attachCheckoutSession store code sessionId redirectUrl = modifyData store $ \old@(BookingData ts emails holds) ->
+attachCheckoutSession store code sessionId redirectUrl = modifyData store $ \old@(BookingData ts emails holds invitations) ->
   let reject err = (old, Left err)
       otherSession h = chCode h /= code && case chState h of HoldCheckout ident _ -> ident == sessionId; _ -> False
-      publish h = (BookingData ts emails (replaceHold h holds), Right h)
+      publish h = (BookingData ts emails (replaceHold h holds) invitations, Right h)
    in if not (validReference "cs_" sessionId) || not ("https://" `T.isPrefixOf` redirectUrl) || T.length redirectUrl > 4096 || T.any isControl redirectUrl
         then reject (HoldInvalidInput "Stripe returned an invalid checkout reference")
         else if any otherSession holds then reject HoldConflict
@@ -343,15 +441,16 @@ attachCheckoutSession store code sessionId redirectUrl = modifyData store $ \old
             HoldConfirmed _ -> (old, Right h)
             HoldReleased -> reject HoldAlreadyReleased
 
--- | A verified payment consumes its own hold and issues an ordinary, already
--- redeemed ticket in the same durable write as the notification outbox. This
+-- | A verified payment confirms its saved promise and issues an ordinary
+-- ticket. A dated target is redeemed in the same write as the outbox; a
+-- transferable target remains available for later ordinary redemption. This
 -- does not depend on the browser returning or on mutable catalogue/content.
 -- Caller authority: paidPrice and paymentRef are from a verified Stripe event
 -- or authenticated API read, never from customer-supplied form fields.
 confirmCheckoutHold :: BookingStore -> Text -> Text -> Price -> IO (Either HoldError (Ticket, Bool))
 confirmCheckoutHold store code paymentRef paidPrice = do
   now <- iso8601Now
-  modifyData store $ \old@(BookingData ts emails holds) ->
+  modifyData store $ \old@(BookingData ts emails holds invitations) ->
     let reject err = (old, Left err)
      in case [h | h <- holds, chCode h == code] of
        [] -> reject HoldNotFound
@@ -361,17 +460,22 @@ confirmCheckoutHold store code paymentRef paidPrice = do
          | otherwise -> case chState h of
              HoldConfirmed prior
                | prior /= paymentRef -> reject HoldPaymentMismatch
-               | otherwise -> case [t | t <- ts, tkCode t == code, tkPaymentRef t == paymentRef, maybe False ((== slotIdOf (chSlot h)) . redSlotId) (tkRedemption t)] of
+               | otherwise -> case [t | t <- ts, tkCode t == code, tkPaymentRef t == paymentRef, ticketMatchesTarget h t] of
                    [t] -> (old, Right (t, False))
                    _ -> reject HoldConflict
              _ | any (\t -> tkCode t == code || tkPaymentRef t == paymentRef) ts -> reject HoldConflict
              _ ->
-               let red = Redemption (slotIdOf (chSlot h)) "" now Nothing
-                   ticket = Ticket code (chProduct h) paymentRef now (chSeats h) (Just red) []
-                   messages = [bookingDelivery now ticket red (chSlot h) recipient | emailsEnabled emails, recipient <- emailsRecipients emails]
+               let redemption = fmap (\slot -> Redemption (slotIdOf slot) "" now Nothing) (checkoutSlot h)
+                   ticket = Ticket code (chProduct h) paymentRef now (chSeats h) redemption []
+                   messages = [bookingDelivery now ticket red slot recipient | emailsEnabled emails, recipient <- emailsRecipients emails, Just red <- [redemption], Just slot <- [checkoutSlot h]]
                    emails' = emails {emailsDeliveries = emailsDeliveries emails <> messages}
                    h' = h {chState = HoldConfirmed paymentRef}
-                in (BookingData (ts <> [ticket]) emails' (replaceHold h' holds), Right (ticket, True))
+                in (BookingData (ts <> [ticket]) emails' (replaceHold h' holds) invitations, Right (ticket, True))
+
+ticketMatchesTarget :: CheckoutHold -> Ticket -> Bool
+ticketMatchesTarget hold ticket = tkSeats ticket == chSeats hold && case chTarget hold of
+  TransferableTicket -> True -- A bought-ahead ticket may have been redeemed later.
+  DatedClass slot -> maybe False ((== slotIdOf slot) . redSlotId) (tkRedemption ticket)
 
 -- | Only call after Stripe has established terminal-unpaid expiry/cancellation
 -- or a definitive never-created result. A browser cancel or local timer is NOT
@@ -385,7 +489,7 @@ releaseCheckoutHold store code = modifyHold store code $ \h -> case chState h of
 -- This does not affect payment, capacity, redemption identity or past messages.
 setPreferredName :: BookingStore -> Text -> Text -> IO (Either HoldError Ticket)
 setPreferredName store code name =
-  modifyData store $ \old@(BookingData ts emails holds) ->
+  modifyData store $ \old@(BookingData ts emails holds invitations) ->
     let reject err = (old, Left err)
         chosen = T.strip name
      in if T.length chosen > 100 || T.any isControl chosen
@@ -393,16 +497,16 @@ setPreferredName store code name =
           else case [t | t <- ts, tkCode t == code] of
             [t] | Just red <- tkRedemption t ->
               let t' = t {tkRedemption = Just red {redName = chosen}}
-               in (BookingData (replaceTicket t' ts) emails holds, Right t')
+               in (BookingData (replaceTicket t' ts) emails holds invitations, Right t')
             _ -> reject HoldTicketNotConfirmed
 
 modifyHold :: BookingStore -> Text -> (CheckoutHold -> Either HoldError CheckoutHold) -> IO (Either HoldError CheckoutHold)
-modifyHold store code change = modifyData store $ \old@(BookingData ts emails holds) ->
+modifyHold store code change = modifyData store $ \old@(BookingData ts emails holds invitations) ->
   case [h | h <- holds, chCode h == code] of
     [] -> (old, Left HoldNotFound)
     h : _ -> case change h of
       Left err -> (old, Left err)
-      Right h' -> (BookingData ts emails (replaceHold h' holds), Right h')
+      Right h' -> (BookingData ts emails (replaceHold h' holds) invitations, Right h')
 
 replaceHold :: CheckoutHold -> [CheckoutHold] -> [CheckoutHold]
 replaceHold h' = map (\h -> if chCode h == chCode h' then h' else h)
@@ -410,20 +514,27 @@ replaceHold h' = map (\h -> if chCode h == chCode h' then h' else h)
 validReference :: Text -> Text -> Bool
 validReference prefix value = prefix `T.isPrefixOf` value && T.length value > T.length prefix && T.length value <= 255 && T.all (\c -> isAscii c && (isAlphaNum c || c == '_')) value
 
-checkedHoldFields :: Text -> SlotSpec -> Text -> Text -> Text -> Price -> Either String ()
-checkedHoldFields code slot priceId product' seats (Price (Cents amount) _)
+checkedHoldFields :: Text -> CheckoutTarget -> Text -> Text -> Text -> Price -> Maybe InvitationAttribution -> Either String ()
+checkedHoldFields code target priceId product' seats price'@(Price (Cents amount) _) attribution
   | not (isTicketCode code) = Left "the ticket reference is invalid"
   | not (validReference "price_" priceId) = Left "the Stripe price reference is invalid"
   | T.null (T.strip product') || T.length product' > 1000 = Left "the ticket name is empty or too long"
   | amount <= 0 = Left "a positive ticket price is required"
-  | slotCap slot < 1 || slotCap slot > 1000 = Left "the class capacity must be between 1 and 1000"
-  | (parseTimeM True defaultTimeLocale "%F" (T.unpack (slotDate slot)) :: Maybe Day) == Nothing = Left "the class date is invalid"
-  | (parseTimeM True defaultTimeLocale "%R" (T.unpack (slotStart slot)) :: Maybe TimeOfDay) == Nothing = Left "the class start time is invalid"
-  | (parseTimeM True defaultTimeLocale "%R" (T.unpack (slotEnd slot)) :: Maybe TimeOfDay) == Nothing = Left "the class end time is invalid"
+  | Just source <- attribution, seats /= "1" || price' /= iaPrice source || not (scopeMatches target (iaScope source)) = Left "the invitation and checkout terms differ"
+  | TransferableTicket <- target, attribution == Nothing = Left "a transferable checkout requires an invitation"
+  | DatedClass slot <- target, slotCap slot < 1 || slotCap slot > 1000 = Left "the class capacity must be between 1 and 1000"
+  | DatedClass slot <- target, (parseTimeM True defaultTimeLocale "%F" (T.unpack (slotDate slot)) :: Maybe Day) == Nothing = Left "the class date is invalid"
+  | DatedClass slot <- target, (parseTimeM True defaultTimeLocale "%R" (T.unpack (slotStart slot)) :: Maybe TimeOfDay) == Nothing = Left "the class start time is invalid"
+  | DatedClass slot <- target, (parseTimeM True defaultTimeLocale "%R" (T.unpack (slotEnd slot)) :: Maybe TimeOfDay) == Nothing = Left "the class end time is invalid"
   | seats == "all" = Right ()
   | otherwise = case reads (T.unpack seats) :: [(Int, String)] of
       [(n, "")] | n >= 1 && n <= 1000 && T.pack (show n) == seats -> Right ()
       _ -> Left "the ticket must reserve a positive whole number of places or the whole class"
+
+scopeMatches :: CheckoutTarget -> InvitationScope -> Bool
+scopeMatches TransferableTicket GeneralTicket = True
+scopeMatches (DatedClass slot) (EventTicket invited) = slotIdOf slot == slotIdOf invited
+scopeMatches _ _ = False
 
 -- | Issue the ticket for a succeeded payment, under the code minted before
 -- checkout. Idempotent on the payment: a redelivered webhook finds the ticket
@@ -432,13 +543,13 @@ checkedHoldFields code slot priceId product' seats (Price (Cents amount) _)
 issueTicket :: BookingStore -> Text -> Text -> Text -> Text -> IO (Either Text (Ticket, Bool))
 issueTicket store paymentRef code product' seats = do
   now <- iso8601Now
-  modifyData store $ \old@(BookingData ts emails holds) ->
+  modifyData store $ \old@(BookingData ts emails holds invitations) ->
     let unchanged result = (old, result)
      in
     case ([t | t <- ts, tkPaymentRef t == paymentRef], [t | t <- ts, tkCode t == code]) of
       (t : _, _) -> unchanged (Right (t, False))
       ([], _ : _) -> unchanged (Left "This ticket code already belongs to another payment.")
-      ([], []) | any ((== code) . chCode) holds -> unchanged (Left "This checkout includes a dated reservation and must be confirmed atomically.")
+      ([], []) | any ((== code) . chCode) holds -> unchanged (Left "This checkout has a saved purchase promise and must be confirmed atomically.")
       ([], []) ->
         let t =
               Ticket
@@ -450,7 +561,7 @@ issueTicket store paymentRef code product' seats = do
                 , tkRedemption = Nothing
                 , tkNotesSent = []
                 }
-         in (BookingData (ts <> [t]) emails holds, Right (t, True))
+         in (BookingData (ts <> [t]) emails holds invitations, Right (t, True))
   where
     normSeats s
       | T.toLower (T.strip s) == "all" = "all"
@@ -464,10 +575,10 @@ issueTicket store paymentRef code product' seats = do
 redeemTicket :: BookingStore -> [SlotSpec] -> Int -> Text -> Text -> Text -> IO (Either RedeemError Ticket)
 redeemTicket store slots maxWeekly code name slotId = do
   now <- iso8601Now
-  modifyData store $ \(BookingData ts emails holds) ->
+  modifyData store $ \(BookingData ts emails holds invitations) ->
     let norm = T.toUpper (T.filter (/= '-') (T.strip code))
         matches t = T.toUpper (T.filter (/= '-') (tkCode t)) == norm
-        unchanged result = (BookingData ts emails holds, result)
+        unchanged result = (BookingData ts emails holds invitations, result)
      in case [t | t <- ts, matches t] of
           [] -> unchanged (Left CodeNotFound)
           (t : _)
@@ -496,7 +607,7 @@ redeemTicket store slots maxWeekly code name slotId = do
                                     [ bookingDelivery now t' red s recipient
                                     | emailsEnabled emails, recipient <- emailsRecipients emails ]
                                   emails' = emails {emailsDeliveries = emailsDeliveries emails <> messages}
-                               in (BookingData (replaceTicket t' ts) emails' holds, Right t')
+                               in (BookingData (replaceTicket t' ts) emails' holds invitations, Right t')
 
 -- | Record the created calendar event id on a redeemed ticket.
 setEventId :: BookingStore -> Text -> Text -> IO ()
@@ -541,7 +652,7 @@ isTicketCode code =
 -- (an abandoned checkout simply never becomes a ticket).
 newTicketCode :: BookingStore -> IO Text
 newTicketCode store = do
-  BookingData ts _ holds <- readMVar (bsVar store)
+  BookingData ts _ holds _ <- readMVar (bsVar store)
   let go = do
         bytes <- getRandomBytes 8 :: IO BS.ByteString
         let chars = map pick (BS.unpack bytes)
@@ -562,8 +673,8 @@ iso8601Now = do
 -- ---------------------------------------------------------------------------
 
 modifyStore :: BookingStore -> ([Ticket] -> ([Ticket], Either e a)) -> IO (Either e a)
-modifyStore store f = modifyData store $ \(BookingData ts emails holds) ->
-  let (ts', result) = f ts in (BookingData ts' emails holds, result)
+modifyStore store f = modifyData store $ \(BookingData ts emails holds invitations) ->
+  let (ts', result) = f ts in (BookingData ts' emails holds invitations, result)
 
 modifyData :: BookingStore -> (BookingData -> (BookingData, Either e a)) -> IO (Either e a)
 modifyData store f =
@@ -590,7 +701,9 @@ saveTickets path state = do
 -- ---------------------------------------------------------------------------
 
 bookingDataToJSON :: BookingData -> JSON
-bookingDataToJSON (BookingData ts emails holds) = JObj [("tickets", JArr (map ticketToJSON ts)), ("reservationEmails", emailsToJSON emails), ("checkoutHolds", JArr (map holdToJSON holds))]
+bookingDataToJSON (BookingData ts emails holds invitations) = JObj $
+  [("tickets", JArr (map ticketToJSON ts)), ("reservationEmails", emailsToJSON emails), ("checkoutHolds", JArr (map holdToJSON holds))] <>
+  [("invitations", invitationRegistryToJSON invitations) | not (null (registryInvitations invitations))]
 
 bookingDataFromJSON :: JSON -> Either String BookingData
 bookingDataFromJSON v = do
@@ -602,6 +715,7 @@ bookingDataFromJSON v = do
     Nothing -> Right []
     Just (JArr entries) -> mapM holdFromJSON entries
     Just _ -> Left "bookings: 'checkoutHolds' is not an array"
+  invitations <- maybe (Right emptyInvitationRegistry) invitationRegistryFromJSON (v .:? "invitations")
   if S.size (S.fromList (map chCode holds)) /= length holds
     then Left "bookings: duplicate checkout attempt references; refusing ambiguous capacity"
     else pure ()
@@ -610,22 +724,30 @@ bookingDataFromJSON v = do
     then Left "bookings: a checkout session belongs to multiple holds; refusing ambiguous payment ownership"
     else pure ()
   mapM_ (validateHeldTicket tickets) holds
-  Right (BookingData tickets emails holds)
+  mapM_ (validateInvitationAttribution invitations) holds
+  Right (BookingData tickets emails holds invitations)
+
+validateInvitationAttribution :: InvitationRegistry -> CheckoutHold -> Either String ()
+validateInvitationAttribution invitations hold = case chInvitation hold of
+  Nothing -> Right ()
+  Just attribution -> case registryLookupId invitations (iaInvitationId attribution) of
+    Just invitation | attributionFor invitation == attribution -> Right ()
+    _ -> Left "bookings: invitation attribution does not match its immutable registered terms"
 
 validateHeldTicket :: [Ticket] -> CheckoutHold -> Either String ()
 validateHeldTicket tickets h = case chState h of
   HoldConfirmed paymentRef -> case [t | t <- tickets, tkCode t == chCode h] of
-    [t] | tkPaymentRef t == paymentRef, tkSeats t == chSeats h, Just red <- tkRedemption t, redSlotId red == slotIdOf (chSlot h) -> Right ()
-    _ -> Left "bookings: a confirmed checkout is missing its matching redeemed ticket; refusing inconsistent capacity"
+    [t] | tkPaymentRef t == paymentRef, ticketMatchesTarget h t -> Right ()
+    _ -> Left "bookings: a confirmed checkout is missing its matching paid ticket; refusing inconsistent ownership"
   _ | any ((== chCode h) . tkCode) tickets -> Left "bookings: an unpaid checkout also has a paid ticket; refusing inconsistent payment ownership"
   _ -> Right ()
 
 readReservationEmails :: BookingStore -> IO ReservationEmails
-readReservationEmails store = do BookingData _ emails _ <- readMVar (bsVar store); pure emails
+readReservationEmails store = do BookingData _ emails _ _ <- readMVar (bsVar store); pure emails
 
 modifyEmails :: BookingStore -> (ReservationEmails -> (ReservationEmails, a)) -> IO a
 modifyEmails store f = do
-  result <- modifyData store $ \(BookingData ts emails holds) -> let (next, value) = f emails in (BookingData ts next holds, Right value)
+  result <- modifyData store $ \(BookingData ts emails holds invitations) -> let (next, value) = f emails in (BookingData ts next holds invitations, Right value)
   either (const (fail "Unexpected reservation email store rejection")) pure result
 
 configureReservationEmails :: BookingStore -> Bool -> [Mailbox] -> IO ()
@@ -642,7 +764,7 @@ bookingDelivery now ticket red slot recipient =
 queueMissingReservationEmails :: BookingStore -> [SlotSpec] -> Text -> IO (Either Text Int)
 queueMissingReservationEmails store slots code = do
   now <- iso8601Now
-  modifyData store $ \old@(BookingData tickets emails holds) ->
+  modifyData store $ \old@(BookingData tickets emails holds invitations) ->
     let reject why = (old, Left why)
      in if not (emailsEnabled emails) || null (emailsRecipients emails)
           then reject "Enable reservation notifications and save recipients first. No email was queued."
@@ -651,7 +773,7 @@ queueMissingReservationEmails store slots code = do
               s : _ ->
                 let existing = map deliveryId (emailsDeliveries emails)
                     missing = [d | recipient <- emailsRecipients emails, let d = bookingDelivery now t red s recipient, deliveryId d `notElem` existing]
-                 in (BookingData tickets emails {emailsDeliveries = emailsDeliveries emails <> missing} holds, Right (length missing))
+                 in (BookingData tickets emails {emailsDeliveries = emailsDeliveries emails <> missing} holds invitations, Right (length missing))
               [] -> reject "The reserved class is no longer defined. Restore it before sending a notification."
             _ -> reject "No redeemed ticket matches that code. No email was queued."
 
@@ -754,38 +876,41 @@ ticketFromJSON v = do
 -- disappear and make places look free. Unrecognised state variants stop load.
 holdToJSON :: CheckoutHold -> JSON
 holdToJSON h =
-  let slot = chSlot h
-      Price (Cents amount) currency = chPrice h
+  let Price (Cents amount) currency = chPrice h
       state = case chState h of
         HoldCreating -> JObj [("kind", JStr "creating")]
         HoldCheckout sessionId redirectUrl -> JObj [("kind", JStr "checkout"), ("sessionId", string sessionId), ("url", string redirectUrl)]
         HoldConfirmed paymentRef -> JObj [("kind", JStr "confirmed"), ("paymentRef", string paymentRef)]
         HoldReleased -> JObj [("kind", JStr "released")]
-   in JObj
-        [ ("code", string (chCode h))
-        , ("slot", JObj
-            [ ("date", string (slotDate slot)), ("start", string (slotStart slot))
-            , ("end", string (slotEnd slot)), ("area", string (slotArea slot))
-            , ("capacity", JNum (fromIntegral (slotCap slot)))
-            , ("description", string (slotDescription slot)) ])
-        , ("priceId", string (chPriceId h)), ("product", string (chProduct h))
+      targetFields = case chTarget h of
+        TransferableTicket -> [("target", string "transferable")]
+        DatedClass slot -> [("slot", slotToJSON slot)]
+   in JObj $
+        [("code", string (chCode h))] <> targetFields <>
+        [ ("priceId", string (chPriceId h)), ("product", string (chProduct h))
         , ("seats", string (chSeats h)), ("amount", JNum (fromIntegral amount))
         , ("currency", string (currencyCode currency)), ("createdAt", string (chCreatedAt h))
         , ("expiresAt", JStr (show (chExpiresAt h))), ("state", state)
-        ]
+        ] <> [("invitation", attributionToJSON attribution) | Just attribution <- [chInvitation h]]
+  where string = JStr . T.unpack
+
+slotToJSON :: SlotSpec -> JSON
+slotToJSON slot = JObj
+  [ ("date", string (slotDate slot)), ("start", string (slotStart slot))
+  , ("end", string (slotEnd slot)), ("area", string (slotArea slot))
+  , ("capacity", JNum (fromIntegral (slotCap slot)))
+  , ("description", string (slotDescription slot)) ]
   where string = JStr . T.unpack
 
 holdFromJSON :: JSON -> Either String CheckoutHold
 holdFromJSON v = do
   code <- txt v "code"
-  sv <- v .: "slot"
-  date <- txt sv "date"
-  start <- txt sv "start"
-  end <- txt sv "end"
-  area <- txt sv "area"
-  cap <- int sv "capacity"
-  description <- txt sv "description"
-  let slot = SlotSpec date start end area cap 0 description
+  target <- case v .:? "target" of
+    Nothing -> do
+      sv <- v .: "slot"
+      DatedClass <$> (SlotSpec <$> txt sv "date" <*> txt sv "start" <*> txt sv "end" <*> txt sv "area" <*> int sv "capacity" <*> pure 0 <*> txt sv "description")
+    Just (JStr "transferable") | v .:? "slot" == Nothing -> Right TransferableTicket
+    _ -> Left "checkout hold target is unsupported or ambiguous"
   priceId <- txt v "priceId"
   product' <- txt v "product"
   seats <- txt v "seats"
@@ -793,7 +918,8 @@ holdFromJSON v = do
   currencyText <- txt v "currency"
   currency <- maybe (Left "checkout hold has an unsupported currency") Right (currencyOfCode currencyText)
   let price' = Price (Cents amount) currency
-  checkedHoldFields code slot priceId product' seats price'
+  attribution <- mapM attributionFromJSON (v .:? "invitation")
+  checkedHoldFields code target priceId product' seats price' attribution
   created <- txt v "createdAt"
   expiryText <- txt v "expiresAt"
   expiry <- case reads (T.unpack expiryText) of
@@ -814,7 +940,7 @@ holdFromJSON v = do
       if validReference "pi_" paymentRef then Right (HoldConfirmed paymentRef) else Left "checkout hold has an invalid payment reference"
     "released" -> Right HoldReleased
     _ -> Left "checkout hold has an unsupported state; refusing to assume free capacity"
-  pure (CheckoutHold code slot priceId product' seats price' created expiry state)
+  pure (CheckoutHold code target priceId product' seats price' created expiry state attribution)
   where
     txt o k = T.pack <$> (jstr =<< o .: k)
     int o k = do

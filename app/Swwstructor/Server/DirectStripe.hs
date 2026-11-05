@@ -7,7 +7,7 @@
 module Swwstructor.Server.DirectStripe
   ( DirectStripe (..), DirectRequest (..), DirectSession (..), SessionState (..)
   , DirectPayment (..), liveDirectStripe, directPaymentOf, directSessionOf
-  , isDatedPayment, directFormParams
+  , isDatedPayment, isManagedPayment, directFormParams
   ) where
 
 import Control.Exception (try)
@@ -158,7 +158,7 @@ sessionFromJSON :: JSON -> Either String DirectSession
 sessionFromJSON obj = do
   sid <- required "Checkout session has no valid identifier." (stringField obj "id" >>= check (validId "cs_"))
   code <- required "Checkout session has no recognised dated-booking reference." (stringField (metadata obj) "sww_code" >>= check isTicketCode)
-  if stringField (metadata obj) "sww_flow" /= Just "dated" then Left "Checkout session belongs to a different purchase flow." else pure ()
+  if not (managedFlow obj) then Left "Checkout session belongs to a different purchase flow." else pure ()
   expiry <- required "Checkout session has no valid expiry time." (integerField obj "expires_at")
   state <- case (stringField obj "status", stringField obj "payment_status") of
     (Just "complete", Just "paid") -> do
@@ -186,10 +186,16 @@ eventObject raw = do
 isDatedPayment :: BS.ByteString -> Bool
 isDatedPayment raw = (eventObject raw >>= (\obj -> stringField (metadata obj) "sww_flow")) == Just "dated"
 
+managedFlow :: JSON -> Bool
+managedFlow obj = stringField (metadata obj) "sww_flow" `elem` [Just "dated", Just "invitation"]
+
+isManagedPayment :: BS.ByteString -> Bool
+isManagedPayment = maybe False managedFlow . eventObject
+
 directPaymentOf :: BS.ByteString -> Maybe DirectPayment
 directPaymentOf raw = do
   obj <- eventObject raw
-  if stringField obj "status" /= Just "succeeded" || stringField (metadata obj) "sww_flow" /= Just "dated" then Nothing else do
+  if stringField obj "status" /= Just "succeeded" || not (managedFlow obj) then Nothing else do
     payment <- stringField obj "id"
     code <- stringField (metadata obj) "sww_code"
     amount <- priceFields obj "amount_received"

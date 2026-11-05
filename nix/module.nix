@@ -9,6 +9,11 @@ self:
 let
   cfg = config.services.swwstructor;
   defaultPkg = self.packages.${pkgs.stdenv.hostPlatform.system}.swwstructor-server;
+  invitationFonts = pkgs.google-fonts.override {
+    fonts = [ "Cormorant Garamond" "Inter" "Noto Serif JP" ];
+  };
+  invitationFontConfig = pkgs.makeFontsConf { fontDirectories = [ invitationFonts ]; };
+  invitationsEnabled = inst: inst.invitations.friendPriceId != null && inst.invitations.partnerPriceId != null;
 
   instanceModule =
     { name, ... }:
@@ -65,6 +70,18 @@ let
           type = lib.types.enum [ "test" "prod" ];
           default = "test";
           description = "Stripe stage label (test|prod).";
+        };
+        invitations = {
+          friendPriceId = lib.mkOption {
+            type = lib.types.nullOr lib.types.str;
+            default = null;
+            description = "Private Stripe one-person friend invitation price ID. Configure both invitation prices to enable invitation rendering.";
+          };
+          partnerPriceId = lib.mkOption {
+            type = lib.types.nullOr lib.types.str;
+            default = null;
+            description = "Private Stripe one-person partner invitation price ID. Referral fees are recorded for settlement, without automatic payouts.";
+          };
         };
         googleClientIdFile = lib.mkOption {
           type = lib.types.nullOr lib.types.path;
@@ -171,6 +188,10 @@ in
   };
 
   config = lib.mkIf (cfg.instances != { }) {
+    assertions = lib.mapAttrsToList (name: inst: {
+      assertion = (inst.invitations.friendPriceId == null) == (inst.invitations.partnerPriceId == null);
+      message = "swwstructor instance ${name}: configure both invitation price IDs, or leave both unset.";
+    }) cfg.instances;
     systemd.services = lib.mapAttrs' (
       name: inst:
       lib.nameValuePair "swwstructor-${name}" {
@@ -180,7 +201,8 @@ in
         wants = [ "network-online.target" ];
         # age: secret decryption at start. imagemagick: HEIC -> JPEG for the
         # media library (iPhone uploads from browsers that cannot decode HEIC).
-        path = [ pkgs.age pkgs.imagemagick ];
+        path = [ pkgs.age pkgs.imagemagick ]
+          ++ lib.optionals (invitationsEnabled inst) [ pkgs.qrencode pkgs.librsvg ];
         serviceConfig = {
           Restart = "always";
           RestartSec = 3;
@@ -199,6 +221,13 @@ in
           SWW_BOOKING_CALENDAR_ENABLED = lib.boolToString inst.booking.calendarEnabled;
           SWW_BOOKING_TZ_OFFSET = inst.booking.tzOffset;
           SWW_BOOKING_VENUE_NOUN = inst.booking.venueNoun;
+        }
+        // lib.optionalAttrs (invitationsEnabled inst) {
+          SWW_INVITATION_FRIEND_PRICE_ID = inst.invitations.friendPriceId;
+          SWW_INVITATION_PARTNER_PRICE_ID = inst.invitations.partnerPriceId;
+          FONTCONFIG_FILE = invitationFontConfig;
+          PANGOCAIRO_BACKEND = "fc";
+          XDG_CACHE_HOME = "${inst.dataDir}/.cache";
         }
         // lib.optionalAttrs (inst.booking.staff != [ ]) {
           SWW_BOOKING_STAFF = lib.concatStringsSep "," inst.booking.staff;

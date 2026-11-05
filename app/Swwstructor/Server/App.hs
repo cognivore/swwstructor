@@ -14,7 +14,7 @@ module Swwstructor.Server.App
   ) where
 
 import Control.Exception (IOException, SomeException, try)
-import Control.Monad (when)
+import Control.Monad (when, void)
 import Control.Monad.IO.Class (liftIO)
 import Crypto.Hash (Digest, SHA256, hash)
 import qualified Data.ByteArray as BA
@@ -112,7 +112,7 @@ import Swwstructor.Edit
   )
 import Swwstructor.Html (Html, elAttr, esc, htmlConcat, renderHtml)
 import Swwstructor.Media (contentTypeFor, isSafeMediaName)
-import Swwstructor.Money (Quantity (Quantity), Price (..), Cents (..), currencyCode)
+import Swwstructor.Money (Quantity (Quantity), Price (..), Cents (..), Currency (GBP), currencyCode)
 import Swwstructor.Plugins.Stripe (siteBuyRegistry)
 import Swwstructor.Plugins.StripeCatalog (CatalogItem (ciAvailability, ciName, ciPriceId, ciSeats, ciPrice), catalogSection, isPriceId)
 import Swwstructor.Server.Catalog (CatalogCache, getCatalog)
@@ -136,7 +136,7 @@ import Swwstructor.Server.Booking
   ( BookingStore
   , RedeemError (AlreadyRedeemed, CodeNotFound, SlotFull, SlotUnknown, WeekFull)
   , Redemption (redSlotId, redName)
-  , Ticket (tkCode, tkProduct, tkRedemption)
+  , Ticket (tkCode, tkProduct, tkRedemption, tkPaymentRef)
   , issueTicket
   , isTicketCode
   , listTickets
@@ -147,11 +147,20 @@ import Swwstructor.Server.Booking
   , queueTestEmail
   , queueMissingReservationEmails
   , retryReservationEmail
-  , CheckoutHold, HoldState (..), chCode, chSlot, chPriceId, chState, chCreatedAt, chExpiresAt, chSeats
+  , CheckoutHold, HoldState (..), chCode, checkoutSlot, chInvitation, chPriceId, chState, chCreatedAt, chExpiresAt, chSeats
   , beginCheckoutHold, lookupCheckoutHold, bookingAvailability, holdErrorMessage
   , setPreferredName
   , listPendingCheckoutHolds
+  , createInvitation, listInvitations, lookupInvitation, setInvitationEnabled
+  , beginInvitationCheckout, listInvitationPurchases, InvitationPurchase (..)
   )
+import qualified Swwstructor.Server.Invitation as Inv
+import Swwstructor.Server.InvitationStripe (InvitationPrice (..))
+import Swwstructor.Server.InvitationArtwork
+  ( ArtworkRenderer, ArtifactFormat (..), renderInvitationArtifact )
+import Swwstructor.Server.InvitationView
+  ( InvitationLanding (..), InvitationRow (..), InvitationDetail (..), InvitationSaleRow (..)
+  , invitationLandingPage, invitationsPage, invitationDetailPage )
 import Swwstructor.Server.ReservationEmail (parseRecipients, parseMailbox)
 import Swwstructor.Server.Media (deleteMedia, listAssets, listMedia, resolveMedia, saveMedia)
 import Swwstructor.Server.Notify
@@ -198,7 +207,7 @@ import Swwstructor.Server.Stripe
   )
 import Swwstructor.Server.DirectStripe
   ( DirectStripe (..), DirectSession (..), SessionState (..)
-  , isDatedPayment, directPaymentOf, directSessionOf
+  , isManagedPayment, directPaymentOf, directSessionOf
   )
 import Swwstructor.Server.DirectBooking
   ( DirectBooking (..), CheckoutProgress (..), resumeCheckout, confirmPayment, applySession )
@@ -254,6 +263,8 @@ data AppEnv = AppEnv
   , aeDatedCatalog :: !(IO (Either Text [CatalogItem]))
   -- ^ A fresh catalogue read for admission; a stale display cache cannot
   -- authorise a purchase. Replaceable in application tests.
+  , aeInvitationPrice :: !(Inv.InvitationTier -> IO (Either Text InvitationPrice))
+  , aeInvitationArtwork :: !ArtworkRenderer
   }
 
 currentSite :: AppEnv -> ActionM SiteSpec
@@ -405,6 +416,8 @@ swwApp env = do
 
   post "/buy/:id" (handleBuy env)
   post "/book" (handleBook env)
+  get "/invite/:token" (handleInvitation env)
+  post "/invite/:token/checkout" (handleInvitationCheckout env)
   get "/checkout/:code" (handleCheckoutPage env)
   post "/checkout/:code/cancel" (handleCheckoutCancel env)
   get "/success" (handleSuccess env)
@@ -432,6 +445,12 @@ swwApp env = do
   -- Admin: content editor (all gated)
   get "/admin" (adminGate env (dashboard env Nothing))
   get "/admin/checkouts" (adminGate env (handleCheckouts env))
+  get "/admin/invitations" (adminGate env (handleInvitations env Nothing))
+  post "/admin/invitations" (invitationAdminGate env (handleInvitationCreate env))
+  get "/admin/invitations/:id" (adminGate env (handleInvitationDetail env))
+  post "/admin/invitations/:id/enabled" (invitationAdminGate env (handleInvitationEnabled env))
+  get "/admin/invitations/:id/invitation.png" (adminGate env (handleInvitationArtifact env ArtifactPng))
+  get "/admin/invitations/:id/invitation.pdf" (adminGate env (handleInvitationArtifact env ArtifactPdf))
   post "/admin/site" (adminGate env (handleSiteMeta env))
   post "/admin/page/new" (adminGate env (handlePageNew env))
   post "/admin/page/delete" (adminGate env (handlePageDelete env))
@@ -530,19 +549,33 @@ setBookingCookie env code = do
   setHeader "Cache-Control" "private, no-store"
 
 ensureBookingCookie :: AppEnv -> ActionM ()
-ensureBookingCookie env = do
+ensureBookingCookie = void . ensureBookingAttempt
+
+ensureBookingAttempt :: AppEnv -> ActionM Text
+ensureBookingAttempt env = do
   code <- bookingCookieCode env
   hold <- maybe (pure Nothing) (liftIO . lookupCheckoutHold (aeBookings env)) code
   case (code, chState <$> hold) of
-    (Just _, Nothing) -> pure ()
-    (Just _, Just HoldCreating) -> pure ()
-    (Just _, Just HoldCheckout{}) -> pure ()
-    _ -> liftIO (newTicketCode (aeBookings env)) >>= setBookingCookie env
+    (Just existing, Nothing) -> pure existing
+    (Just existing, Just HoldCreating) -> pure existing
+    (Just existing, Just HoldCheckout{}) -> pure existing
+    _ -> do
+      fresh <- liftIO (newTicketCode (aeBookings env))
+      setBookingCookie env fresh
+      pure fresh
 
 sameOrigin :: AppEnv -> ActionM Bool
 sameOrigin env = do
   origin <- header "Origin"
   pure (maybe True ((== T.dropWhileEnd (== '/') (aeBaseUrl env)) . TL.toStrict) origin)
+
+-- A no-referrer document submits ordinary forms with Origin: null. These
+-- handlers MUST also verify their session/attempt-bound CSRF token; an opaque
+-- origin alone is never admission authority. Explicit foreign origins fail.
+csrfFormOrigin :: AppEnv -> ActionM Bool
+csrfFormOrigin env = do
+  origin <- header "Origin"
+  pure (maybe True (\value -> value == "null" || TL.toStrict value == T.dropWhileEnd (== '/') (aeBaseUrl env)) origin)
 
 handleBook :: AppEnv -> ActionM ()
 handleBook env = do
@@ -563,7 +596,7 @@ handleBook env = do
       previous <- liftIO (lookupCheckoutHold (aeBookings env) attempt)
       case previous of
         Just hold
-          | slotIdOf (chSlot hold) == sid && chPriceId hold == pid -> runCheckout env hold
+          | (slotIdOf <$> checkoutSlot hold) == Just sid && chPriceId hold == pid && chInvitation hold == Nothing -> runCheckout env hold
           | otherwise -> checkoutMessage env status409 "You already have a checkout open" "Finish or cancel your previous checkout before choosing another class. This prevents two purchases by accident." (Just attempt)
         Nothing -> do
           site <- currentSite env
@@ -602,7 +635,7 @@ runCheckout env hold = do
     Right (Right (BookingPaid ticket)) -> status status303 >> setHeader "Location" (TL.fromStrict ("/booking/" <> tkCode ticket))
     Right (Right CheckoutEnded) -> do
       liftIO (newTicketCode (aeBookings env)) >>= setBookingCookie env
-      checkoutMessage env status409 "Checkout ended" "This checkout has expired without payment. Your places have been released; choose a class to start again." Nothing
+      endedCheckoutMessage env hold status409
     Right (Right (CheckoutPending message)) -> checkoutMessage env status200 "Confirming your payment" message (Just (chCode hold))
 
 checkoutMessage :: AppEnv -> Status -> Text -> Text -> Maybe Text -> ActionM ()
@@ -616,6 +649,7 @@ checkoutMessage env response title message code = do
 
 handleCheckoutPage :: AppEnv -> ActionM ()
 handleCheckoutPage env = do
+  invitationHeaders
   code <- captureParam "code"
   found <- liftIO (lookupCheckoutHold (aeBookings env) code)
   case found of
@@ -626,16 +660,16 @@ handleCheckoutPage env = do
         Right (Right (BookingPaid ticket)) -> status status303 >> setHeader "Location" (TL.fromStrict ("/booking/" <> tkCode ticket))
         Right (Right CheckoutEnded) -> do
           liftIO (newTicketCode (aeBookings env)) >>= setBookingCookie env
-          checkoutMessage env status200 "Checkout ended" "This checkout ended without payment. Choose an upcoming class whenever you're ready." Nothing
+          endedCheckoutMessage env hold status200
         Right (Right (ReadyToPay (Url url))) -> do
           site <- currentSite env
           setHeader "Cache-Control" "private, no-store"
-          htmlOf (messagePage (siteTheme site) (aeAnalytics env) "Your class is held" $
-            para (slotLabel (chSlot hold) <> ". Finish checkout to confirm your place, or cancel to choose another date.") <>
+          htmlOf (messagePage (siteTheme site) Nothing "Your checkout" $
+            para (maybe "Your transferable ticket for one person. Finish payment to receive your ticket, or cancel this checkout." (\s -> slotLabel s <> ". Finish checkout to confirm your place, or cancel to choose another date.") (checkoutSlot hold)) <>
             elAttr "p" [] (elAttr "a" [("href", url), ("class", "sww-buy")] (esc "Continue to payment")) <>
             elAttr "form" [("method", "post"), ("action", "/checkout/" <> code <> "/cancel")] (
               elAttr "input" [("type", "hidden"), ("name", "csrf"), ("value", checkoutActionToken env "cancel" code)] mempty <>
-              elAttr "button" [("type", "submit"), ("class", "sww-buy sww-buy-off")] (esc "Cancel checkout and release my places")))
+              elAttr "button" [("type", "submit"), ("class", "sww-buy sww-buy-off")] (esc "Cancel checkout")))
         _ -> checkoutMessage env status503 "Checking your checkout" "Your places remain protected while we confirm the payment service's response. Refresh this page shortly." (Just code)
 
 checkoutActionToken :: AppEnv -> Text -> Text -> Text
@@ -645,7 +679,7 @@ handleCheckoutCancel :: AppEnv -> ActionM ()
 handleCheckoutCancel env = do
   code <- captureParam "code"
   token <- fromMaybe "" <$> formParamMaybe "csrf"
-  originOk <- sameOrigin env
+  originOk <- csrfFormOrigin env
   if not originOk || not (ctEq token (checkoutActionToken env "cancel" code))
     then status status403 >> text "Please cancel from your checkout page."
     else do
@@ -662,12 +696,33 @@ handleCheckoutCancel env = do
           case result of
             Right CheckoutEnded -> do
               liftIO (newTicketCode (aeBookings env)) >>= setBookingCookie env
+              destination <- checkoutReturnPath env hold
               status status303
-              setHeader "Location" "/classes"
+              setHeader "Location" (TL.fromStrict destination)
             Right (BookingPaid ticket) -> status status303 >> setHeader "Location" (TL.fromStrict ("/booking/" <> tkCode ticket))
             _ -> checkoutMessage env status503 "Cancellation is being checked" "We haven't confirmed cancellation yet. Your places remain held; return to this checkout shortly." (Just code)
         Just hold -> runCheckout env hold
         Nothing -> checkoutMessage env status404 "Checkout not found" "Please return to the class list." Nothing
+
+checkoutReturnPath :: AppEnv -> CheckoutHold -> ActionM Text
+checkoutReturnPath env hold = case chInvitation hold of
+  Nothing -> pure "/classes"
+  Just attribution -> do
+    attempt <- bookingCookieCode env
+    invitations <- liftIO (listInvitations (aeBookings env))
+    pure $ case [i | attempt == Just (chCode hold), i <- invitations, Inv.invitationId i == Inv.iaInvitationId attribution] of
+      invitation : _ -> "/invite/" <> Inv.invitationTokenText (Inv.invitationToken invitation)
+      [] -> "/classes"
+
+endedCheckoutMessage :: AppEnv -> CheckoutHold -> Status -> ActionM ()
+endedCheckoutMessage env hold response = do
+  invitationHeaders
+  site <- currentSite env
+  destination <- checkoutReturnPath env hold
+  status response
+  htmlOf (messagePage (siteTheme site) Nothing "Checkout ended" $
+    para "This checkout ended without payment. You can start again whenever you are ready." <>
+    elAttr "p" [] (elAttr "a" [("href", destination), ("class", "sww-buy")] (esc (if destination == "/classes" then "See upcoming classes" else "Return to your invitation"))))
 
 handleBuy :: AppEnv -> ActionM ()
 handleBuy env = do
@@ -760,7 +815,7 @@ handleWebhook env = do
             -- id, status and our metadata); everything else is acknowledged
             -- unread, so no customer data is processed here.
             when (evType == "payment_intent.succeeded") $
-              if isDatedPayment rawBytes then case directPaymentOf rawBytes of
+              if isManagedPayment rawBytes then case directPaymentOf rawBytes of
                 Nothing -> status status400 >> text "dated payment evidence is incomplete" >> finish
                 Just payment -> do
                   recorded <- liftIO (tryStorage (confirmPayment (directBooking env) payment))
@@ -785,7 +840,7 @@ handleWebhook env = do
                         finish
                   Nothing -> liftIO (putStrLn "[stripe webhook] no unambiguous recognised reference — skipped")
                 _ -> liftIO (putStrLn "[stripe webhook] payment without a ticket code — not ours, skipped")
-            when (evType == "checkout.session.expired" && isDatedPayment rawBytes) $
+            when (evType == "checkout.session.expired" && isManagedPayment rawBytes) $
               case directSessionOf rawBytes of
                 Just session | dsState session == SessionExpired -> do
                   hold <- liftIO (lookupCheckoutHold (aeBookings env) (dsCode session))
@@ -932,7 +987,7 @@ reserveLesson env site code name slotId = do
 -- the site has): the class, its venue address, and the calendar file to save.
 handleBookingPage :: AppEnv -> ActionM ()
 handleBookingPage env = do
-  setHeader "Cache-Control" "private, no-store"
+  invitationHeaders
   code <- captureParam "code"
   pending <- liftIO (lookupCheckoutHold (aeBookings env) code)
   case pending of
@@ -940,12 +995,12 @@ handleBookingPage env = do
       result <- liftIO (tryStorage (resumeCheckout (directBooking env) hold))
       case result of
         Right (Right BookingPaid{}) -> pure ()
-        Right (Right CheckoutEnded) -> checkoutMessage env status200 "Checkout ended" "Your checkout ended without payment. Please choose a class to start again." Nothing >> finish
+        Right (Right CheckoutEnded) -> endedCheckoutMessage env hold status200 >> finish
         _ -> do
           setHeader "Refresh" "5"
-          checkoutMessage env status200 "Confirming your booking" "Your places are held while we confirm payment. This page updates automatically; you do not need to choose a date again." (Just code)
+          checkoutMessage (env {aeAnalytics = Nothing}) status200 "Confirming your purchase" "We are checking your payment. This page updates automatically; you do not need to start another purchase." (Just code)
           finish
-    Just _ -> checkoutMessage env status200 "Checkout ended" "Your checkout ended without payment. Please choose a class to start again." Nothing >> finish
+    Just hold -> endedCheckoutMessage env hold status200 >> finish
     Nothing -> pure ()
   site <- currentSite env
   let th = siteTheme site
@@ -954,7 +1009,7 @@ handleBookingPage env = do
     Nothing -> do
       status status404
       htmlOf (simplePage th (aeAnalytics env) "No such booking" "That booking code was not recognised \x2014 check it against your Stripe receipt.")
-    Just (LessonBooking t Nothing) -> htmlOf (ticketPage th (aeAnalytics env) t)
+    Just (LessonBooking t Nothing) -> htmlOf (ticketPage th Nothing t)
     Just (PaymentPreview p Nothing) -> htmlOf (paymentCodePage th (aeAnalytics env) p)
     Just (LessonBooking t (Just s)) -> renderDetails (tkCode t) (tkProduct t) s "You're booked!" (preferredNameForm env t)
     Just (PaymentPreview p (Just s)) -> renderDetails (pcCode p) (pcProduct p) s "[PAYMENT PENDING] Calendar preview" (para (paymentOnlyMessage p))
@@ -966,7 +1021,7 @@ handleBookingPage env = do
             <> case venueForArea venues (slotArea s) of
               Just v | not (T.null (vnMapUrl v)) -> elAttr "p" [("class", "sww-paragraph")] (elAttr "a" [("class", "sww-link"), ("href", vnMapUrl v)] (esc "Open the map"))
               _ -> mempty
-      htmlOf . messagePage (siteTheme site) (aeAnalytics env) title $
+      htmlOf . messagePage (siteTheme site) Nothing title $
         htmlConcat
           [ notice
           , para ("When: " <> slotLabel s)
@@ -990,7 +1045,7 @@ handlePreferredName env = do
   code <- captureParam "code"
   name <- fromMaybe "" <$> formParamMaybe "name"
   token <- fromMaybe "" <$> formParamMaybe "csrf"
-  originOk <- sameOrigin env
+  originOk <- csrfFormOrigin env
   if not originOk || not (ctEq token (checkoutActionToken env "name" code))
     then status status403 >> text "Please save the name from your booking page."
     else do
@@ -1032,7 +1087,7 @@ lookupBooking env = do
     Just p -> Just (PaymentPreview p (pcPreviewSlot p >>= slotById (siteSlots site)))
     Nothing -> case [t | t <- tickets, tkCode t == code] of
       (t : _) -> Just (LessonBooking t (case hold of
-        Just saved | HoldConfirmed _ <- chState saved -> Just (chSlot saved)
+        Just saved | HoldConfirmed _ <- chState saved, Just dated <- checkoutSlot saved -> Just dated
         _ -> tkRedemption t >>= (slotById (siteSlots site) . redSlotId)))
       [] -> Nothing
 
@@ -1374,6 +1429,215 @@ handlePartialDelete env = do
 -- Admin: auth + Stripe keys
 -- ---------------------------------------------------------------------------
 
+-- Invitations are shareable bearer links. They have no analytics, outbound
+-- referrers or cache entries; exports and the registry remain admin-only.
+invitationHeaders :: ActionM ()
+invitationHeaders = do
+  setHeader "Cache-Control" "private, no-store"
+  setHeader "Referrer-Policy" "no-referrer"
+  setHeader "X-Robots-Tag" "noindex, nofollow, noarchive"
+
+invitationUrl :: AppEnv -> Inv.Invitation -> Text
+invitationUrl env invitation = aeBaseUrl env <> "/invite/" <> Inv.invitationTokenText (Inv.invitationToken invitation)
+
+invitationPath :: Inv.Invitation -> Text
+invitationPath invitation = "/admin/invitations/" <> Inv.invitationIdText (Inv.invitationId invitation)
+
+invitationEventLabel :: Inv.Invitation -> Maybe Text
+invitationEventLabel invitation = case Inv.invitationScope invitation of
+  Inv.GeneralTicket -> Nothing
+  Inv.EventTicket slot -> Just (slotLabel slot)
+
+invitationTierLabel :: Inv.InvitationTier -> Text
+invitationTierLabel Inv.Friend = "Friends and their friends · £65"
+invitationTierLabel Inv.Partner = "Partner / venue · £75 · £5 referral fee"
+
+findPublicInvitation :: AppEnv -> ActionM (Maybe Inv.Invitation)
+findPublicInvitation env = do
+  token <- captureParam "token"
+  maybe (pure Nothing) (liftIO . lookupInvitation (aeBookings env)) (Inv.parseInvitationToken token)
+
+handleInvitation :: AppEnv -> ActionM ()
+handleInvitation env = do
+  invitationHeaders
+  found <- findPublicInvitation env
+  site <- currentSite env
+  case found of
+    Nothing -> status status404 >> htmlOf (simplePage (siteTheme site) Nothing "Invitation not found" "Please check the invitation link with the person who shared it.")
+    Just invitation -> do
+      attempt <- ensureBookingAttempt env
+      now <- liftIO getCurrentTime
+      slots <- liftIO (bookingAvailability (aeBookings env) (siteSlots site))
+      let eventAvailable = case Inv.invitationScope invitation of
+            Inv.GeneralTicket -> True
+            Inv.EventTicket saved -> maybe False (\slot -> slotIsUpcoming (aeBookingCtx env) now slot && slotTaken slot < slotCap slot && weeklyAllows (siteMaxWeekly site) slots slot) (slotById slots (slotIdOf saved))
+          available = Inv.invitationEnabled invitation && eventAvailable
+          notice | not (Inv.invitationEnabled invitation) = Just "This invitation is no longer open for new purchases. Tickets already bought are still valid."
+                 | not eventAvailable = Just "This date is no longer available through this invitation. Please ask your host about another date."
+                 | otherwise = Nothing
+          token = Inv.invitationTokenText (Inv.invitationToken invitation)
+      htmlOf (invitationLandingPage (siteTheme site) InvitationLanding
+        { ilInviter = Inv.invitationReferrer invitation, ilPrice = Inv.invitationPrice invitation
+        , ilEvent = invitationEventLabel invitation
+        , ilCheckoutAction = "/invite/" <> token <> "/checkout"
+        , ilCsrf = checkoutActionToken env ("invite:" <> token) attempt
+        , ilMessage = notice, ilAvailable = available })
+
+handleInvitationCheckout :: AppEnv -> ActionM ()
+handleInvitationCheckout env = do
+  invitationHeaders
+  found <- findPublicInvitation env
+  attempt <- bookingCookieCode env
+  csrf <- fromMaybe "" <$> formParamMaybe "csrf"
+  originOk <- csrfFormOrigin env
+  case (found, attempt) of
+    (Just invitation, Just code)
+      | originOk && ctEq csrf (checkoutActionToken env ("invite:" <> Inv.invitationTokenText (Inv.invitationToken invitation)) code) -> do
+          previous <- liftIO (lookupCheckoutHold (aeBookings env) code)
+          case previous of
+            Just hold
+              | (Inv.iaInvitationId <$> chInvitation hold) == Just (Inv.invitationId invitation) -> runCheckout (env {aeAnalytics = Nothing}) hold
+              | otherwise -> checkoutMessage (env {aeAnalytics = Nothing}) status409 "You already have a checkout open" "Finish or cancel that checkout before starting another purchase." (Just code)
+            Nothing -> do
+              currentPrice <- liftIO (aeInvitationPrice env (Inv.invitationTier invitation))
+              case currentPrice of
+                Left _ -> checkoutMessage (env {aeAnalytics = Nothing}) status503 "Please try again shortly" "We couldn't check the invitation price. No payment was started." Nothing
+                Right price -> do
+                  site <- currentSite env
+                  now <- liftIO getCurrentTime
+                  venues <- liftIO (bcVenues (aeBookingCtx env))
+                  let slots = [s {slotArea = venueLocation venues (slotArea s)} | s <- siteSlots site, slotIsUpcoming (aeBookingCtx env) now s]
+                      expiry = floor (utcTimeToPOSIXSeconds now) + 1860
+                  result <- liftIO (tryStorage (beginInvitationCheckout (aeBookings env) slots (siteMaxWeekly site) code (Inv.invitationToken invitation) (ipId price) (ipProduct price) expiry))
+                  case result of
+                    Left _ -> checkoutMessage (env {aeAnalytics = Nothing}) status503 "Please try again shortly" "We couldn't save your checkout. No payment was started." Nothing
+                    Right (Left err) -> checkoutMessage (env {aeAnalytics = Nothing}) status409 "Invitation unavailable" (holdErrorMessage err) Nothing
+                    Right (Right hold) -> runCheckout (env {aeAnalytics = Nothing}) hold
+    _ -> status status403 >> text "Please open the invitation link again and use its checkout button."
+
+invitationCsrf :: AppEnv -> Integer -> Text
+invitationCsrf env epoch = hmacTokenHex (aeMasterKey env) (TE.encodeUtf8 ("invitation-admin:" <> sessionToken env epoch))
+
+invitationAdminGate :: AppEnv -> ActionM () -> ActionM ()
+invitationAdminGate env action = adminGate env $ do
+  invitationHeaders
+  csrf <- formParamMaybe "csrf"
+  epoch <- liftIO (readIORef (aeSession env))
+  originOk <- csrfFormOrigin env
+  if originOk && maybe False (ctEq (invitationCsrf env epoch)) csrf then action
+    else status status403 >> text "Please reload Invitations and submit the form again. Nothing was changed."
+
+invitationSales :: Inv.Invitation -> [InvitationPurchase] -> [InvitationPurchase]
+invitationSales invitation = filter ((== Inv.invitationId invitation) . Inv.iaInvitationId . ipAttribution)
+
+sumInvitationMoney :: (InvitationPurchase -> Price) -> [InvitationPurchase] -> Price
+sumInvitationMoney project sales = Price (Cents (sum [n | sale <- sales, let Price (Cents n) _ = project sale])) GBP
+
+handleInvitations :: AppEnv -> Maybe Text -> ActionM ()
+handleInvitations env message = do
+  invitationHeaders
+  invitations <- liftIO (listInvitations (aeBookings env))
+  sales <- liftIO (listInvitationPurchases (aeBookings env))
+  site <- currentSite env
+  now <- liftIO getCurrentTime
+  epoch <- liftIO (readIORef (aeSession env))
+  let events = [(slotIdOf slot, slotLabel slot) | slot <- siteSlots site, slotIsUpcoming (aeBookingCtx env) now slot]
+      row invitation =
+        let purchases = invitationSales invitation sales
+        in InvitationRow
+          { irName = Inv.invitationReferrer invitation, irTier = invitationTierLabel (Inv.invitationTier invitation)
+          , irScope = fromMaybe "General ticket · choose a date later" (invitationEventLabel invitation)
+          , irEnabled = Inv.invitationEnabled invitation, irPurchases = length purchases
+          , irGross = sumInvitationMoney ipPaidPrice purchases
+          , irFee = sumInvitationMoney (Inv.iaReferralFee . ipAttribution) purchases
+          , irDetailHref = invitationPath invitation }
+  htmlOf (invitationsPage (invitationCsrf env epoch) events (map row (reverse invitations)) message)
+
+handleInvitationCreate :: AppEnv -> ActionM ()
+handleInvitationCreate env = do
+  name <- fromMaybe "" <$> formParamMaybe "name"
+  tierText <- fromMaybe ("" :: Text) <$> formParamMaybe "tier"
+  scopeText <- fromMaybe ("" :: Text) <$> formParamMaybe "scope"
+  sid <- fromMaybe "" <$> formParamMaybe "slot"
+  site <- currentSite env
+  now <- liftIO getCurrentTime
+  let tier = case tierText of "friend" -> Just Inv.Friend; "partner" -> Just Inv.Partner; _ -> Nothing
+      scope = case scopeText of
+        "general" -> Just Inv.GeneralTicket
+        "event" -> Inv.EventTicket <$> slotById (filter (slotIsUpcoming (aeBookingCtx env) now) (siteSlots site)) sid
+        _ -> Nothing
+  case (tier, scope) of
+    (Just chosenTier, Just chosenScope) -> case Inv.mkInvitationDraft name chosenTier chosenScope of
+      Left failure -> status status400 >> handleInvitations env (Just (Inv.invitationErrorMessage failure))
+      Right draft -> do
+        price <- liftIO (aeInvitationPrice env chosenTier)
+        case price of
+          Left _ -> status status503 >> handleInvitations env (Just "The invitation price couldn't be checked with Stripe. Please try again shortly; no invitation was created.")
+          Right _ -> do
+            saved <- liftIO (tryStorage (createInvitation (aeBookings env) draft))
+            case saved of
+              Right (Right invitation) -> status status303 >> setHeader "Location" (TL.fromStrict (invitationPath invitation))
+              Right (Left failure) -> status status400 >> handleInvitations env (Just (Inv.invitationErrorMessage failure))
+              Left _ -> status status503 >> handleInvitations env (Just "The invitation couldn't be saved. Please try again shortly.")
+    _ -> status status400 >> handleInvitations env (Just "Choose a friend or partner offer and a valid upcoming date, or a general ticket.")
+
+findAdminInvitation :: AppEnv -> ActionM Inv.Invitation
+findAdminInvitation env = do
+  ident <- captureParam "id"
+  invitations <- liftIO (listInvitations (aeBookings env))
+  case listToMaybe [i | i <- invitations, Just (Inv.invitationId i) == Inv.parseInvitationId ident] of
+    Just invitation -> pure invitation
+    Nothing -> status status404 >> text "Invitation not found." >> finish
+
+handleInvitationDetail :: AppEnv -> ActionM ()
+handleInvitationDetail env = do
+  invitationHeaders
+  invitation <- findAdminInvitation env
+  purchases <- invitationSales invitation <$> liftIO (listInvitationPurchases (aeBookings env))
+  epoch <- liftIO (readIORef (aeSession env))
+  let path = invitationPath invitation
+      saleRow purchase = InvitationSaleRow
+        { isrPurchasedAt = ipConfirmedAt purchase, isrCode = tkCode (ipTicket purchase)
+        , isrPaymentReference = tkPaymentRef (ipTicket purchase)
+        , isrStatus = maybe "Ticket ready to redeem" (const "Class booked") (tkRedemption (ipTicket purchase))
+        , isrPrice = ipPaidPrice purchase, isrFee = Inv.iaReferralFee (ipAttribution purchase) }
+  htmlOf (invitationDetailPage InvitationDetail
+    { idName = Inv.invitationReferrer invitation, idTier = invitationTierLabel (Inv.invitationTier invitation)
+    , idScope = fromMaybe "General ticket · choose a date later" (invitationEventLabel invitation)
+    , idEnabled = Inv.invitationEnabled invitation, idShareUrl = invitationUrl env invitation
+    , idPngUrl = path <> "/invitation.png", idPdfUrl = path <> "/invitation.pdf"
+    , idDisableAction = path <> "/enabled", idCsrf = invitationCsrf env epoch
+    , idPurchases = length purchases, idGross = sumInvitationMoney ipPaidPrice purchases
+    , idFee = sumInvitationMoney (Inv.iaReferralFee . ipAttribution) purchases
+    , idSales = map saleRow (reverse purchases) } Nothing)
+
+handleInvitationEnabled :: AppEnv -> ActionM ()
+handleInvitationEnabled env = do
+  invitation <- findAdminInvitation env
+  enabled <- formParamMaybe "enabled"
+  case enabled :: Maybe Text of
+    Just value | value `elem` ["yes", "no"] -> do
+      result <- liftIO (tryStorage (setInvitationEnabled (aeBookings env) (Inv.invitationId invitation) (value == "yes")))
+      case result of
+        Right (Right changed) -> status status303 >> setHeader "Location" (TL.fromStrict (invitationPath changed))
+        _ -> status status503 >> text "The invitation could not be changed. Please try again."
+    _ -> status status400 >> text "Choose whether this invitation is enabled."
+
+handleInvitationArtifact :: AppEnv -> ArtifactFormat -> ActionM ()
+handleInvitationArtifact env format = do
+  invitationHeaders
+  invitation <- findAdminInvitation env
+  site <- currentSite env
+  result <- liftIO (renderInvitationArtifact (aeInvitationArtwork env) format (siteTheme site)
+    (Inv.invitationReferrer invitation) (invitationUrl env invitation) (invitationEventLabel invitation))
+  case result of
+    Left _ -> status status503 >> text "The invitation download is temporarily unavailable. Please try again shortly."
+    Right bytes -> do
+      let (mime, extension) = case format of ArtifactPng -> ("image/png", ".png"); ArtifactPdf -> ("application/pdf", ".pdf")
+      setHeader "Content-Type" mime
+      setHeader "Content-Disposition" ("attachment; filename=\"okashi-" <> TL.fromStrict (Inv.invitationIdText (Inv.invitationId invitation)) <> extension <> "\"")
+      raw (BL.fromStrict bytes)
+
 adminGate :: AppEnv -> ActionM () -> ActionM ()
 adminGate env act = do
   mcookie <- header "Cookie"
@@ -1423,7 +1687,7 @@ handleCheckouts env = do
     elAttr "p" [] (elAttr "a" [("href", "/admin/bookings"), ("class", "sww-link")] (esc "Back to bookings")))
   where
     entry now hold = elAttr "div" [("style", "border-top:1px solid;padding:1rem 0")] $
-      para (chCode hold <> " · " <> slotLabel (chSlot hold) <> " · " <> chSeats hold <> " place(s)") <>
+      para (chCode hold <> " · " <> maybe "Transferable ticket" slotLabel (checkoutSlot hold) <> " · " <> chSeats hold <> " place(s)") <>
       para ("Started: " <> chCreatedAt hold <> ". Stripe price: " <> chPriceId hold <> ".") <>
       para (case chState hold of
         HoldCreating | now > chExpiresAt hold + 22 * 3600 -> "Operator action required: checkout creation is unresolved beyond its safe retry window. Check Stripe using this ticket reference before releasing capacity; do not create a replacement purchase."

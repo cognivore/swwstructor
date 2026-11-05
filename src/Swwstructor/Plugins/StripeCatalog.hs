@@ -97,6 +97,11 @@ itemOf v = do
 
 pricedItemOf :: JSON -> JSON -> Maybe CatalogItem
 pricedItemOf v priceObj = do
+  -- A private invitation product must stay out of the public gift shop even
+  -- if someone later assigns it a default price in the Stripe Dashboard.
+  case v .:? "metadata" >>= (.:? "sww_visibility") of
+    Just (JStr visibility) | T.toLower (T.strip (T.pack visibility)) == "private" -> Nothing
+    _ -> pure ()
   JStr name <- v .:? "name"
   -- Only one-time prices belong in a payment-mode checkout; a recurring
   -- (subscription) price would be refused by Stripe at session creation.

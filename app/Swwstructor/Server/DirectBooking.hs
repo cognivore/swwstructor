@@ -17,9 +17,12 @@ import qualified Data.Text as T
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import Swwstructor.Checkout (CheckoutRequest (..), CheckoutItem (..), CheckoutError (..), Url (..), lineItem)
 import Swwstructor.Content (SlotSpec (..))
+import Swwstructor.Money (Quantity (Quantity), Price (..), Cents (..))
+import Swwstructor.Server.Invitation
+  ( InvitationTier (..), iaInvitationId, iaTier, iaReferralFee, invitationIdText )
 import Swwstructor.Server.Booking
   ( BookingStore, CheckoutHold, HoldState (..), Ticket, HoldError
-  , chCode, chSlot, chPriceId, chProduct, chSeats, chPrice, chExpiresAt, chState
+  , chCode, checkoutSlot, chInvitation, chPriceId, chProduct, chSeats, chPrice, chExpiresAt, chState
   , attachCheckoutSession, confirmCheckoutHold, releaseCheckoutHold
   , listPendingCheckoutHolds, holdErrorMessage
   )
@@ -44,9 +47,15 @@ data CheckoutProgress
 -- need a stored request version (or drained Creating holds), because Stripe
 -- requires identical parameters when an uncertain creation is retried.
 requestFor :: DirectBooking -> CheckoutHold -> DirectRequest
-requestFor ctx hold =
+requestFor ctx hold = case (chInvitation hold, checkoutSlot hold) of
+  (Nothing, Just slot) -> legacyRequestFor ctx hold slot
+  _ -> invitationRequestFor ctx hold
+
+-- Preserve the exact previous form for every legacy dated hold, including
+-- Creating holds which may already have reached Stripe before a restart.
+legacyRequestFor :: DirectBooking -> CheckoutHold -> SlotSpec -> DirectRequest
+legacyRequestFor ctx hold slot =
   let code = chCode hold
-      slot = chSlot hold
       label = slotDate slot <> " " <> slotStart slot <> "–" <> slotEnd slot <> " · " <> slotArea slot
       summary = "Your class: " <> label <> ". Your place is reserved when payment succeeds."
       receipt = dbName ctx <> " class " <> label <> ". Your booking: " <> dbBaseUrl ctx <> "/booking/" <> code
@@ -62,6 +71,32 @@ requestFor ctx hold =
         [("sww_code", code), ("sww_flow", "dated"), ("sww_product", chProduct hold), ("sww_seats", chSeats hold), ("sww_price_id", chPriceId hold)]
         (Just receipt)
   in DirectRequest request code (chExpiresAt hold) summary
+
+-- Invitation attribution is the persisted request-version discriminator.
+-- Use the real fixed Stripe Price, so product reporting includes these sales.
+invitationRequestFor :: DirectBooking -> CheckoutHold -> DirectRequest
+invitationRequestFor ctx hold =
+  let code = chCode hold
+      target = maybe "A transferable ticket for one person. Choose a class date after payment."
+        (\slot -> "Your class: " <> slotDate slot <> " " <> slotStart slot <> "–" <> slotEnd slot <> " · " <> slotArea slot <> ". Your place is reserved when payment succeeds.")
+        (checkoutSlot hold)
+      attribution = case chInvitation hold of
+        Nothing -> [] -- the store rejects this invalid target/attribution pair
+        Just invite ->
+          let Price (Cents fee) _ = iaReferralFee invite
+          in [("sww_invitation_id", invitationIdText (iaInvitationId invite))
+             ,("sww_tier", case iaTier invite of Friend -> "friend"; Partner -> "partner")
+             ,("sww_fee_minor", T.pack (show fee))]
+      scope = maybe [("sww_scope", "general")]
+        (\slot -> [("sww_scope", "event"), ("sww_class_date", slotDate slot), ("sww_class_start", slotStart slot)])
+        (checkoutSlot hold)
+      request = CheckoutRequest
+        (ItemPrice (chPriceId hold) (Quantity 1) :| [])
+        (Url (dbBaseUrl ctx <> "/booking/" <> code))
+        (Url (dbBaseUrl ctx <> "/checkout/" <> code))
+        ([("sww_code", code), ("sww_flow", "invitation"), ("sww_product", chProduct hold), ("sww_seats", "1"), ("sww_price_id", chPriceId hold)] <> attribution <> scope)
+        (Just (dbName ctx <> ". " <> target <> " Your ticket: " <> dbBaseUrl ctx <> "/booking/" <> code))
+  in DirectRequest request code (chExpiresAt hold) target
 
 -- | Resume exactly the saved attempt. A failed/uncertain create retains its
 -- hold and reuses the same Stripe idempotency key and immutable request.

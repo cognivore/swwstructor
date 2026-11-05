@@ -11,6 +11,8 @@
 module Swwstructor.Server.Admin
   ( -- * Pages
     adminLoginPage
+  , adminDoc
+  , topbar
   , dashboardPage
   , pageEditorPage
   , sectionFormPage
@@ -162,6 +164,7 @@ topbar =
       , elAttr "a" [("href", "/admin/stripe")] (esc "Shop & Stripe")
       , elAttr "a" [("href", "/admin/bookings")] (esc "Bookings")
       , elAttr "a" [("href", "/admin/checkouts")] (esc "Checkouts")
+      , elAttr "a" [("href", "/admin/invitations")] (esc "Invitations")
       , elAttr "a" [("href", "/admin/venues")] (esc "Venues")
       , elAttr "span" [("class", "sp")] mempty
       , elAttr "a" [("href", "/"), ("target", "_blank")] (esc "View site \x2197")
