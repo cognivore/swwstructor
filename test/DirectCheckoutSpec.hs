@@ -412,8 +412,10 @@ exercise dir = do
   partnerInvite <- createInvite "Partner" "partner" "general" ""
   (partnerPath, partnerPage, partnerCookie) <- openInvite partnerInvite
   check "general invitation explains choosing a date later and displays £75" ("75" `T.isInfixOf` textOf partnerPage && "date" `T.isInfixOf` textOf partnerPage)
-  check "a general invitation offers dated booking and retains its transferable ticket option"
-    (all (`T.isInfixOf` textOf partnerPage) ["Choose your date", "UKIYO, A different future address", "Buy a transferable ticket for £75"])
+  check "a general invitation offers only a transferable ticket with no date buttons"
+    ("Buy a transferable ticket for £75" `T.isInfixOf` textOf partnerPage &&
+     not ("name=\"slot\"" `T.isInfixOf` textOf partnerPage) &&
+     not ("invitation-dates\"" `T.isInfixOf` textOf partnerPage))
   badCsrf <- request methodPost (TE.encodeUtf8 (partnerPath <> "/checkout")) [("Cookie", partnerCookie), (hContentType, "application/x-www-form-urlencoded")] (form [("csrf", "wrong")])
   check "invitation checkout needs its own attempt-bound CSRF" (status badCsrf == 403)
   partnerBought <- buyInvite partnerPath partnerPage partnerCookie [("price", "price_friend"), ("amount", "1"), ("tier", "friend")]
@@ -491,25 +493,36 @@ exercise dir = do
   retainedDetail <- adminGet (TE.encodeUtf8 friendAdminPath)
   check "historical invitation remains available to the administrator" (status retainedDetail == 200)
 
-  -- The same reusable capability offers three later dates. Each button is a
-  -- complete checkout action; no intermediate picker or price authority lives
-  -- in the browser. Competing clicks still share the ordinary capacity gate.
-  let sold = first {slotDate = "2031-02-01", slotCap = 1}
-      next = sold {slotDate = "2031-02-08", slotTaken = 0}
+  -- Promote only the nominated event at 7/8. Exactly when its final place is
+  -- taken, the same URL offers three later dates with direct checkout buttons.
+  let sold = first {slotDate = "2031-02-01", slotCap = 8}
+      next = sold {slotDate = "2031-02-08", slotCap = 1, slotTaken = 0}
       third = next {slotDate = "2031-02-15"}
       fourth = next {slotDate = "2031-02-22"}
       fifth = next {slotDate = "2031-03-01"}
       fallbackSite = siteData {sitePages = [PageSpec "/classes" "Classes" [ScheduleClass Nothing Nothing 0 [sold, next, third, fourth, fifth]]]}
   _ <- modifySite site (const fallbackSite)
   soldCode <- newTicketCode bookings
-  _ <- issueTicket bookings "pi_sold_fixture" soldCode "Existing ticket" "1"
+  _ <- issueTicket bookings "pi_sold_fixture" soldCode "Existing ticket" "7"
   soldBooking <- redeemTicket bookings [sold] 0 soldCode "Existing guest" (slotIdOf sold)
-  check "fallback fixture reserves the original final seat" (case soldBooking of Right _ -> True; _ -> False)
+  check "fallback fixture reserves seven of eight original places" (case soldBooking of Right _ -> True; _ -> False)
   fallbackInvite <- createInvite "FallbackFriend" "friend" "event" (slotIdOf sold)
   immutableInvite <- lookupInvitation bookings (Inv.invitationToken fallbackInvite)
+  let dateButton sid = "name=\"slot\" value=\"" <> sid <> "\""
+  (promotedPath, promotedPage, promotedCookie) <- openInvite fallbackInvite
+  check "at 7/8 the invitation sells only the promoted date and does not advertise alternatives"
+    (dateButton (slotIdOf sold) `T.isInfixOf` textOf promotedPage &&
+     T.count "name=\"slot\"" (textOf promotedPage) == 1 &&
+     not ("invitation-dates\"" `T.isInfixOf` textOf promotedPage))
+  forgedAlternative <- buyInvite promotedPath promotedPage promotedCookie [("slot", slotIdOf next)]
+  check "a forged alternative checkout is refused while the promoted date has room" (status forgedAlternative == 409)
+  check "a refused early alternative creates no hold" . (== Nothing) =<< lookupCheckoutHold bookings (codeOf promotedCookie)
+  lastCode <- newTicketCode bookings
+  _ <- issueTicket bookings "pi_final_original" lastCode "Final original place" "1"
+  lastBooking <- redeemTicket bookings [sold] 0 lastCode "Final guest" (slotIdOf sold)
+  check "fallback fixture fills the eighth original place" (case lastBooking of Right _ -> True; _ -> False)
   (fallbackPath, fallbackPage, fallbackCookie) <- openInvite fallbackInvite
   (_, rivalPage, rivalCookie) <- openInvite fallbackInvite
-  let dateButton sid = "name=\"slot\" value=\"" <> sid <> "\""
   check "sold date presents exactly three next available direct checkout buttons"
     (all (`T.isInfixOf` textOf fallbackPage) (map (dateButton . slotIdOf) [next, third, fourth]) &&
      not (dateButton (slotIdOf sold) `T.isInfixOf` textOf fallbackPage) &&
@@ -532,13 +545,18 @@ exercise dir = do
   fallbackTickets <- filter ((== fallbackCode) . tkCode) <$> listTickets bookings
   check "payment books the explicitly selected alternative" (case fallbackTickets of [ticket] -> maybe False ((== slotIdOf next) . redSlotId) (tkRedemption ticket); _ -> False)
   check "fallback checkout never changes the invitation URL or saved terms" . (== immutableInvite) =<< lookupInvitation bookings (Inv.invitationToken fallbackInvite)
+  _ <- modifySite site (const fallbackSite {sitePages = [PageSpec "/classes" "Classes" [ScheduleClass Nothing Nothing 0 [sold {slotCap = 9}, next, third, fourth, fifth]]]})
+  (_, reopenedPage, reopenedCookie) <- openInvite fallbackInvite
+  check "when the promoted event has room again the alternatives disappear"
+    (dateButton (slotIdOf sold) `T.isInfixOf` textOf reopenedPage && T.count "name=\"slot\"" (textOf reopenedPage) == 1)
+  staleAlternative <- buyInvite fallbackPath reopenedPage reopenedCookie [("slot", slotIdOf third)]
+  check "reopened original rejects a valid-authority stale alternative" (status staleAlternative == 409)
+  check "reopened event refusal creates no hold" . (== Nothing) =<< lookupCheckoutHold bookings (codeOf reopenedCookie)
   generalDates <- createInvite "GeneralDates" "partner" "general" ""
   (generalDatesPath, generalDatesPage, generalDatesCookie) <- openInvite generalDates
   generalDatedBuy <- buyInvite generalDatesPath generalDatesPage generalDatesCookie [("slot", slotIdOf third)]
-  check "general invitations also support one-click dated checkout" (status generalDatedBuy == 303)
-  _ <- signed (invitePayment (codeOf generalDatesCookie) "pi_general_dated" 7500)
-  generalDatedTickets <- filter ((== codeOf generalDatesCookie) . tkCode) <$> listTickets bookings
-  check "general invitation dated purchase books selected class at partner terms" (case generalDatedTickets of [ticket] -> maybe False ((== slotIdOf third) . redSlotId) (tkRedemption ticket); _ -> False)
+  check "general invitations cannot start a dated checkout through a forged button" (status generalDatedBuy == 409 && not ("name=\"slot\"" `T.isInfixOf` textOf generalDatesPage))
+  check "refused general dated checkout creates no hold" . (== Nothing) =<< lookupCheckoutHold bookings (codeOf generalDatesCookie)
   check "new public invitation presentation contains no middle dots" (not ("·" `T.isInfixOf` textOf fallbackPage))
   parserChecks
   priceCatalogChecks

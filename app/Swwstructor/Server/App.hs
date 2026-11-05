@@ -1516,7 +1516,9 @@ renderInvitation env invitation message = do
         Inv.EventTicket saved -> Just (slotIdOf saved)
       enabled = Inv.invitationEnabled invitation
       notice | not enabled = Just "This invitation is no longer open for new purchases. Tickets already bought are still valid."
-             | Just sid <- original, all ((/= sid) . slotIdOf) choices = Just "This date is no longer available. Your invitation price applies to the dates below."
+             | Just sid <- original, all ((/= sid) . slotIdOf) choices = Just (if null choices
+                 then "This date is not available for new bookings. Please contact us for help."
+                 else "This class has no places left. You can book one of the dates below at the same invitation price.")
              | otherwise = message
       token = Inv.invitationTokenText (Inv.invitationToken invitation)
   htmlOf (invitationLandingPage (siteTheme site) InvitationLanding

@@ -88,7 +88,7 @@ invitationLandingPage theme value = privateDoc ("An invitation from " <> ilInvit
       htmlConcat
         [ elAttr "a" [("class","invitation-brand"),("href","/"),("rel","noreferrer")] (esc "Okashi School")
         , el "h1" (esc ("and " <> ilInviter value <> " invite you to a mochi-making class"))
-        , elAttr "p" [("class","invitation-intro")] (esc (maybe "Choose a date and make mochi with us." (\event -> "Learn mochi making at " <> ieVenue event <> ".") (ilEvent value)))
+        , elAttr "p" [("class","invitation-intro")] (esc (maybe "Buy a ticket now and choose your class date later." (\event -> "Learn mochi making at " <> ieVenue event <> ".") (ilEvent value)))
         , case ilEvent value of
             Nothing -> mempty
             Just event -> htmlConcat
@@ -104,17 +104,19 @@ invitationLandingPage theme value = privateDoc ("An invitation from " <> ilInvit
                   Just (sid, _) -> checkoutButton (Just sid) ("Book this class for " <> amount)
                   Nothing -> mempty
               , if null otherDates then mempty else elAttr "section" [("class","invitation-dates"),("aria-label","Available class dates")] $
-                  el "h2" (esc (if isNothing (ilOriginalSlot value) then "Choose your date" else "Other dates, same invitation price"))
+                  el "h2" (esc "Next available dates, same invitation price")
                   <> htmlConcat (map dateCard otherDates)
               , if isNothing (ilOriginalSlot value)
                   then elAttr "section" [("class","invitation-gift")] $
                     el "h2" (esc "Choose the date later")
                     <> el "p" (esc "Keep your ticket or give it to a friend. All tickets are transferable.")
                     <> checkoutButton Nothing ("Buy a transferable ticket for " <> amount)
-                  else if null (ilDates value) then el "p" (esc "More dates are on their way. Contact us to arrange your class at this invitation price.") else mempty
+                  else mempty
               ]
             else el "p" (esc "This invitation is not available for new purchases. Please contact Okashi School if you need help.")
-        , elAttr "p" [("class","invitation-note")] (esc "Go straight to secure payment. Booking a date confirms your place; a transferable ticket lets you choose later. No account needed.")
+        , elAttr "p" [("class","invitation-note")] (esc (if isNothing (ilOriginalSlot value)
+            then "Go straight to secure payment. Your transferable ticket lets you choose a class later. No account needed."
+            else "Go straight to secure payment. Payment confirms your place for the selected class. Your ticket is transferable. No account needed."))
         , elAttr "a" [("href","/contact"),("rel","noreferrer")] (esc "Ask us a question")
         ]
   where
@@ -122,7 +124,9 @@ invitationLandingPage theme value = privateDoc ("An invitation from " <> ilInvit
     primaryDate = case [choice | choice@(sid, _) <- ilDates value, Just sid == ilOriginalSlot value] of
       choice:_ -> Just choice
       [] -> Nothing
-    otherDates = [choice | choice@(sid, _) <- ilDates value, Just sid /= ilOriginalSlot value]
+    otherDates = case (ilOriginalSlot value, primaryDate) of
+      (Just original, Nothing) -> [choice | choice@(sid, _) <- ilDates value, sid /= original]
+      _ -> []
     checkoutButton selected label = elAttr "form" [("method","post"),("action",ilCheckoutAction value)] $
       csrfField (ilCsrf value)
       <> elAttr "button" ([("type","submit"),("class","sww-buy")] <> maybe [] (\sid -> [("name","slot"),("value",sid),("aria-label",label <> maybe "" ((" — " <>) . ieWhen) (lookup sid (ilDates value)))]) selected) (esc label)
@@ -147,7 +151,7 @@ invitationsPage csrf events rows message = adminDoc "Invitations" $ topbar <> el
         , fieldLabel "invitation-tier" "Ticket price"
         , elAttr "select" [("id","invitation-tier"),("name","tier")] (option "friend" "Friends and friends of friends — £65" <> option "partner" "Partner — £75, including a £5 referral fee")
         , fieldLabel "invitation-scope" "What can guests buy?"
-        , elAttr "select" [("id","invitation-scope"),("name","scope")] (option "general" "Any class or a transferable ticket" <> option "event" "A specific class, with other dates at the same price")
+        , elAttr "select" [("id","invitation-scope"),("name","scope")] (option "general" "A transferable ticket — choose the date later" <> option "event" "A specific class — alternatives only when full")
         , fieldLabel "invitation-slot" "Class (for a specific-class invitation)"
         , elAttr "select" [("id","invitation-slot"),("name","slot")] (option "" "Choose a class" <> htmlConcat [option value label | (value,label) <- events])
         , elAttr "div" [("class","actions")] (elAttr "button" [("class","primary"),("type","submit")] (esc "Create invitation"))

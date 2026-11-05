@@ -383,9 +383,9 @@ bookingAvailability store slots = do
 
 -- | Both page rendering and atomic admission use this decision. The caller
 -- supplies only currently offered, upcoming slots; this store owns seats and
--- weekly limits. Event invitations offer their original when available and
--- the earliest three later classes; general invitations offer the earliest
--- three classes. The original invitation and attribution never change.
+-- weekly limits. Only a full, still-offered original event permits up to three
+-- later classes. General invitations have no dated choices. The original
+-- invitation and attribution never change, and saved promises still resume.
 availableInvitationSlots :: BookingStore -> [SlotSpec] -> Int -> InvitationToken -> IO (Either HoldError [SlotSpec])
 availableInvitationSlots store slots maxWeekly token = do
   BookingData ts _ holds invitations <- readMVar (bsVar store)
@@ -400,9 +400,13 @@ selectInvitationSlots ts holds slots maxWeekly invitation =
   let uniqueSlots = M.elems (M.fromListWith (\_ original -> original) [(slotIdOf slot, slot) | slot <- slots])
       available = sortOn slotOrder (filter (isRight . reservationCapacity ts holds slots maxWeekly "1") uniqueSlots)
       choices = case invitationScope invitation of
-        GeneralTicket -> take 3 available
-        EventTicket original -> [s | s <- available, slotIdOf s == slotIdOf original] <>
-          take 3 [s | s <- available, slotOrder s > slotOrder original]
+        GeneralTicket -> []
+        EventTicket original -> case lookup (slotIdOf original) [(slotIdOf s, s) | s <- uniqueSlots] of
+          Just current
+            | slotCap current > 0 && occupiedFor ts holds current >= slotCap current ->
+                take 3 [s | s <- available, slotOrder s > slotOrder current]
+            | isRight (reservationCapacity ts holds slots maxWeekly "1" current) -> [current]
+          _ -> []
    in [s {slotTaken = occupiedFor ts holds s} | s <- choices]
 
 slotOrder :: SlotSpec -> (Text, Text)

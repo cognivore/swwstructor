@@ -144,8 +144,8 @@ exercise dir = do
   late <- confirmCheckoutHold cancelledStore "FFFF-2222" "pi_after_expiry" (price GBP 75)
   check "terminal release cannot be resurrected by a later payment claim" (late == Left HoldAlreadyReleased)
 
-  -- Original links may offer explicit alternatives, but each choice is
-  -- rechecked atomically with capacity. A stale choice never moves silently.
+  -- Only a full original event may offer explicit alternatives. The condition
+  -- and chosen date are rechecked atomically; stale choices never move silently.
   alternativeStore <- open "alternatives"
   let earlier = slot {slotDate = "2030-01-06"}
       second = slot {slotDate = "2030-01-08"}
@@ -154,18 +154,30 @@ exercise dir = do
       fifth = slot {slotDate = "2030-01-11"}
       offered = [fifth, third, earlier, slot, fourth, second]
   alternativeInvite <- newInvite alternativeStore "Original venue" Partner (EventTicket slot)
-  check "event invitations offer original plus exactly three chronological later dates" .
-    (== Right (map slotIdOf [slot, second, third, fourth])) =<< offers alternativeStore offered 0 alternativeInvite
+  check "an event with space offers only its original date" .
+    (== Right [slotIdOf slot]) =<< offers alternativeStore offered 0 alternativeInvite
   check "repeated schedule sections cannot duplicate offered dates" .
-    (== Right (map slotIdOf [slot, second, third, fourth])) =<< offers alternativeStore (second : slot : second : offered) 0 alternativeInvite
+    (== Right [slotIdOf slot]) =<< offers alternativeStore (second : slot : second : offered) 0 alternativeInvite
+  prematureAlternative <- choose alternativeStore offered 0 "AAAA-2222" alternativeInvite (Just second)
   arbitrary <- choose alternativeStore offered 0 "AAAA-2222" alternativeInvite (Just fifth)
   backwards <- choose alternativeStore offered 0 "AAAA-2222" alternativeInvite (Just earlier)
   missingChoice <- choose alternativeStore offered 0 "AAAA-2222" alternativeInvite Nothing
-  check "a forged fourth alternative, earlier date or absent event choice creates no promise"
-    (arbitrary == Left HoldConflict && backwards == Left HoldConflict && missingChoice == Left HoldConflict)
+  check "alternatives cannot be forced while the original has room"
+    (prematureAlternative == Left HoldConflict && arbitrary == Left HoldConflict && backwards == Left HoldConflict && missingChoice == Left HoldConflict)
   _ <- beginCheckoutHold alternativeStore offered 0 "BBBB-2222" (slotIdOf slot) "price_full" "Original pending buyer" "1" (price GBP 80) expiry >>= holdRight
-  check "pending original checkout removes only the full date from the choices" .
+  let stillHasRoom = [if slotIdOf candidate == slotIdOf slot then candidate {slotCap = 3} else candidate | candidate <- offered]
+  check "fullness uses current capacity, not the invitation's saved capacity" .
+    (== Right [slotIdOf slot]) =<< offers alternativeStore stillHasRoom 0 alternativeInvite
+  notActuallyFull <- choose alternativeStore stillHasRoom 0 "AAAA-2222" alternativeInvite (Just second)
+  check "partly occupied originals do not permit an alternative-date POST" (notActuallyFull == Left HoldConflict)
+  check "a full original including pending holds unlocks exactly three later dates" .
     (== Right (map slotIdOf [second, third, fourth])) =<< offers alternativeStore offered 0 alternativeInvite
+  check "full-event alternatives are three distinct dates despite repeated sections" .
+    (== Right (map slotIdOf [second, third, fourth])) =<< offers alternativeStore (second : slot : second : offered) 0 alternativeInvite
+  check "even a full original offers no alternatives after it is removed or past cutoff" .
+    (== Right []) =<< offers alternativeStore [second, third, fourth, fifth] 0 alternativeInvite
+  tooLate <- choose alternativeStore offered 0 "AAAA-2222" alternativeInvite (Just fifth)
+  check "a forged date outside the three full-event alternatives is refused" (tooLate == Left HoldConflict)
   staleOriginal <- choose alternativeStore offered 0 "AAAA-2222" alternativeInvite (Just slot)
   check "a stale original-date button is refused without silently booking an alternative" (staleOriginal == Left HoldConflict)
   (choiceA, choiceB) <- concurrently
@@ -180,6 +192,10 @@ exercise dir = do
   check "filled alternatives are replaced by the next chronological choice" .
     (== Right (map slotIdOf [third, fourth, fifth])) =<< offers alternativeStore offered 0 alternativeInvite
   _ <- releaseCheckoutHold alternativeStore "BBBB-2222" >>= holdRight
+  check "reopening the original hides all alternative dates" .
+    (== Right [slotIdOf slot]) =<< offers alternativeStore offered 0 alternativeInvite
+  reopenedStale <- choose alternativeStore offered 0 "AAAA-2222" alternativeInvite (Just third)
+  check "a stale alternative is refused once the original reopens" (reopenedStale == Left HoldConflict)
   resumedChoice <- choose alternativeStore [] 0 (chCode winner) alternativeInvite (Just second) >>= holdRight
   check "existing alternative checkout resumes its promised date after original reopens or content disappears" (resumedChoice == winner)
   changedChoice <- choose alternativeStore offered 0 (chCode winner) alternativeInvite (Just third)
@@ -200,37 +216,62 @@ exercise dir = do
 
   generalDates <- open "general-dates"
   generalInvite <- newInvite generalDates "Friend" Friend GeneralTicket
-  check "general invitations offer the earliest three available dates" .
-    (== Right (map slotIdOf [earlier, slot, second])) =<< offers generalDates offered 0 generalInvite
-  generalDated <- choose generalDates offered 0 "EEEE-2222" generalInvite (Just second) >>= holdRight
+  check "general invitations never offer dated choices" .
+    (== Right []) =<< offers generalDates offered 0 generalInvite
+  forbiddenGeneralDate <- choose generalDates offered 0 "EEEE-2222" generalInvite (Just second)
+  check "a forged general-invitation date cannot start checkout" (forbiddenGeneralDate == Left HoldConflict)
   generalTransferable <- choose generalDates [] 0 "FFFF-2222" generalInvite Nothing >>= holdRight
-  check "one reusable general link supports a dated £65 place and a transferable £65 ticket"
-    (checkoutSlot generalDated == Just second && chTarget generalTransferable == TransferableTicket &&
-     chPrice generalDated == price GBP 65 && chPrice generalTransferable == price GBP 65 &&
-     chInvitation generalDated == Just (attributionFor generalInvite))
-  _ <- confirmCheckoutHold generalDates "EEEE-2222" "pi_general_dated" (price GBP 65) >>= holdRight
+  check "general invitations still admit a transferable ticket at their original price"
+    (chTarget generalTransferable == TransferableTicket && chPrice generalTransferable == price GBP 65)
+  -- Historical V2 general-origin dated holds were admitted by the previous
+  -- release. Load that persisted shape directly; new admission now forbids it.
+  generalJSON <- readJSON (dir </> "general-dates.json")
+  let oldGeneralDate (JArr [JObj fields]) = JArr
+        [JObj fields, JObj (("slot", JObj
+          [("date", JStr (T.unpack (slotDate second))), ("start", JStr (T.unpack (slotStart second))),
+           ("end", JStr (T.unpack (slotEnd second))), ("area", JStr (T.unpack (slotArea second))),
+           ("capacity", JNum (fromIntegral (slotCap second))), ("description", JStr (T.unpack (slotDescription second)))]) :
+          [(key, if key == "code" then JStr "EEEE-2222" else value) | (key, value) <- fields, key /= "target"])]
+      oldGeneralDate value = value
+  BS.writeFile (dir </> "general-dates.json") (TE.encodeUtf8 (T.pack (encode (changeField "checkoutHolds" oldGeneralDate generalJSON))))
   generalReload <- open "general-dates"
-  check "dated purchases attributed to general invitations remain valid after reload" . ((== 1) . length) =<< listInvitationPurchases generalReload
+  historicalHold <- lookupCheckoutHold generalReload "EEEE-2222" >>= maybe (fail "Historical general dated hold missing") pure
+  resumedHistorical <- choose generalReload [] 0 "EEEE-2222" generalInvite (Just second) >>= holdRight
+  check "historical general-origin dated holds remain readable and resumable"
+    (resumedHistorical == historicalHold && chRequestVersion historicalHold == CheckoutRequestV2 &&
+     checkoutSlot historicalHold == Just second && chInvitation historicalHold == Just (attributionFor generalInvite))
+  (historicalTicket, _) <- confirmCheckoutHold generalReload "EEEE-2222" "pi_general_dated" (price GBP 65) >>= holdRight
+  check "the historical general dated promise is still fulfilled on its saved date"
+    (maybe False ((== slotIdOf second) . redSlotId) (tkRedemption historicalTicket))
+  historicalPaidReload <- open "general-dates"
+  check "historical general dated purchases remain valid after payment and reload" . ((== 1) . length) =<< listInvitationPurchases historicalPaidReload
   check "no available dates is a valid general invitation with transferable checkout intact" . (== Right []) =<< offers generalDates [] 0 generalInvite
 
   absentDates <- open "absent-dates"
   absentInvite <- newInvite absentDates "Friend" Friend (EventTicket slot)
-  check "past or removed originals use only eligible later dates supplied by the server" .
-    (== Right (map slotIdOf [second, third, fourth])) =<< offers absentDates [earlier, fifth, third, fourth, second] 0 absentInvite
+  check "past, cutoff or removed originals do not unlock alternatives" .
+    (== Right []) =<< offers absentDates [earlier, fifth, third, fourth, second] 0 absentInvite
+  absentAttempt <- choose absentDates [second, third] 0 "AAAA-2222" absentInvite (Just second)
+  check "a missing original cannot be bypassed by posting a later date" (absentAttempt == Left HoldConflict)
+  check "a zero-capacity original is unavailable rather than full" .
+    (== Right []) =<< offers absentDates [slot {slotCap = 0}, second, third] 0 absentInvite
   check "an event with no eligible original or alternatives offers no date" . (== Right []) =<< offers absentDates [] 0 absentInvite
   weeklyDates <- open "weekly-dates"
   weeklyInvite <- newInvite weeklyDates "Friend" Friend (EventTicket second)
   let nextWeek = slot {slotDate = "2030-01-14"}
       weeklySlots = [slot, second, third, nextWeek]
   _ <- beginCheckoutHold weeklyDates weeklySlots 1 "GGGG-2222" (slotIdOf slot) "price_weekly" "Weekly commitment" "1" (price GBP 80) expiry >>= holdRight
-  check "date alternatives respect weekly limits including pending checkout commitments" .
-    (== Right [slotIdOf nextWeek]) =<< offers weeklyDates weeklySlots 1 weeklyInvite
+  check "a weekly-blocked original does not unlock alternatives" .
+    (== Right []) =<< offers weeklyDates weeklySlots 1 weeklyInvite
+  fullWeeklyInvite <- newInvite weeklyDates "Full event" Friend (EventTicket slot)
+  check "full-event alternatives still obey the weekly class limit" .
+    (== Right [slotIdOf nextWeek]) =<< offers weeklyDates weeklySlots 1 fullWeeklyInvite
   earlierGiftDates <- open "earlier-gift-dates"
   earlierGiftInvite <- newInvite earlierGiftDates "Friend" Friend (EventTicket second)
   _ <- issueTicket earlierGiftDates "pi_previous_gift" "AAAA-2222" "Old gift" "1"
   _ <- redeemTicket earlierGiftDates [slot] 1 "AAAA-2222" "Gift guest" (slotIdOf slot)
-  check "invitation choices retain a past gift class in this week's commitment count" .
-    (== Right [slotIdOf nextWeek]) =<< offers earlierGiftDates [second, third, nextWeek] 1 earlierGiftInvite
+  check "past gift commitments still block the original without unlocking alternatives" .
+    (== Right []) =<< offers earlierGiftDates [second, third, nextWeek] 1 earlierGiftInvite
 
   raceStore <- open "race"
   raceInvite <- newInvite raceStore "Venue" Partner (EventTicket slot)
