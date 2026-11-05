@@ -1446,7 +1446,7 @@ invitationPath invitation = "/admin/invitations/" <> Inv.invitationIdText (Inv.i
 invitationEventLabel :: Inv.Invitation -> Maybe Text
 invitationEventLabel invitation = case Inv.invitationScope invitation of
   Inv.GeneralTicket -> Nothing
-  Inv.EventTicket slot -> Just (slotLabel slot)
+  Inv.EventTicket slot -> Just (fmtSlotDay (slotDate slot) <> " " <> T.take 4 (slotDate slot) <> " · " <> slotStart slot <> "–" <> slotEnd slot)
 
 invitationTierLabel :: Inv.InvitationTier -> Text
 invitationTierLabel Inv.Friend = "Friends and their friends · £65"

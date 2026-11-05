@@ -400,6 +400,7 @@ exercise dir = do
 
   friendInvite <- createInvite "Momo" "friend" "event" (slotIdOf later)
   (friendPath, friendPage, friendCookie) <- openInvite friendInvite
+  check "reusable event invitation includes its year" ("2030" `T.isInfixOf` textOf friendPage)
   friendBought <- buyInvite friendPath friendPage friendCookie []
   check "event invitation goes directly to the chosen class payment" (status friendBought == 303)
   let friendCode = codeOf friendCookie
