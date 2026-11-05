@@ -1660,7 +1660,7 @@ handleInvitationArtifact env format style = do
   venues <- liftIO (listVenues (aeVenues env))
   let event = (\details -> InvitationEventDetails (ieWhen details) (ieWhere details)) <$> invitationEventInfo venues invitation
   result <- liftIO (renderInvitationArtifact (aeInvitationArtwork env) format style (siteTheme site)
-    (Inv.invitationReferrer invitation) (invitationUrl env invitation) event)
+    (Inv.invitationReferrer invitation) (invitationUrl env invitation) (Inv.invitationPrice invitation) event)
   case result of
     Left _ -> status status503 >> text "The invitation download is temporarily unavailable. Please try again shortly."
     Right bytes -> do

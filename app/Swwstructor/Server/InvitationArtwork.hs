@@ -26,6 +26,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Swwstructor.Html (elAttr, esc, renderHtml)
+import Swwstructor.Money (Price, formatPrice)
 import Swwstructor.Theme (Color (..), Theme (..), sanitizeCssValue)
 import System.Directory (createDirectoryIfMissing, getFileSize, removeFile)
 import System.Exit (ExitCode (..))
@@ -86,8 +87,8 @@ parseQrMatrix encoded
 -- | One export may run at a time; public request pressure cannot create an
 -- unbounded converter queue. All mutable file/process work lives here, while
 -- the presentation below is a pure value interpreter.
-renderInvitationArtifact :: ArtworkRenderer -> ArtifactFormat -> InvitationStyle -> Theme -> Text -> Text -> Maybe InvitationEventDetails -> IO (Either ArtworkError ByteString)
-renderInvitationArtifact (ArtworkRenderer dir gate) format style theme name url event =
+renderInvitationArtifact :: ArtworkRenderer -> ArtifactFormat -> InvitationStyle -> Theme -> Text -> Text -> Price -> Maybe InvitationEventDetails -> IO (Either ArtworkError ByteString)
+renderInvitationArtifact (ArtworkRenderer dir gate) format style theme name url ticketPrice event =
   case admissible of
     Left err -> pure (Left err)
     Right () -> do
@@ -115,7 +116,7 @@ renderInvitationArtifact (ArtworkRenderer dir gate) format style theme name url 
                     _ <- try (hClose handle) :: IO (Either IOException ())
                     _ <- try (removeFile path) :: IO (Either IOException ())
                     pure ()
-              result <- (hClose handle >> renderTo path (invitationSvg style theme name event matrix)) `onException` abandon
+              result <- (hClose handle >> renderTo path (invitationSvg style theme name ticketPrice event matrix)) `onException` abandon
               cleaned <- try (removeFile path)
               pure $ case cleaned of
                 Left (_ :: IOException) -> Left (ArtworkCleanupFailed (either Just (const Nothing) result))
@@ -182,8 +183,8 @@ wrapInvitationName cells input = finish (foldl addWord ([], "", 0) pieces)
       Just (c, _) | ord c >= 0x2e80 -> 2
       Just _ -> 1
 
-invitationSvg :: InvitationStyle -> Theme -> Text -> Maybe InvitationEventDetails -> QrMatrix -> Text
-invitationSvg style theme name event (QrMatrix matrix) =
+invitationSvg :: InvitationStyle -> Theme -> Text -> Price -> Maybe InvitationEventDetails -> QrMatrix -> Text
+invitationSvg style theme name ticketPrice event (QrMatrix matrix) =
   "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"105mm\" height=\"148mm\" viewBox=\"0 0 1050 1480\">"
   <> "<rect width=\"1050\" height=\"1480\" fill=\"" <> background <> "\"/>"
   <> "<path d=\"M72 72 H978 M72 1408 H978\" stroke=\"" <> accent <> "\" stroke-width=\"2\"/>"
@@ -191,7 +192,8 @@ invitationSvg style theme name event (QrMatrix matrix) =
   <> T.concat [textAt (nameTop + fromIntegral i * nameLineHeight) nameSize display "500" foreground line | (i,line) <- zip [0 :: Int ..] nameLines]
   <> "<path d=\"M460 378 H590\" stroke=\"" <> accent <> "\" stroke-width=\"2\"/>"
   <> qrSvg 424
-  <> textAt 759 18 body "500" accent "SCAN TO ACCEPT YOUR INVITATION"
+  <> textAt 759 22 body "500" accent "Scan to book your place"
+  <> textAt 793 25 body "500" foreground ("Ticket price: " <> formatPrice ticketPrice <> " per person")
   <> textAt 857 39 display "500" foreground invitationLine
   <> textAt 946 83 display "600" foreground "mochi-making"
   <> textAt 1020 83 display "600" foreground "class"
