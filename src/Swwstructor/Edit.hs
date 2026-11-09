@@ -141,7 +141,7 @@ blankSection tag = case tag of
   "productGrid" -> Just (ProductGrid (Just "Shop") Nothing [blankProduct 0])
   "stripeCatalog" -> Just (StripeCatalog (Just "Book a class") Nothing)
   "scheduleClass" -> Just (ScheduleClass (Just "Schedule your class") (Just "Bought a ticket? Pick your date below.") 0 [blankSlot])
-  "upcomingClasses" -> Just (UpcomingClasses (Just "Book your next class") Nothing [] [])
+  "upcomingClasses" -> Just (UpcomingClasses (Just "Book your next class") Nothing [] [] [])
   "richColumns" -> Just (RichColumns (Just "Section title") ["First column.", "Second column."])
   "gallery" -> Just (Gallery (Just "Gallery") [imageRef "A picture"])
   "ctaBand" -> Just (CtaBand "Call to action" (Just "Supporting line.") (Just (Cta "Go" "/")))

@@ -24,6 +24,7 @@ module Swwstructor.Block
   , BuyTarget (..)
   , SlotSpec (..)
   , ClassOffer (..)
+  , AreaFilter (..)
   , ClassTicketOption (..)
   , slotIdOf
   , groupSlotsByArea
@@ -115,6 +116,16 @@ data ClassTicketOption = ClassTicketOption
 data ClassOffer = ClassOffer
   { coSlot :: !SlotSpec
   , coOptions :: ![ClassTicketOption]
+  }
+  deriving (Eq, Show)
+
+-- | An owner-named filter chip over dated classes: the visitor-facing label
+-- (e.g. @\"East: JUJUHOME\"@) and the slot area it selects. Owner content;
+-- the server resolves 'afArea' exactly as it resolves each slot's area, so
+-- the renderer matches the two by plain equality.
+data AreaFilter = AreaFilter
+  { afLabel :: !Text
+  , afArea :: !Text
   }
   deriving (Eq, Show)
 
@@ -317,7 +328,7 @@ class BlockSym repr where
   scheduleForm :: Int -> [SlotSpec] -> repr
 
   -- | Compact dated checkout. The key namespaces accessible date controls.
-  upcomingClasses :: Text -> Maybe Text -> Maybe Text -> [ClassOffer] -> repr
+  upcomingClasses :: Text -> Maybe Text -> Maybe Text -> [AreaFilter] -> [ClassOffer] -> repr
 
   -- | A hairline rule — a section divider.
   ruleLine :: repr
@@ -347,7 +358,7 @@ data Block
   | BLinkText !Text !Text
   | BEmailReveal
   | BScheduleForm !Int ![SlotSpec]
-  | BUpcomingClasses !Text !(Maybe Text) !(Maybe Text) ![ClassOffer]
+  | BUpcomingClasses !Text !(Maybe Text) !(Maybe Text) ![AreaFilter] ![ClassOffer]
   | BRuleLine
   deriving (Eq, Show)
 
@@ -394,7 +405,7 @@ buildBlock (BMuted b) = muted (buildBlock b)
 buildBlock (BLinkText l h) = linkText l h
 buildBlock BEmailReveal = emailReveal
 buildBlock (BScheduleForm mw slots) = scheduleForm mw slots
-buildBlock (BUpcomingClasses key title intro offers) = upcomingClasses key title intro offers
+buildBlock (BUpcomingClasses key title intro filters offers) = upcomingClasses key title intro filters offers
 buildBlock BRuleLine = ruleLine
 
 -- ---------------------------------------------------------------------------
@@ -502,7 +513,7 @@ instance BlockSym HtmlBlock where
                 <> htmlConcat [elAttr "span" [("class", "sww-slotcard-desc")] (mdInline l) | l <- descLines]
                 <> (if T.null (slotArea s) then mempty else elAttr "span" [("class", "sww-slotcard-area")] (esc (slotArea s)))
                 <> elAttr "em" [("class", "sww-slotcard-free")] (esc freeLabel)
-  upcomingClasses key title intro offers = HtmlBlock $
+  upcomingClasses key title intro filters offers = HtmlBlock $
     elAttr "section" [("class", "sww-upcoming"), ("data-upcoming", key), ("aria-label", "Upcoming classes")] $
       elAttr "div" [("class", "sww-upcoming-heading")] (
         elAttr "h1" [] (esc (maybe "Book your next class" id title))
@@ -515,8 +526,10 @@ instance BlockSym HtmlBlock where
               <> esc " or " <> elAttr "a" [("href", "/contact"), ("class", "sww-link")] (esc "get in touch") <> esc "."
           )
           else
-            elAttr "div" [("class", "sww-class-dates"), ("role", "tablist"), ("aria-label", "Choose a class date")] (htmlConcat (zipWith dateTab [0 :: Int ..] offers))
-              <> elAttr "div" [("class", "sww-class-cards")] (htmlConcat (zipWith offerCard [0 :: Int ..] offers))
+            elAttr "div" [("class", "sww-class-cards")] (htmlConcat (zipWith offerCard [0 :: Int ..] offers))
+              <> elAttr "div" [("class", "sww-class-dates"), ("role", "group"), ("aria-label", "All class dates")] (htmlConcat (zipWith dateTab [0 :: Int ..] offers))
+              <> (if length chips < 2 then mempty
+                    else elAttr "div" [("class", "sww-class-filters"), ("role", "group"), ("aria-label", "Filter classes by venue")] (htmlConcat chips))
               <> elAttr "p" [("class", "sww-upcoming-links")] (
                 esc "Buying for someone else? " <> elAttr "a" [("href", "/gifts"), ("class", "sww-link")] (esc "Give a ticket")
                   <> esc " or "
@@ -526,20 +539,34 @@ instance BlockSym HtmlBlock where
       cardId n = key <> "-class-" <> T.pack (show n)
       dateLabel s = let (_, day, monthYear) = slotCardDate (slotDate s)
                     in day <> " " <> T.takeWhile (/= ' ') monthYear
+      -- @YYYY-MM-DD@ -> @DD / MM@: the compact strip label
+      dayMonth d = T.take 2 (T.drop 8 d) <> " / " <> T.take 2 (T.drop 5 d)
+      -- the first owner filter whose (resolved) area is this slot's area
+      filterOf s = lookup (slotArea s) (zip (map afArea filters) [0 :: Int ..])
+      chips =
+        [ elAttr "button"
+            [("type", "button"), ("class", "sww-class-filter"), ("aria-pressed", "false"),
+             ("id", key <> "-filter-" <> T.pack (show n)),
+             ("data-class-filter-chip", T.pack (show n))]
+            (esc (afLabel f))
+        | (n, f) <- zip [0 :: Int ..] filters
+        , any (\o -> filterOf (coSlot o) == Just n) offers
+        ]
       dateTab n offer = elAttr "button"
-        [("type", "button"), ("role", "tab"), ("class", "sww-class-date"),
+        [("type", "button"), ("class", "sww-class-date"),
          ("id", cardId n <> "-tab"), ("aria-controls", cardId n),
-         ("aria-selected", if n == 0 then "true" else "false"),
+         ("aria-label", "Show classes around " <> dateLabel (coSlot offer)),
+         ("aria-pressed", if n == 0 then "true" else "false"),
          ("tabindex", if n == 0 then "0" else "-1"), ("data-class-index", T.pack (show n))]
-        (esc (dateLabel (coSlot offer)))
+        (esc (dayMonth (slotDate (coSlot offer))))
       offerCard n offer =
         let s = coSlot offer
             options = sortOn ctoSeats (filter (\o -> ctoSeats o > 0 && ctoSeats o <= slotsLeft s) (coOptions offer))
             (dow, day, monthYear) = slotCardDate (slotDate s)
             label = dateLabel s
             free = T.pack (show (slotsLeft s)) <> if slotsLeft s == 1 then " place left" else " places left"
-         in elAttr "article" [("class", "sww-class-card"), ("id", cardId n), ("data-class-card", T.pack (show n)),
-              ("aria-labelledby", cardId n <> "-date")] $
+         in elAttr "article" ([("class", "sww-class-card"), ("id", cardId n), ("data-class-card", T.pack (show n)),
+              ("aria-labelledby", cardId n <> "-date")] <> maybe [] (\i -> [("data-class-filter", T.pack (show i))]) (filterOf s)) $
               elAttr "div" [("class", "sww-class-when")] (
                 elAttr "h2" [("id", cardId n <> "-date")] (esc (day <> " " <> monthYear))
                   <> elAttr "p" [] (esc (dow <> ", " <> slotStart s <> "–" <> slotEnd s))
@@ -782,7 +809,7 @@ instance BlockSym PlainBlock where
   emailReveal = PlainBlock "(email address \x2014 revealed on the website)"
   scheduleForm _ slots =
     PlainBlock ("(schedule a class \x2014 " <> T.pack (show (length slots)) <> " slots)")
-  upcomingClasses _ title _ offers = PlainBlock $
+  upcomingClasses _ title _ _ offers = PlainBlock $
     maybe "Book your next class" id title <> "\n" <> T.intercalate "\n"
       [fmtSlotDay (slotDate (coSlot offer)) <> ": " <> T.intercalate ", " [formatPrice (ctoPrice o) | o <- coOptions offer] | offer <- offers]
   ruleLine = PlainBlock "\x2014"
@@ -812,8 +839,9 @@ blockToJSON b = case b of
   BLinkText l h -> tagged "linkText" [("label", JStr (T.unpack l)), ("href", JStr (T.unpack h))]
   BEmailReveal -> tagged "emailReveal" []
   BScheduleForm mw slots -> tagged "scheduleForm" [("maxWeekly", JNum (fromIntegral mw)), ("slots", JArr (map slotJSON slots))]
-  BUpcomingClasses key title intro offers -> tagged "upcomingClasses"
+  BUpcomingClasses key title intro filters offers -> tagged "upcomingClasses"
     ([("key", JStr (T.unpack key)), ("offers", JArr (map offerJSON offers))]
+      <> (if null filters then [] else [("filters", JArr [JObj [("label", JStr (T.unpack (afLabel f))), ("area", JStr (T.unpack (afArea f)))] | f <- filters])])
       <> maybe [] (\t -> [("title", JStr (T.unpack t))]) title
       <> maybe [] (\t -> [("intro", JStr (T.unpack t))]) intro)
   BRuleLine -> tagged "ruleLine" []
@@ -871,7 +899,10 @@ blockFromJSON v = do
       BScheduleForm mw <$> mapM slotOf arr
     "upcomingClasses" -> do
       arr <- jarr' =<< v .: "offers"
-      BUpcomingClasses <$> txt "key" <*> pure (optTxt v "title") <*> pure (optTxt v "intro") <*> mapM offerOf arr
+      filters <- case v .:? "filters" of
+        Just (JArr fs) -> mapM (\f -> AreaFilter <$> (T.pack <$> (jstr =<< f .: "label")) <*> (T.pack <$> (jstr =<< f .: "area"))) fs
+        _ -> Right []
+      BUpcomingClasses <$> txt "key" <*> pure (optTxt v "title") <*> pure (optTxt v "intro") <*> pure filters <*> mapM offerOf arr
     "ruleLine" -> Right BRuleLine
     other -> Left ("unknown block kind: " ++ other)
   where

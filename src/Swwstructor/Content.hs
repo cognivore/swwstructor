@@ -22,6 +22,7 @@ module Swwstructor.Content
   , story
   , SlotSpec (..)
   , ClassOffer (..)
+  , AreaFilter (..)
   , ClassTicketOption (..)
   , slotIdOf
   , groupSlotsByArea
@@ -57,6 +58,7 @@ import Swwstructor.Block
   , NavLink (NavLink)
   , SlotSpec (..)
   , ClassOffer (..)
+  , AreaFilter (..)
   , ClassTicketOption (..)
   , groupSlotsByArea
   , navHref
@@ -179,7 +181,8 @@ data SectionSpec
     ScheduleClass !(Maybe Text) !(Maybe Text) !Int ![SlotSpec]
   | -- | Dated checkout. Prices are explicitly permitted owner configuration;
     -- offers are a transient server projection of the schedule and catalogue.
-    UpcomingClasses !(Maybe Text) !(Maybe Text) ![Text] ![ClassOffer]
+    -- Area filters are owner-named venue chips (label + slot area).
+    UpcomingClasses !(Maybe Text) !(Maybe Text) ![Text] ![AreaFilter] ![ClassOffer]
   | -- | N prose columns under an optional title
     RichColumns !(Maybe Text) ![Text]
   | -- | an image gallery under an optional title
@@ -479,9 +482,10 @@ sectionSpecToJSON spec = case spec of
       , req "maxWeekly" (JNum (fromIntegral maxWeekly))
       , req "slots" (arrOf slotSpecToJSON slots)
       ]
-  UpcomingClasses title intro priceIds _ ->
+  UpcomingClasses title intro priceIds filters _ ->
     obj [tag' "upcomingClasses", optF "title" title jS, optF "intro" intro jS,
-      req "priceIds" (arrOf jS priceIds)]
+      req "priceIds" (arrOf jS priceIds),
+      if null filters then [] else req "areaFilters" (arrOf (\f -> obj [req "label" (jS (afLabel f)), req "area" (jS (afArea f))]) filters)]
   RichColumns title cols ->
     obj [tag' "richColumns", optF "title" title jS, req "columns" (arrOf jS cols)]
   Gallery title imgs ->
@@ -541,7 +545,8 @@ sectionSpecFromJSON v = do
       pure (ScheduleClass (optText v "title") (optText v "intro") maxWeekly slots)
     "upcomingClasses" -> do
       priceIds <- decArrAt jText v "priceIds"
-      pure (UpcomingClasses (optText v "title") (optText v "intro") priceIds [])
+      filters <- decArrAt (\f -> AreaFilter <$> reqText f "label" <*> reqText f "area") v "areaFilters"
+      pure (UpcomingClasses (optText v "title") (optText v "intro") priceIds filters [])
     "richColumns" -> do
       cols <- decArrAt jText v "columns"
       pure (RichColumns (optText v "title") cols)

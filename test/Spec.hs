@@ -360,7 +360,7 @@ blockRoundTrip = do
         , BLinkText "l" "/l"
         , BEmailReveal
         , BScheduleForm 3 [SlotSpec "2026-09-01" "11:00" "13:00" "Islington" 6 3 "", SlotSpec "2026-11-18" "19:30" "21:30" "Ukiyo" 8 0 "Okashi School x [Ukiyo](https://ukiyohandrollbar.com/)"]
-        , BUpcomingClasses "s2" (Just "Book a class") Nothing
+        , BUpcomingClasses "s2" (Just "Book a class") Nothing [AreaFilter "Central: Ukiyo" "Ukiyo"]
             [ClassOffer (SlotSpec "2026-11-18" "19:00" "21:00" "Ukiyo" 8 2 "Mochi with tea")
               [ClassTicketOption "price_single" (price Money.GBP 80) 1, ClassTicketOption "price_double" (price Money.GBP 150) 2]]
         , BRuleLine
@@ -661,11 +661,16 @@ upcomingTests = do
   let s = SlotSpec "2026-11-18" "19:00" "21:00" "Ukiyo, London" 8 2 "Mochi with [tea](https://example.test)"
       opts = [ClassTicketOption "price_double" (price Money.GBP 150) 2, ClassTicketOption "price_single" (price Money.GBP 80) 1]
       offer = ClassOffer s opts
-      spec = UpcomingClasses (Just "Choose your evening") (Just "Make something beautiful.") ["price_single", "price_double"] [offer]
-      block = BUpcomingClasses "classes" (Just "Choose your evening") Nothing [offer]
+      spec = UpcomingClasses (Just "Choose your evening") (Just "Make something beautiful.") ["price_single", "price_double"] [] [offer]
+      filters = [AreaFilter "Central: Ukiyo" "Ukiyo, London", AreaFilter "East: JUJUHOME" "JUJUHOME, Hackney Wick"]
+      specF = UpcomingClasses Nothing Nothing ["price_single"] filters [offer]
+      east = s {slotDate = "2026-12-03", slotStart = "18:30", slotArea = "JUJUHOME, Hackney Wick"}
+      block = BUpcomingClasses "classes" (Just "Choose your evening") Nothing [] [offer]
+      twoVenues = renderHtml (runHtmlBlock (buildBlock (BUpcomingClasses "v" Nothing Nothing filters [offer, ClassOffer east opts])))
+      oneVenue = renderHtml (runHtmlBlock (buildBlock (BUpcomingClasses "w" Nothing Nothing filters [offer, offer])))
       html = renderHtml (runHtmlBlock (buildBlock block))
-      lastPlace = renderHtml (runHtmlBlock (buildBlock (BUpcomingClasses "last" Nothing Nothing [ClassOffer (s {slotTaken = 7}) opts])))
-      unsafe = renderHtml (runHtmlBlock (buildBlock (BUpcomingClasses "safe" (Just "<script>alert(1)</script>") Nothing [ClassOffer (s {slotDescription = "[click](javascript:alert)"}) opts])))
+      lastPlace = renderHtml (runHtmlBlock (buildBlock (BUpcomingClasses "last" Nothing Nothing [] [ClassOffer (s {slotTaken = 7}) opts])))
+      unsafe = renderHtml (runHtmlBlock (buildBlock (BUpcomingClasses "safe" (Just "<script>alert(1)</script>") Nothing [] [ClassOffer (s {slotDescription = "[click](javascript:alert)"}) opts])))
   sequence
     [ check "booking form binds a date and explicit Stripe price" (all (`T.isInfixOf` html) ["action=\"/book\"", "name=\"slot\" value=\"2026-11-18-1900\"", "name=\"price\" value=\"price_single\""])
     , check "default is one person regardless of catalogue order" ("value=\"price_single\" data-amount=\"8000\" data-currency=\"gbp\" data-price-label=\"£80\" checked=\"checked\"" `T.isInfixOf` html)
@@ -674,9 +679,14 @@ upcomingTests = do
     , check "last-place card offers no double ticket" ("price_single" `T.isInfixOf` lastPlace && not ("price_double" `T.isInfixOf` lastPlace))
     , check "new buyers are not asked for a ticket code or a name" (not ("name=\"code\"" `T.isInfixOf` html) && not ("name=\"name\"" `T.isInfixOf` html))
     , check "gift and existing-ticket routes remain explicit" (all (`T.isInfixOf` html) ["href=\"/gifts\"", "href=\"/classes#redeem\"", "Give a ticket", "Redeem a ticket"])
-    , check "date controls have namespaced accessible targets" (all (`T.isInfixOf` html) ["role=\"tablist\"", "aria-controls=\"classes-class-0\"", "id=\"classes-class-0\""])
+    , check "date controls have namespaced accessible targets" (all (`T.isInfixOf` html) ["aria-label=\"All class dates\"", "aria-controls=\"classes-class-0\"", "id=\"classes-class-0\""])
+    , check "the date strip is compact DD / MM squares below the cards" ("18 / 11</button>" `T.isInfixOf` html && T.breakOn "sww-class-dates" html > T.breakOn "sww-class-cards" html)
+    , check "cards carry their venue filter; chips follow the strip" (all (`T.isInfixOf` twoVenues) ["data-class-filter=\"0\"", "data-class-filter=\"1\"", "data-class-filter-chip=\"1\"", "East: JUJUHOME</button>"])
+    , check "no chips when only one venue has classes" (not ("sww-class-filters" `T.isInfixOf` oneVenue) && not ("sww-class-filters" `T.isInfixOf` html))
+    , check "area filters round-trip in content" (sectionSpecFromJSON (sectionSpecToJSON specF) == Right (UpcomingClasses Nothing Nothing ["price_single"] filters []))
+    , check "no area filters persist no areaFilters key" (not ("areaFilters" `T.isInfixOf` T.pack (encode (sectionSpecToJSON spec))))
     , check "owner copy is escaped and unsafe links neutralised" ("&lt;script&gt;" `T.isInfixOf` unsafe && not ("<script>" `T.isInfixOf` unsafe) && "href=\"#\"" `T.isInfixOf` unsafe)
-    , check "content persists only permitted price IDs, never live offers" (sectionSpecFromJSON (sectionSpecToJSON spec) == Right (UpcomingClasses (Just "Choose your evening") (Just "Make something beautiful.") ["price_single", "price_double"] []))
+    , check "content persists only permitted price IDs, never live offers" (sectionSpecFromJSON (sectionSpecToJSON spec) == Right (UpcomingClasses (Just "Choose your evening") (Just "Make something beautiful.") ["price_single", "price_double"] [] []))
     , check "compact masthead round-trips" (sectionSpecFromJSON (sectionSpecToJSON (CompactMasthead "Okashi" (Just "London"))) == Right (CompactMasthead "Okashi" (Just "London")))
     ]
 

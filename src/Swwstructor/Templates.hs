@@ -244,9 +244,9 @@ renderSection i spec = case spec of
         , Just (leafWith (prose (pfx <> "-body") 120) (paragraph "Online booking is being set up — please get in touch to book a class."))
         ]
   ScheduleClass title intro maxWeekly slots -> scheduleClassSection pfx title intro maxWeekly slots
-  UpcomingClasses title intro _ offers ->
+  UpcomingClasses title intro _ filters offers ->
     sectionOf [leafWith (chrome (Custom "upcoming") (pfx <> "-upcoming") 380)
-      (upcomingClasses (T.pack pfx) title intro offers)]
+      (upcomingClasses (T.pack pfx) title intro filters offers)]
   RichColumns title cols -> richColumnsSection pfx title cols
   Gallery title imgs -> gallerySection pfx title imgs
   CtaBand h body cta -> ctaSection pfx h body cta

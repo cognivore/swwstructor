@@ -61,7 +61,7 @@ exercise dir = do
       paused = single {ciPriceId = "price_paused", ciAvailability = NotOffered}
       prices = ["price_single", "price_double", "price_paused"]
       siteData = SiteSpec "Okashi School" "Fixture" Nothing nytTheme [] Nothing
-        [ PageSpec "/classes" "Classes" [UpcomingClasses (Just "Book a class") Nothing prices [], ScheduleClass Nothing Nothing 0 slots]
+        [ PageSpec "/classes" "Classes" [UpcomingClasses (Just "Book a class") Nothing prices [] [], ScheduleClass Nothing Nothing 0 slots]
         , PageSpec "/gifts" "Gifts" [ScheduleClass Nothing Nothing 0 slots]
         ] []
       webhookSecret = "fixture-webhook-secret"
@@ -328,7 +328,7 @@ exercise dir = do
   check "paid cancellation race never releases a paid place" . (== [3]) =<< occupancy later
 
   -- A future content change cannot erase the date/class snapshot of a payment.
-  either (fail . T.unpack) pure =<< modifySite site (\s -> s {sitePages = [PageSpec "/classes" "Classes" [UpcomingClasses Nothing Nothing prices [], ScheduleClass Nothing Nothing 0 [later]]]})
+  either (fail . T.unpack) pure =<< modifySite site (\s -> s {sitePages = [PageSpec "/classes" "Classes" [UpcomingClasses Nothing Nothing prices [] [], ScheduleClass Nothing Nothing 0 [later]]]})
   upsertVenue venues (Venue "ukiyo" "UKIYO" "A different future address" "Ukiyo, Covent Garden" "" "" True)
   snapshotPage <- get (path "/booking/" ordinaryCode "")
   calendar <- get (path "/booking/" ordinaryCode "/calendar.ics")

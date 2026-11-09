@@ -128,11 +128,19 @@ export interface CompactMastheadSection {
 }
 
 /** Dates and availability are resolved server-side from the shared schedule. */
+/** An owner-named venue chip: the label shown and the class area it selects. */
+export interface AreaFilter {
+  label: string;
+  area: string;
+}
+
 export interface UpcomingClassesSection {
   section: "upcomingClasses";
   title?: string;
   intro?: string;
   priceIds: string[];
+  /** Optional venue filter chips under the date strip (omitted when none). */
+  areaFilters?: AreaFilter[];
 }
 
 /** A nav bar; `sticky` pins it to the top for the whole page. (Haskell `NavStrip`.) */

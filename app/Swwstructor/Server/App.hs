@@ -131,7 +131,7 @@ import Swwstructor.Server.Admin
   , themeEditorPage
   , venuesPage
   )
-import Swwstructor.Block (fmtSlotDay, markdownPlain, ClassOffer (..), ClassTicketOption (..))
+import Swwstructor.Block (fmtSlotDay, markdownPlain, AreaFilter (..), ClassOffer (..), ClassTicketOption (..))
 import Swwstructor.Server.Booking
   ( BookingStore
   , RedeemError (AlreadyRedeemed, CodeNotFound, SlotFull, SlotUnknown, WeekFull)
@@ -287,8 +287,8 @@ currentSiteResolved env = do
       fill (StripeCatalog title intro) | not (null items) = catalogSection title intro items
       fill (ScheduleClass title intro weekly ss) =
         ScheduleClass title intro weekly [decorate s | s <- visible, slotIdOf s `elem` map slotIdOf ss]
-      fill (UpcomingClasses title intro prices _) =
-        UpcomingClasses title intro prices
+      fill (UpcomingClasses title intro prices filters _) =
+        UpcomingClasses title intro prices [f {afArea = venueLocation venues (afArea f)} | f <- filters]
           [ ClassOffer (decorate s) options
           | s <- sortOn (\slot -> (slotDate slot, slotStart slot)) visible
           , slotTaken s < slotCap s
@@ -619,7 +619,7 @@ handleBook env = do
         Nothing -> do
           site <- currentSite env
           now <- liftIO getCurrentTime
-          let allowed = nub (concat [prices | UpcomingClasses _ _ prices _ <- allSectionsOf site])
+          let allowed = nub (concat [prices | UpcomingClasses _ _ prices _ _ <- allSectionsOf site])
               selected = slotById (siteSlots site) sid
           if T.length sid > 64 || T.length pid > 255 || pid `notElem` allowed || maybe True (not . slotIsUpcoming (aeBookingCtx env) now) selected
             then checkoutMessage env status400 "Choose another class" "That class or ticket option is no longer offered. Please choose an available date." Nothing

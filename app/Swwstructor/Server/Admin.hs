@@ -31,7 +31,7 @@ module Swwstructor.Server.Admin
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
-import Swwstructor.Block (BuyTarget (BuyTarget), NavLink (NavLink), fmtSlotDay, navHref, navLabel)
+import Swwstructor.Block (AreaFilter (..), BuyTarget (BuyTarget), NavLink (NavLink), fmtSlotDay, navHref, navLabel)
 import Swwstructor.Content
   ( Availability (..)
   , Cta (Cta)
@@ -412,7 +412,7 @@ sectionSummary s = case s of
   StoryRow ss -> headlines ss
   ProductGrid t _ ps -> fromMaybe "Shop" t <> " (" <> T.pack (show (length ps)) <> " products)"
   StripeCatalog t _ -> fromMaybe "Book a class" t <> " (live from your Stripe catalogue)"
-  UpcomingClasses t _ prices _ -> fromMaybe "Book your next class" t <> " (" <> T.pack (show (length prices)) <> " ticket options)"
+  UpcomingClasses t _ prices _ _ -> fromMaybe "Book your next class" t <> " (" <> T.pack (show (length prices)) <> " ticket options)"
   ScheduleClass t _ mw slots ->
     fromMaybe "Schedule a class" t
       <> " (" <> T.pack (show (length slots)) <> " slots"
@@ -512,11 +512,13 @@ sectionFields partials s = case s of
       <> availabilityBuilder
       <> elAttr "h3" [("style", "margin-top:18px")] (esc ("Classes on offer (" <> T.pack (show (length slots)) <> ")"))
       <> slotList "slots" slots
-  UpcomingClasses t intro priceIds _ ->
+  UpcomingClasses t intro priceIds filters _ ->
     elAttr "p" [("class", "muted")] (esc "Shows the upcoming dates from your Schedule a class section, with live availability and prices. Students choose a date and pay to confirm their place. Edit dates in the schedule; edit ticket prices in Stripe.")
       <> ipt "text" "title" "Title (optional)" (orEmpty t)
       <> txtArea "intro" "Intro (optional)" (orEmpty intro)
       <> txtArea "priceIds" "Stripe price IDs offered for these classes (one per line)" (T.intercalate "\n" priceIds)
+      <> txtArea "areaFilters" "Venue filter buttons (optional, one per line: Label = class area)" (T.intercalate "\n" [afLabel f <> " = " <> afArea f | f <- filters])
+      <> elAttr "p" [("class", "hint")] (esc "For example \x201C\&East: JUJUHOME = JUJUHOME, Hackney Wick\x201D. The area must match a class's area exactly. The buttons appear under the dates once at least two of them have classes on offer.")
   RichColumns t cs ->
     ipt "text" "title" "Title (optional)" (orEmpty t) <> el "h3" (esc "Columns") <> textList "columns" cs
   Gallery t imgs ->
@@ -1197,7 +1199,7 @@ parseSection old ps = case old of
   ProductGrid{} -> ProductGrid (opt "title") (opt "intro") (products "products")
   StripeCatalog{} -> StripeCatalog (opt "title") (opt "intro")
   ScheduleClass{} -> ScheduleClass (opt "title") (opt "intro") (max 0 (intF "maxWeekly" 0)) (slots "slots")
-  UpcomingClasses{} -> UpcomingClasses (opt "title") (opt "intro") (filter (not . T.null) (map T.strip (T.lines (req "priceIds")))) []
+  UpcomingClasses{} -> UpcomingClasses (opt "title") (opt "intro") (filter (not . T.null) (map T.strip (T.lines (req "priceIds")))) (areaFilters "areaFilters") []
   RichColumns{} -> RichColumns (opt "title") (texts "columns")
   Gallery{} -> Gallery (opt "title") (images "images")
   CtaBand{} -> CtaBand (req "headline") (opt "body") (cta "cta")
@@ -1208,6 +1210,12 @@ parseSection old ps = case old of
   where
     g k = lookup k ps
     req k = fromMaybe "" (g k)
+    areaFilters k =
+      [ AreaFilter (T.strip lbl) (T.strip (T.drop 1 rest))
+      | line <- T.lines (req k)
+      , let (lbl, rest) = T.breakOn "=" line
+      , not (T.null rest), not (T.null (T.strip lbl)), not (T.null (T.strip (T.drop 1 rest)))
+      ]
     opt k = case fmap T.strip (g k) of Just v | not (T.null v) -> Just v; _ -> Nothing
     bool k = case g k of Just "on" -> True; Just "true" -> True; _ -> False
     dbl k d = maybe d id (g k >>= readD)
