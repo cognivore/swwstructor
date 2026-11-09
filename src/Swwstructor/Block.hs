@@ -25,6 +25,9 @@ module Swwstructor.Block
   , SlotSpec (..)
   , ClassOffer (..)
   , AreaFilter (..)
+  , Compass (..)
+  , compassName
+  , compassFromName
   , ClassTicketOption (..)
   , slotIdOf
   , groupSlotsByArea
@@ -116,8 +119,47 @@ data ClassTicketOption = ClassTicketOption
 data ClassOffer = ClassOffer
   { coSlot :: !SlotSpec
   , coOptions :: ![ClassTicketOption]
+  , coCompass :: !(Maybe Compass)
+  -- ^ where the class's venue sits in town, when the venue book says
   }
   deriving (Eq, Show)
+
+-- | Where a venue sits in its city, as a visitor reads it on a class card.
+-- Owner-chosen per venue, never computed from coordinates: Hackney Wick is
+-- \"east\" to a Londoner although its bearing from Charing Cross is nearer
+-- north-east.
+data Compass
+  = CompassCentral
+  | CompassNorth
+  | CompassNorthEast
+  | CompassEast
+  | CompassSouthEast
+  | CompassSouth
+  | CompassSouthWest
+  | CompassWest
+  | CompassNorthWest
+  deriving (Eq, Show, Enum, Bounded)
+
+-- | The visible label and the stored spelling: @central@, @north-east@, ...
+compassName :: Compass -> Text
+compassName c = case c of
+  CompassCentral -> "central"
+  CompassNorth -> "north"
+  CompassNorthEast -> "north-east"
+  CompassEast -> "east"
+  CompassSouthEast -> "south-east"
+  CompassSouth -> "south"
+  CompassSouthWest -> "south-west"
+  CompassWest -> "west"
+  CompassNorthWest -> "north-west"
+
+compassFromName :: Text -> Maybe Compass
+compassFromName t = lookup (T.toLower (T.strip t)) [(compassName c, c) | c <- [minBound .. maxBound]]
+
+-- | Clockwise degrees from north for the needle; the centre has none.
+compassBearing :: Compass -> Maybe Int
+compassBearing CompassCentral = Nothing
+compassBearing c = Just (45 * (fromEnum c - fromEnum CompassNorth))
 
 -- | An owner-named filter chip over dated classes: the visitor-facing label
 -- (e.g. @\"East: JUJUHOME\"@) and the slot area it selects. Owner content;
@@ -577,9 +619,12 @@ instance BlockSym HtmlBlock where
             free = T.pack (show (slotsLeft s)) <> if slotsLeft s == 1 then " place left" else " places left"
          in elAttr "article" ([("class", "sww-class-card"), ("id", cardId n), ("data-class-card", T.pack (show n)),
               ("aria-labelledby", cardId n <> "-date")] <> maybe [] (\i -> [("data-class-filter", T.pack (show i))]) (filterOf s)) $
-              elAttr "div" [("class", "sww-class-when")] (
-                elAttr "h2" [("id", cardId n <> "-date")] (esc (day <> " " <> monthYear))
-                  <> elAttr "p" [] (esc (dow <> ", " <> slotStart s <> "–" <> slotEnd s))
+              elAttr "div" [("class", "sww-class-head" <> maybe "" (const " sww-class-head-compass") (coCompass offer))] (
+                elAttr "div" [("class", "sww-class-when")] (
+                  elAttr "h2" [("id", cardId n <> "-date")] (esc (day <> " " <> monthYear))
+                    <> elAttr "p" [] (esc (dow <> ", " <> slotStart s <> "–" <> slotEnd s))
+                )
+                  <> maybe mempty compassMark (coCompass offer)
               )
                 <> elAttr "div" [("class", "sww-class-description")] (mdInline (if T.null (slotDescription s) then "Japanese pastry workshop" else slotDescription s))
                 <> elAttr "p" [("class", "sww-class-venue")] (esc (slotArea s))
@@ -614,6 +659,35 @@ instance BlockSym HtmlBlock where
                 <> voidElAttr "input" [("type", "hidden"), ("name", "expectedCurrency_" <> ctoPriceId option), ("value", currencyCode currency)]
             )
   ruleLine = HtmlBlock $ elAttr "hr" [("class", "sww-rule")] mempty
+
+-- | A class card's compass: a needle pointing the venue's way (a bullseye
+-- for the centre) over its lowercase name. The drawing is decoration; the
+-- label is the text, read as \"Location: east\".
+compassMark :: Compass -> Html
+compassMark c =
+  elAttr "div" [("class", "sww-class-compass")] $
+    elAttr "svg" [("viewBox", "0 0 32 32"), ("aria-hidden", "true"), ("focusable", "false")] (
+      shape "circle" [("class", "sww-compass-ring"), ("cx", "16"), ("cy", "16"), ("r", "14.5")]
+        <> shape "path" [("class", "sww-compass-ticks"), ("d", "M30.5 16h-3M16 30.5v-3M1.5 16h3")]
+        <> shape "path" [("class", "sww-compass-north"), ("d", "M16 1.5v3.5")]
+        <> case compassBearing c of
+          Nothing ->
+            shape "circle" [("class", "sww-compass-halo"), ("cx", "16"), ("cy", "16"), ("r", "7.5")]
+              <> shape "circle" [("class", "sww-compass-tip"), ("cx", "16"), ("cy", "16"), ("r", "3.4")]
+          Just deg ->
+            elAttr "g" [("transform", "rotate(" <> T.pack (show deg) <> " 16 16)")] (
+              shape "path" [("class", "sww-compass-tail"), ("d", "M12.9 16h6.2L16 27z")]
+                <> shape "path" [("class", "sww-compass-tip"), ("d", "M16 5l3.1 11h-6.2z")]
+            )
+              <> shape "circle" [("class", "sww-compass-pivot"), ("cx", "16"), ("cy", "16"), ("r", "1.6")]
+    )
+      <> elAttr "span" [("class", "sww-class-compass-label")] (
+        elAttr "span" [("class", "sww-sr")] (esc "Location: ") <> esc (compassName c)
+      )
+  where
+    -- SVG children are closed explicitly: HTML parses an unclosed
+    -- \<circle\> inside foreign content as the parent of what follows.
+    shape tag attrs = elAttr tag attrs mempty
 
 -- | The proof-of-work reveal client — a fixed literal (never owner content),
 -- bound once per page however many widgets render. Solves the server's
@@ -857,7 +931,8 @@ blockToJSON b = case b of
   BRuleLine -> tagged "ruleLine" []
   where
     tagged k extra = JObj (("b", JStr k) : extra)
-    offerJSON o = JObj [("slot", slotJSON (coSlot o)), ("options", JArr (map optionJSON (coOptions o)))]
+    offerJSON o = JObj ([("slot", slotJSON (coSlot o)), ("options", JArr (map optionJSON (coOptions o)))]
+      <> maybe [] (\c -> [("compass", JStr (T.unpack (compassName c)))]) (coCompass o))
     optionJSON o = JObj [("priceId", JStr (T.unpack (ctoPriceId o))), ("price", priceToJSON (ctoPrice o)), ("seats", JNum (fromIntegral (ctoSeats o)))]
     -- The block codec is a render-state codec, so 'slotTaken' rides along
     -- (unlike the content codec, which never persists it).
@@ -920,7 +995,11 @@ blockFromJSON v = do
     optTxt o k = case o .:? k of
       Just (JStr s) -> Just (T.pack s)
       _ -> Nothing
-    offerOf o = ClassOffer <$> (slotOf =<< o .: "slot") <*> (mapM optionOf =<< (jarr' =<< o .: "options"))
+    offerOf o = ClassOffer <$> (slotOf =<< o .: "slot") <*> (mapM optionOf =<< (jarr' =<< o .: "options")) <*> compassOf o
+    compassOf o = case o .:? "compass" of
+      Nothing -> Right Nothing
+      Just (JStr t) -> maybe (Left ("unknown compass point: " <> t)) (Right . Just) (compassFromName (T.pack t))
+      Just _ -> Left "compass: expected a string"
     optionOf o = do
       pid <- T.pack <$> (jstr =<< o .: "priceId")
       p <- priceFromJSON =<< o .: "price"

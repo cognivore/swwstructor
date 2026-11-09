@@ -131,7 +131,7 @@ import Swwstructor.Server.Admin
   , themeEditorPage
   , venuesPage
   )
-import Swwstructor.Block (fmtSlotDay, markdownPlain, AreaFilter (..), ClassOffer (..), ClassTicketOption (..))
+import Swwstructor.Block (fmtSlotDay, markdownPlain, AreaFilter (..), ClassOffer (..), ClassTicketOption (..), compassFromName)
 import Swwstructor.Server.Booking
   ( BookingStore
   , RedeemError (AlreadyRedeemed, CodeNotFound, SlotFull, SlotUnknown, WeekFull)
@@ -174,7 +174,7 @@ import Swwstructor.Server.Notify
   , siteSlots
   )
 import Swwstructor.Server.Venues
-  ( Venue (Venue, vnName, vnMapUrl)
+  ( Venue (Venue, vnName, vnMapUrl, vnCompass)
   , VenueStore
   , deleteVenue
   , listVenues
@@ -289,7 +289,7 @@ currentSiteResolved env = do
         ScheduleClass title intro weekly [decorate s | s <- visible, slotIdOf s `elem` map slotIdOf ss]
       fill (UpcomingClasses title intro prices filters _) =
         UpcomingClasses title intro prices [f {afArea = venueLocation venues (afArea f)} | f <- filters]
-          [ ClassOffer (decorate s) options
+          [ ClassOffer (decorate s) options (vnCompass =<< venueForArea venues (slotArea s))
           | s <- sortOn (\slot -> (slotDate slot, slotStart slot)) visible
           , slotTaken s < slotCap s
           , weeklyAllows (siteMaxWeekly site0) slots s
@@ -1844,13 +1844,14 @@ handleVenueSave env = do
   mapU <- fromMaybe "" <$> formParamMaybe "mapUrl"
   notes <- fromMaybe "" <$> formParamMaybe "notes"
   active <- formParamMaybe "active" :: ActionM (Maybe Text)
+  compass <- (>>= compassFromName) <$> formParamMaybe "compass"
   if T.null (T.strip name)
     then handleVenues env (Just "A venue needs at least a name.")
     else do
       liftIO $
         upsertVenue
           (aeVenues env)
-          (Venue (T.strip vid) (T.strip name) (T.strip addr) (T.strip area) (T.strip mapU) (T.strip notes) (isOn active))
+          (Venue (T.strip vid) (T.strip name) (T.strip addr) (T.strip area) (T.strip mapU) (T.strip notes) (isOn active) compass)
       handleVenues env (Just "Saved.")
   where
     isOn (Just "on") = True

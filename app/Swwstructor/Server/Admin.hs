@@ -31,7 +31,7 @@ module Swwstructor.Server.Admin
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
-import Swwstructor.Block (AreaFilter (..), BuyTarget (BuyTarget), NavLink (NavLink), fmtSlotDay, navHref, navLabel)
+import Swwstructor.Block (AreaFilter (..), BuyTarget (BuyTarget), NavLink (NavLink), compassName, fmtSlotDay, navHref, navLabel)
 import Swwstructor.Content
   ( Availability (..)
   , Cta (Cta)
@@ -984,6 +984,9 @@ venuesPage noun venues areas fl =
       ]
   where
     nouns = noun <> "s"
+    compassField =
+      selField "compass" "Compass point on class cards (optional)"
+        (("", "None") : [(compassName c, compassName c) | c <- [minBound .. maxBound]])
     areasCard
       | null areas = mempty
       | otherwise =
@@ -1000,6 +1003,7 @@ venuesPage noun venues areas fl =
                )
             <> ipt "text" "address" "Street address" (vnAddress v)
             <> ipt "text" "mapUrl" "Map link (optional)" (vnMapUrl v)
+            <> compassField (maybe "" compassName (vnCompass v))
             <> txtArea "notes" "Notes (access, equipment, contact\x2026)" (vnNotes v)
             <> chk "active" "Active (considered for announcements)" (vnActive v)
             <> elAttr "div" [("class", "actions")] (elAttr "button" [("class", "primary"), ("type", "submit")] (esc "Save"))
@@ -1018,6 +1022,7 @@ venuesPage noun venues areas fl =
                     )
                  <> ipt "text" "address" "Street address" ""
                  <> ipt "text" "mapUrl" "Map link (optional)" ""
+                 <> compassField ""
                  <> txtArea "notes" "Notes (access, equipment, contact\x2026)" ""
                  <> chk "active" "Active (considered for announcements)" True
                  <> elAttr "div" [("class", "actions")] (elAttr "button" [("class", "primary"), ("type", "submit")] (esc ("Add " <> noun)))

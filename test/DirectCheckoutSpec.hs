@@ -23,6 +23,7 @@ import Network.Wai.Test (SRequest (..), runSession, setPath, simpleBody, simpleH
 import StickyWM (JSON (..), decode, encode, (.:?))
 import Swwstructor.Checkout (CheckoutError (..), Url (..))
 import Swwstructor.Content (AreaFilter (..), Availability (..), PageSpec (..), SectionSpec (..), SiteSpec (..), SlotSpec (..), slotIdOf)
+import Swwstructor.Block (Compass (..))
 import Swwstructor.Money (Currency (GBP), price)
 import Swwstructor.Plugins.StripeCatalog (CatalogItem (..), parsePriceCatalogJSON)
 import Swwstructor.Server.App (AppEnv (..), Stage (Test), swwApp)
@@ -73,7 +74,7 @@ exercise dir = do
   bookings <- newBookingStore (dir </> "bookings.json")
   payments <- newPaymentCodeStore (dir </> "payment-codes.json")
   venues <- newVenueStore (dir </> "venues.json")
-  upsertVenue venues (Venue "ukiyo" "UKIYO" "8 Slingsby Place, London WC2E 9AB" "Ukiyo, Covent Garden" "" "" True)
+  upsertVenue venues (Venue "ukiyo" "UKIYO" "8 Slingsby Place, London WC2E 9AB" "Ukiyo, Covent Garden" "" "" True (Just CompassCentral))
   manager <- newManager defaultManagerSettings
   adminSession <- newIORef 1
   spent <- newIORef M.empty
@@ -180,6 +181,12 @@ exercise dir = do
   -- book's full address. The server must resolve both the same way.
   check "an authored venue filter matches its cards through the venue book"
     ("data-class-filter=\"0\"" `T.isInfixOf` textOf classesPage && "8 Slingsby Place" `T.isInfixOf` textOf classesPage)
+  check "a class card shows its venue's compass point from the venue book"
+    ("<span class=\"sww-sr\">Location: </span>central</span>" `T.isInfixOf` textOf classesPage && "sww-class-head-compass" `T.isInfixOf` textOf classesPage)
+  -- A hand-edited, unreadable compass point drops; the venue book survives.
+  BS.writeFile (dir </> "venues-odd.json") "{\"venues\":[{\"id\":\"x\",\"name\":\"X\",\"address\":\"1 Road\",\"area\":\"X\",\"compass\":\"up\"}]}"
+  oddBook <- listVenues =<< newVenueStore (dir </> "venues-odd.json")
+  check "an unknown compass point never empties the venue book" (map vnName oddBook == ["X"] && map vnCompass oddBook == [Nothing])
   noCookie <- book "" first single
   check "direct POST without a signed browser attempt is rejected" (status noCookie == 400)
   forged <- book "sww_booking=AAAA-2222:1:forged" first single
@@ -335,7 +342,7 @@ exercise dir = do
 
   -- A future content change cannot erase the date/class snapshot of a payment.
   either (fail . T.unpack) pure =<< modifySite site (\s -> s {sitePages = [PageSpec "/classes" "Classes" [UpcomingClasses Nothing Nothing prices [] [], ScheduleClass Nothing Nothing 0 [later]]]})
-  upsertVenue venues (Venue "ukiyo" "UKIYO" "A different future address" "Ukiyo, Covent Garden" "" "" True)
+  upsertVenue venues (Venue "ukiyo" "UKIYO" "A different future address" "Ukiyo, Covent Garden" "" "" True Nothing)
   snapshotPage <- get (path "/booking/" ordinaryCode "")
   calendar <- get (path "/booking/" ordinaryCode "/calendar.ics")
   check "removing the class from sale does not erase a paid booking" (status snapshotPage == 200 && "Mochi with tea" `T.isInfixOf` textOf snapshotPage)
@@ -376,6 +383,15 @@ exercise dir = do
         , ("metadata", JObj [("sww_code", JStr (T.unpack code)), ("sww_flow", JStr "invitation")])])
   badAdmin <- adminPost "/admin/invitations" [("csrf", "wrong"), ("name", "Invalid"), ("tier", "friend"), ("scope", "general")]
   check "invitation creation needs CSRF and makes no row on failure" (status badAdmin == 403)
+  savedVenue <- adminPost "/admin/venues/save"
+    [("csrf", adminCsrf), ("id", "ukiyo"), ("name", "UKIYO"), ("address", "8 Slingsby Place, London WC2E 9AB"),
+     ("area", "Ukiyo, Covent Garden"), ("active", "on"), ("compass", "north-west")]
+  storedVenues <- listVenues venues
+  reloadedVenues <- listVenues =<< newVenueStore (dir </> "venues.json")
+  venuesAdmin <- adminGet "/admin/venues"
+  check "the admin sets a venue's compass point; it persists and is offered back"
+    (status savedVenue == 200 && map vnCompass storedVenues == [Just CompassNorthWest] && map vnCompass reloadedVenues == [Just CompassNorthWest]
+      && "<option value=\"north-west\" selected=\"selected\">" `T.isInfixOf` textOf venuesAdmin)
 
   -- Exercise permanent deletion through the authenticated route, rather than
   -- relying on a hidden button to protect enabled or previously used links.
@@ -452,7 +468,7 @@ exercise dir = do
   friendInvite <- createInvite "Momo" "friend" "event" (slotIdOf later)
   savedFriendSnapshot <- BS.readFile (dir </> "bookings.json")
   -- Venue details may be completed after a link has already been shared.
-  upsertVenue venues (Venue "ukiyo" "UKIYO" "8 Slingsby Place, London WC2E 9AB" "Ukiyo, Covent Garden" "" "" True)
+  upsertVenue venues (Venue "ukiyo" "UKIYO" "8 Slingsby Place, London WC2E 9AB" "Ukiyo, Covent Garden" "" "" True Nothing)
   (friendPath, friendPage, friendCookie) <- openInvite friendInvite
   check "event invitation names its venue and gives the complete address"
     (all (`T.isInfixOf` textOf friendPage) ["Learn mochi making at UKIYO", "UKIYO, 8 Slingsby Place, London WC2E 9AB"])
@@ -571,7 +587,7 @@ exercise dir = do
 
 parserChecks :: IO ()
 parserChecks = do
-  let prefixedVenue = Venue "ukiyo" "UKIYO" "UKIYO, 8 Slingsby Place, London WC2E 9AB" "Covent Garden" "" "" True
+  let prefixedVenue = Venue "ukiyo" "UKIYO" "UKIYO, 8 Slingsby Place, London WC2E 9AB" "Covent Garden" "" "" True Nothing
   check "an address already starting with its venue name receives no duplicate prefix"
     (venueLocation [prefixedVenue] "Covent Garden" == "UKIYO, 8 Slingsby Place, London WC2E 9AB")
   -- Reduced schema from actual Stripe sandbox responses, with synthetic ids,

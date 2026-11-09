@@ -18,6 +18,7 @@ import System.Exit (exitFailure, exitSuccess)
 import Swwstructor.Block
   ( Block (..)
   , BuyTarget (BuyTarget)
+  , Compass (..)
   , HtmlBlock (runHtmlBlock)
   , NavLink (NavLink)
   , PlainBlock (runPlainBlock)
@@ -25,6 +26,8 @@ import Swwstructor.Block
   , blockFromJSON
   , blockToJSON
   , buildBlock
+  , compassFromName
+  , compassName
   , fmtSlotDay
   , markdownPlain
   , mondayOf
@@ -362,7 +365,8 @@ blockRoundTrip = do
         , BScheduleForm 3 [SlotSpec "2026-09-01" "11:00" "13:00" "Islington" 6 3 "", SlotSpec "2026-11-18" "19:30" "21:30" "Ukiyo" 8 0 "Okashi School x [Ukiyo](https://ukiyohandrollbar.com/)"]
         , BUpcomingClasses "s2" (Just "Book a class") Nothing [AreaFilter "Central: Ukiyo" "Ukiyo"]
             [ClassOffer (SlotSpec "2026-11-18" "19:00" "21:00" "Ukiyo" 8 2 "Mochi with tea")
-              [ClassTicketOption "price_single" (price Money.GBP 80) 1, ClassTicketOption "price_double" (price Money.GBP 150) 2]]
+              [ClassTicketOption "price_single" (price Money.GBP 80) 1, ClassTicketOption "price_double" (price Money.GBP 150) 2] Nothing
+            , ClassOffer (SlotSpec "2026-12-03" "18:30" "20:30" "JUJUHOME" 8 0 "Mochi and Matcha") [ClassTicketOption "price_single" (price Money.GBP 80) 1] (Just CompassNorthEast)]
         , BRuleLine
         ]
       ok b = blockFromJSON (blockToJSON b) == Right b
@@ -660,17 +664,18 @@ upcomingTests = do
   section "dated checkout presentation"
   let s = SlotSpec "2026-11-18" "19:00" "21:00" "Ukiyo, London" 8 2 "Mochi with [tea](https://example.test)"
       opts = [ClassTicketOption "price_double" (price Money.GBP 150) 2, ClassTicketOption "price_single" (price Money.GBP 80) 1]
-      offer = ClassOffer s opts
+      offer = ClassOffer s opts Nothing
       spec = UpcomingClasses (Just "Choose your evening") (Just "Make something beautiful.") ["price_single", "price_double"] [] [offer]
       filters = [AreaFilter "Central: Ukiyo" "Ukiyo, London", AreaFilter "East: JUJUHOME" "JUJUHOME, Hackney Wick"]
       specF = UpcomingClasses Nothing Nothing ["price_single"] filters [offer]
       east = s {slotDate = "2026-12-03", slotStart = "18:30", slotArea = "JUJUHOME, Hackney Wick"}
       block = BUpcomingClasses "classes" (Just "Choose your evening") Nothing [] [offer]
-      twoVenues = renderHtml (runHtmlBlock (buildBlock (BUpcomingClasses "v" Nothing Nothing filters [offer, ClassOffer east opts])))
+      twoVenues = renderHtml (runHtmlBlock (buildBlock (BUpcomingClasses "v" Nothing Nothing filters [offer, ClassOffer east opts (Just CompassEast)])))
       oneVenue = renderHtml (runHtmlBlock (buildBlock (BUpcomingClasses "w" Nothing Nothing filters [offer, offer])))
       html = renderHtml (runHtmlBlock (buildBlock block))
-      lastPlace = renderHtml (runHtmlBlock (buildBlock (BUpcomingClasses "last" Nothing Nothing [] [ClassOffer (s {slotTaken = 7}) opts])))
-      unsafe = renderHtml (runHtmlBlock (buildBlock (BUpcomingClasses "safe" (Just "<script>alert(1)</script>") Nothing [] [ClassOffer (s {slotDescription = "[click](javascript:alert)"}) opts])))
+      lastPlace = renderHtml (runHtmlBlock (buildBlock (BUpcomingClasses "last" Nothing Nothing [] [ClassOffer (s {slotTaken = 7}) opts Nothing])))
+      central = renderHtml (runHtmlBlock (buildBlock (BUpcomingClasses "c" Nothing Nothing [] [ClassOffer s opts (Just CompassCentral)])))
+      unsafe = renderHtml (runHtmlBlock (buildBlock (BUpcomingClasses "safe" (Just "<script>alert(1)</script>") Nothing [] [ClassOffer (s {slotDescription = "[click](javascript:alert)"}) opts Nothing])))
   sequence
     [ check "booking form binds a date and explicit Stripe price" (all (`T.isInfixOf` html) ["action=\"/book\"", "name=\"slot\" value=\"2026-11-18-1900\"", "name=\"price\" value=\"price_single\""])
     , check "default is one person regardless of catalogue order" ("value=\"price_single\" data-amount=\"8000\" data-currency=\"gbp\" data-price-label=\"£80\" checked=\"checked\"" `T.isInfixOf` html)
@@ -683,6 +688,11 @@ upcomingTests = do
     , check "the date strip is compact DD / MM squares below the cards" ("18 / 11</button>" `T.isInfixOf` html && T.breakOn "sww-class-dates" html > T.breakOn "sww-class-cards" html)
     , check "cards carry their venue filter; chips follow the strip" (all (`T.isInfixOf` twoVenues) ["data-class-filter=\"0\"", "data-class-filter=\"1\"", "data-class-filter-chip=\"1\"", "East: JUJUHOME</button>"])
     , check "a square's accessible name starts with its visible DD / MM and names the time" ("aria-label=\"18 / 11, Wednesday 18 November 2026, 19:00\"" `T.isInfixOf` html)
+    , check "every compass point has one distinct name that reads back" (let cs = [minBound .. maxBound] :: [Compass] in length cs == 9 && all (\c -> compassFromName (compassName c) == Just c) cs && length (nub (map compassName cs)) == 9)
+    , check "a card's compass sits in its head after the time, labelled for everyone" (all (`T.isInfixOf` twoVenues) ["sww-class-head sww-class-head-compass", "rotate(90 16 16)", "<span class=\"sww-sr\">Location: </span>east</span>"] && (let afterTime = snd (T.breakOn "Thursday, 18:30" twoVenues); at m = T.length (fst (T.breakOn m afterTime)) in "sww-class-compass\"" `T.isInfixOf` afterTime && at "sww-class-compass\"" < at "sww-class-description"))
+    , check "the centre is a bullseye, not a needle" ("sww-compass-halo" `T.isInfixOf` central && not ("rotate(" `T.isInfixOf` central) && "Location: </span>central" `T.isInfixOf` central)
+    , check "compass shapes are closed explicitly for the HTML parser" ("<path class=\"sww-compass-tip\" d=\"M16 5l3.1 11h-6.2z\"></path>" `T.isInfixOf` twoVenues && "r=\"14.5\"></circle>" `T.isInfixOf` twoVenues)
+    , check "a card without a venue compass draws none" (not ("sww-class-compass" `T.isInfixOf` html) && "class=\"sww-class-head\"" `T.isInfixOf` html)
     , check "no chips when only one venue has classes" (not ("sww-class-filters" `T.isInfixOf` oneVenue) && not ("sww-class-filters" `T.isInfixOf` html))
     , check "area filters round-trip in content" (sectionSpecFromJSON (sectionSpecToJSON specF) == Right (UpcomingClasses Nothing Nothing ["price_single"] filters []))
     , check "no area filters persist no areaFilters key" (not ("areaFilters" `T.isInfixOf` T.pack (encode (sectionSpecToJSON spec))))

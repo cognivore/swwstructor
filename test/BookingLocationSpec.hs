@@ -22,7 +22,7 @@ main = do
   removeFile path
   store <- newBookingStore path
   let area = "Ukiyo, Covent Garden"
-      venue = Venue "ukiyo" "UKIYO" "8 Slingsby Place, London WC2E 9AB" area "" "" True
+      venue = Venue "ukiyo" "UKIYO" "8 Slingsby Place, London WC2E 9AB" area "" "" True Nothing
       slot = SlotSpec "2027-01-13" "19:30" "21:30" area 8 0 "Mochi class"
       ticket = Ticket "ABCD-2345" "Group Single" "pi_fixture" "2026-10-29T12:00:00Z" "1" Nothing []
       ctx = BookingCtx manager store True (pure Nothing) (pure Nothing) [] "Okashi School" "https://okashi-school.com" "Europe/London" "+00:00" (pure [slot]) (pure [venue]) "kitchen"

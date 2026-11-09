@@ -71,7 +71,7 @@ exercise dir = do
   lessons <- newBookingStore (dir </> "bookings.json")
   payments <- newPaymentCodeStore paymentFile
   venues <- newVenueStore (dir </> "venues.json")
-  upsertVenue venues (Venue "ukiyo" "UKIYO" "8 Slingsby Place, London WC2E 9AB" "Ukiyo, Covent Garden" "" "" True)
+  upsertVenue venues (Venue "ukiyo" "UKIYO" "8 Slingsby Place, London WC2E 9AB" "Ukiyo, Covent Garden" "" "" True Nothing)
   manager <- newManager defaultManagerSettings
   session <- newIORef 1
   spent <- newIORef M.empty

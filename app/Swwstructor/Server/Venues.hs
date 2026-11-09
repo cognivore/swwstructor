@@ -33,6 +33,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import StickyWM (JSON (JArr, JBool, JObj, JStr), decode, encode, jstr, (.:), (.:?))
+import Swwstructor.Block (Compass, compassFromName, compassName)
 import System.Directory (doesFileExist, renameFile)
 import System.IO (hPutStrLn, stderr)
 
@@ -48,6 +49,8 @@ data Venue = Venue
   , vnNotes :: !Text
   , vnActive :: !Bool
   -- ^ only active venues are considered for address announcements
+  , vnCompass :: !(Maybe Compass)
+  -- ^ where it sits in town, shown on class cards (optional)
   }
   deriving (Eq, Show)
 
@@ -149,14 +152,16 @@ venuesToJSON vs =
     [ ( "venues"
       , JArr
           [ JObj
-              [ ("id", JStr (T.unpack (vnId v)))
-              , ("name", JStr (T.unpack (vnName v)))
-              , ("address", JStr (T.unpack (vnAddress v)))
-              , ("area", JStr (T.unpack (vnArea v)))
-              , ("mapUrl", JStr (T.unpack (vnMapUrl v)))
-              , ("notes", JStr (T.unpack (vnNotes v)))
-              , ("active", JBool (vnActive v))
-              ]
+              ( [ ("id", JStr (T.unpack (vnId v)))
+                , ("name", JStr (T.unpack (vnName v)))
+                , ("address", JStr (T.unpack (vnAddress v)))
+                , ("area", JStr (T.unpack (vnArea v)))
+                , ("mapUrl", JStr (T.unpack (vnMapUrl v)))
+                , ("notes", JStr (T.unpack (vnNotes v)))
+                , ("active", JBool (vnActive v))
+                ]
+                <> [("compass", JStr (T.unpack (compassName c))) | Just c <- [vnCompass v]]
+              )
           | v <- vs
           ]
       )
@@ -180,7 +185,12 @@ venuesFromJSON v = do
           active = case vv .:? "active" of
             Just (JBool b) -> b
             _ -> True
-      pure (Venue vid name addr area mapU notes active)
+          -- An unreadable compass point is dropped, never fatal: a venue
+          -- book that fails to parse starts empty and loses every address.
+          compass = case vv .:? "compass" of
+            Just (JStr s) -> compassFromName (T.pack s)
+            _ -> Nothing
+      pure (Venue vid name addr area mapU notes active compass)
     txt o k = T.pack <$> (jstr =<< o .: k)
     opt o k = case o .:? k of
       Just (JStr s) -> T.pack s
