@@ -22,12 +22,12 @@ import Network.Wai (defaultRequest, requestHeaders, requestMethod)
 import Network.Wai.Test (SRequest (..), runSession, setPath, simpleBody, simpleHeaders, simpleStatus, srequest)
 import StickyWM (JSON (..), decode, encode, (.:?))
 import Swwstructor.Checkout (CheckoutError (..), Url (..))
-import Swwstructor.Content (Availability (..), PageSpec (..), SectionSpec (..), SiteSpec (..), SlotSpec (..), slotIdOf)
+import Swwstructor.Content (AreaFilter (..), Availability (..), PageSpec (..), SectionSpec (..), SiteSpec (..), SlotSpec (..), slotIdOf)
 import Swwstructor.Money (Currency (GBP), price)
 import Swwstructor.Plugins.StripeCatalog (CatalogItem (..), parsePriceCatalogJSON)
 import Swwstructor.Server.App (AppEnv (..), Stage (Test), swwApp)
 import Swwstructor.Server.Booking
-import Swwstructor.Server.Catalog (newCatalogCache)
+import Swwstructor.Server.Catalog (primedCatalogCache)
 import Swwstructor.Server.DirectStripe
 import qualified Swwstructor.Server.Invitation as Inv
 import Swwstructor.Server.InvitationArtwork (newArtworkRenderer)
@@ -61,7 +61,7 @@ exercise dir = do
       paused = single {ciPriceId = "price_paused", ciAvailability = NotOffered}
       prices = ["price_single", "price_double", "price_paused"]
       siteData = SiteSpec "Okashi School" "Fixture" Nothing nytTheme [] Nothing
-        [ PageSpec "/classes" "Classes" [UpcomingClasses (Just "Book a class") Nothing prices [] [], ScheduleClass Nothing Nothing 0 slots]
+        [ PageSpec "/classes" "Classes" [UpcomingClasses (Just "Book a class") Nothing prices [AreaFilter "Central: Ukiyo" "Ukiyo, Covent Garden"] [], ScheduleClass Nothing Nothing 0 slots]
         , PageSpec "/gifts" "Gifts" [ScheduleClass Nothing Nothing 0 slots]
         ] []
       webhookSecret = "fixture-webhook-secret"
@@ -77,7 +77,8 @@ exercise dir = do
   manager <- newManager defaultManagerSettings
   adminSession <- newIORef 1
   spent <- newIORef M.empty
-  catalog <- newCatalogCache
+  -- the page renders its class cards from this catalogue
+  catalog <- primedCatalogCache [single, double, paused]
   items <- newIORef (Right [single, double, paused])
   sessions <- newIORef M.empty
   creates <- newIORef ([] :: [[(T.Text, T.Text)]])
@@ -174,6 +175,11 @@ exercise dir = do
            lookup "payment_intent_data[metadata][sww_price_id]" parameters == Just (ciPriceId item) &&
            lookup "metadata[sww_product]" parameters == Just (ciName item) &&
            lookup "metadata[sww_seats]" parameters == Just (ciSeats item))
+  classesPage <- get "/classes"
+  -- The owner authors the filter as the class area; the cards show the venue
+  -- book's full address. The server must resolve both the same way.
+  check "an authored venue filter matches its cards through the venue book"
+    ("data-class-filter=\"0\"" `T.isInfixOf` textOf classesPage && "8 Slingsby Place" `T.isInfixOf` textOf classesPage)
   noCookie <- book "" first single
   check "direct POST without a signed browser attempt is rejected" (status noCookie == 400)
   forged <- book "sww_booking=AAAA-2222:1:forged" first single

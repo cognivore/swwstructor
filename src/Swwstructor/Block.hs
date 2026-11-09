@@ -527,7 +527,7 @@ instance BlockSym HtmlBlock where
           )
           else
             elAttr "div" [("class", "sww-class-cards")] (htmlConcat (zipWith offerCard [0 :: Int ..] offers))
-              <> elAttr "div" [("class", "sww-class-dates"), ("role", "group"), ("aria-label", "All class dates")] (htmlConcat (zipWith dateTab [0 :: Int ..] offers))
+              <> elAttr "div" [("class", "sww-class-dates"), ("role", "radiogroup"), ("aria-label", "Class dates")] (htmlConcat (zipWith dateTab [0 :: Int ..] offers))
               <> (if length chips < 2 then mempty
                     else elAttr "div" [("class", "sww-class-filters"), ("role", "group"), ("aria-label", "Filter classes by venue")] (htmlConcat chips))
               <> elAttr "p" [("class", "sww-upcoming-links")] (
@@ -540,7 +540,10 @@ instance BlockSym HtmlBlock where
       dateLabel s = let (_, day, monthYear) = slotCardDate (slotDate s)
                     in day <> " " <> T.takeWhile (/= ' ') monthYear
       -- @YYYY-MM-DD@ -> @DD / MM@: the compact strip label
-      dayMonth d = T.take 2 (T.drop 8 d) <> " / " <> T.take 2 (T.drop 5 d)
+      dayMonth d = case isoParts d of
+        Just (_, m, dd) -> two dd <> " / " <> two m
+        Nothing -> d
+      two n = T.justifyRight 2 '0' (T.pack (show n))
       -- the first owner filter whose (resolved) area is this slot's area
       filterOf s = lookup (slotArea s) (zip (map afArea filters) [0 :: Int ..])
       chips =
@@ -552,13 +555,20 @@ instance BlockSym HtmlBlock where
         | (n, f) <- zip [0 :: Int ..] filters
         , any (\o -> filterOf (coSlot o) == Just n) offers
         ]
-      dateTab n offer = elAttr "button"
-        [("type", "button"), ("class", "sww-class-date"),
-         ("id", cardId n <> "-tab"), ("aria-controls", cardId n),
-         ("aria-label", "Show classes around " <> dateLabel (coSlot offer)),
-         ("aria-pressed", if n == 0 then "true" else "false"),
-         ("tabindex", if n == 0 then "0" else "-1"), ("data-class-index", T.pack (show n))]
-        (esc (dayMonth (slotDate (coSlot offer))))
+      -- The accessible name starts with the visible DD / MM (label in name)
+      -- and adds the weekday, full date and time, so two classes on one day
+      -- stay distinguishable.
+      dateTab n offer =
+        let s = coSlot offer
+            (dow, day, monthYear) = slotCardDate (slotDate s)
+            full = dow <> " " <> day <> " " <> monthYear <> ", " <> slotStart s
+         in elAttr "button"
+              [("type", "button"), ("role", "radio"), ("class", "sww-class-date"),
+               ("id", cardId n <> "-tab"), ("aria-controls", cardId n),
+               ("aria-label", dayMonth (slotDate s) <> ", " <> full), ("title", full),
+               ("aria-checked", if n == 0 then "true" else "false"),
+               ("tabindex", if n == 0 then "0" else "-1"), ("data-class-index", T.pack (show n))]
+              (esc (dayMonth (slotDate s)))
       offerCard n offer =
         let s = coSlot offer
             options = sortOn ctoSeats (filter (\o -> ctoSeats o > 0 && ctoSeats o <= slotsLeft s) (coOptions offer))

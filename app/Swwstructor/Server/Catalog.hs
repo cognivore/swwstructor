@@ -9,6 +9,7 @@
 module Swwstructor.Server.Catalog
   ( CatalogCache
   , newCatalogCache
+  , primedCatalogCache
   , getCatalog
   , fetchCatalog
   ) where
@@ -44,6 +45,13 @@ newtype CatalogCache = CatalogCache (IORef (Maybe (UTCTime, [CatalogItem])))
 
 newCatalogCache :: IO CatalogCache
 newCatalogCache = CatalogCache <$> newIORef Nothing
+
+-- | A cache that starts out holding a known, freshly fetched catalogue (it
+-- refreshes from Stripe like any other once the TTL lapses).
+primedCatalogCache :: [CatalogItem] -> IO CatalogCache
+primedCatalogCache items = do
+  now <- getCurrentTime
+  CatalogCache <$> newIORef (Just (now, items))
 
 ttl :: NominalDiffTime
 ttl = 300 -- seconds; the dashboard is the source of truth, five minutes is plenty

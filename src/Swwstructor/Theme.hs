@@ -304,11 +304,14 @@ themeCss th =
         -- Enhanced (scripted) view: three cards around the visitor's anchor,
         -- a thin strip of DD / MM squares beneath, then the venue chips.
         , ".sww-upcoming-enhanced .sww-class-card:not(.sww-class-inwin){display:none;}"
+        -- a filtered view of one or two classes stays centred, not left-packed
+        , ".sww-upcoming-enhanced .sww-class-cards{display:flex;justify-content:center;}"
+        , ".sww-upcoming-enhanced .sww-class-card{flex:0 1 calc((100% - 32px) / 3);}"
         , ".sww-upcoming-enhanced .sww-class-dates{display:flex;flex-wrap:wrap;justify-content:center;gap:4px;margin:12px 0 0;}"
         , ".sww-class-date{appearance:none;flex:none;width:46px;height:46px;padding:0;font:600 11px/1 var(--sww-body);font-variant-numeric:tabular-nums;white-space:nowrap;color:var(--sww-fg);border:1px solid var(--sww-border);border-radius:0;background:transparent;cursor:pointer;}"
         , ".sww-class-date[hidden]{display:none;}"
         , ".sww-class-date.sww-class-date-inwin{border-color:var(--sww-accent);color:var(--sww-accent);}"
-        , ".sww-class-date[aria-pressed=true]{color:var(--sww-bg);background:var(--sww-accent);border-color:var(--sww-accent);}"
+        , ".sww-class-date[aria-checked=true]{color:var(--sww-bg);background:var(--sww-accent);border-color:var(--sww-accent);}"
         , ".sww-upcoming-enhanced .sww-class-filters{display:flex;flex-wrap:wrap;justify-content:center;gap:6px;margin:10px 0 0;}"
         , ".sww-class-filter{appearance:none;font:600 12px/1.2 var(--sww-body);color:var(--sww-fg);border:1px solid var(--sww-border);border-radius:999px;background:transparent;min-height:32px;padding:6px 14px;cursor:pointer;}"
         , ".sww-class-filter[aria-pressed=true]{color:var(--sww-bg);background:var(--sww-accent);border-color:var(--sww-accent);}"
@@ -333,10 +336,11 @@ themeCss th =
         , "@container (max-width:700px){"
         , ".sww-class-cards{grid-template-columns:1fr;gap:12px;}"
         , ".sww-upcoming-enhanced .sww-class-card:not(.sww-class-current){display:none;}"
+        , ".sww-upcoming-enhanced .sww-class-card{flex-basis:100%;}"
         , ".sww-upcoming-enhanced .sww-class-dates{margin-top:10px;}"
         , ".sww-class-date{width:44px;height:44px;}"
         -- one card at a time here: only the anchor square is marked
-        , ".sww-class-date.sww-class-date-inwin:not([aria-pressed=true]){border-color:var(--sww-border);color:var(--sww-fg);}"
+        , ".sww-class-date.sww-class-date-inwin:not([aria-checked=true]){border-color:var(--sww-border);color:var(--sww-fg);}"
         , ".sww-class-card{padding:13px 15px 11px;}"
         , ".sww-class-when{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin:0 0 9px;}"
         , ".sww-class-when h2{font-size:21px;margin:0;}"
